@@ -43,7 +43,7 @@ Without session intelligence:
 ## Install
 
 ```bash
-git clone https://github.com/user/claude-session-intelligence.git
+git clone https://github.com/dayakarreddyn/claude-session-intelligence.git
 cd claude-session-intelligence
 chmod +x install.sh
 ./install.sh
