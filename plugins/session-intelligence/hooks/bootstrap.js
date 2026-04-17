@@ -55,6 +55,11 @@ const SESSION_CTX_TEMPLATE = path.join(PLUGIN_ROOT, 'templates', 'session-contex
 const CLAUDE_MD_RULES_TEMPLATE = path.join(PLUGIN_ROOT, 'templates', 'claude-md-rules.md');
 const CLAUDE_MD_MARKER_START = '<!-- BEGIN session-intelligence:rules -->';
 const CLAUDE_MD_MARKER_END = '<!-- END session-intelligence:rules -->';
+const AUTOFILL_SENTINEL_RE = /<!--\s*si:autofill\s+sha=([0-9a-f]{4,40})\s*-->/;
+// Legacy shape written by bootstrap before the sentinel existed. Matching the
+// description line lets us detect a pre-sentinel auto-fill and refresh it once
+// instead of treating it as hand-written user content forever.
+const LEGACY_AUTOFILL_RE = /^description:\s*derived from last commit on\s+`[^`]+`\s*$/m;
 
 // ─── State helpers ───────────────────────────────────────────────────────────
 
@@ -230,6 +235,19 @@ function isPlaceholderSection(body) {
   );
 }
 
+// Classify a section body so we know whether bootstrap may overwrite it:
+//   placeholder   — template-shipped `(hint)` lines, always safe to fill
+//   autofilled    — already managed by us; refresh when HEAD SHA differs
+//   legacy        — pre-sentinel auto-fill shape; refresh once to adopt sentinel
+//   user          — hand-written content, never touch
+function classifySection(body, { legacyRefresh = false } = {}) {
+  if (isPlaceholderSection(body)) return { mode: 'placeholder' };
+  const m = body.match(AUTOFILL_SENTINEL_RE);
+  if (m) return { mode: 'autofilled', sha: m[1] };
+  if (legacyRefresh && LEGACY_AUTOFILL_RE.test(body)) return { mode: 'legacy' };
+  return { mode: 'user' };
+}
+
 function runGit(cwd, args) {
   try {
     const { execFileSync } = require('child_process');
@@ -334,28 +352,43 @@ function autoFillSessionContext(cwd, state) {
 
   const taskMatch = content.match(/##\s+Current Task\s*\n([\s\S]*?)(?=\n##\s|$)/);
   if (!taskMatch) return false;
-  if (!isPlaceholderSection(taskMatch[1])) return false; // user content — leave it
+  const taskClass = classifySection(taskMatch[1], { legacyRefresh: true });
+  if (taskClass.mode === 'user') return false; // hand-written — never overwrite
+
+  const headSha = runGit(cwd, ['rev-parse', 'HEAD']);
+  if (!headSha) return false;
+  const shortSha = headSha.slice(0, 7);
+
+  // Already up-to-date for this commit — no-op (also keeps SessionStart quiet).
+  if (taskClass.mode === 'autofilled' && taskClass.sha === shortSha) return false;
 
   const data = buildAutoFilledTask(cwd);
   if (!data) return false; // no commits yet — leave placeholders
 
-  // Skip if we already auto-filled for this exact commit (avoids rewriting the
-  // same content every session start).
-  const headSha = runGit(cwd, ['rev-parse', 'HEAD']);
-  const lastAutoFill = state.autoFilled && state.autoFilled[encoded];
-  if (lastAutoFill && lastAutoFill.sha === headSha) return false;
-
   const taskBody =
+    `<!-- si:autofill sha=${shortSha} -->\n` +
     `type: ${data.type} \u2014 ${data.subject}\n` +
     `description: derived from last commit on \`${data.branch || 'HEAD'}\`\n` +
     `issue: ${data.issue}\n`;
   let next = replaceSection(content, 'Current Task', taskBody);
 
-  // Also seed Key Files if still placeholder-only.
+  // Refresh Key Files in lockstep if it's still placeholder, already carries
+  // our sentinel, or we're upgrading a legacy pre-sentinel auto-fill. Leave
+  // genuine user-curated lists alone.
   const keyMatch = next.match(/##\s+Key Files\s*\n([\s\S]*?)(?=\n##\s|$)/);
-  if (keyMatch && isPlaceholderSection(keyMatch[1]) && data.files.length) {
-    const keyBody = data.files.slice(0, 10).map((f) => `- ${f}`).join('\n') + '\n';
-    next = replaceSection(next, 'Key Files', keyBody);
+  if (keyMatch && data.files.length) {
+    const keyBody = keyMatch[1];
+    const keyClass = classifySection(keyBody);
+    const shouldRefresh =
+      keyClass.mode === 'placeholder' ||
+      keyClass.mode === 'autofilled' ||
+      taskClass.mode === 'legacy';
+    if (shouldRefresh) {
+      const body =
+        `<!-- si:autofill sha=${shortSha} -->\n` +
+        data.files.slice(0, 10).map((f) => `- ${f}`).join('\n') + '\n';
+      next = replaceSection(next, 'Key Files', body);
+    }
   }
 
   if (next === content) return false;
@@ -363,7 +396,7 @@ function autoFillSessionContext(cwd, state) {
     fs.writeFileSync(target, next, 'utf8');
     state.autoFilled = state.autoFilled || {};
     state.autoFilled[encoded] = { sha: headSha, at: new Date().toISOString() };
-    notify(`auto-filled session-context.md from HEAD (${headSha.slice(0, 7)} — ${data.type})`);
+    notify(`auto-filled session-context.md from HEAD (${shortSha} — ${data.type})`);
     return true;
   } catch { return false; }
 }
