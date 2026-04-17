@@ -1,5 +1,5 @@
 ## Current Task
-type: (bug-fix | feature | test | deploy | refactor | research)
+type: (feature | bug-fix | refactor | docs | test | chore | perf | ci | deploy | research)
 description: (what you're working on)
 issue: (issue number or "none")
 

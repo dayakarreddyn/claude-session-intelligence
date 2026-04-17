@@ -14,13 +14,26 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Preset shapes for `statusline.preset`. Using a preset is a shortcut that
+// sets `fields` without losing the ability to override individual fields —
+// if the user sets `statusline.fields` explicitly the preset is ignored.
+const STATUSLINE_PRESETS = {
+  minimal:  ['emoji', 'tokens'],
+  standard: ['emoji', 'model', 'project', 'tokens', 'newline', 'task'],
+  verbose:  [
+    'emoji', 'model', 'project', 'branch', 'diffstat', 'tokens',
+    'newline',
+    'emoji2', 'tools', 'session', 'cost', 'task',
+  ],
+};
+
 const DEFAULTS = {
   statusline: {
-    fields: [
-      'emoji', 'model', 'project', 'branch', 'diffstat', 'tokens',
-      'newline',
-      'emoji2', 'tools', 'session', 'cost', 'task',
-    ],
+    // `verbose` is the historical default; empty preset means "follow `fields`
+    // exactly as written below." Users can set preset: "minimal" to collapse
+    // the line without hand-maintaining the array.
+    preset: 'verbose',
+    fields: STATUSLINE_PRESETS.verbose.slice(),
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
     maxTaskLength: 60,
@@ -112,6 +125,11 @@ function applyEnvOverrides(cfg) {
   if (env.CLAUDE_STATUSLINE_COMPACT === '1') {
     cfg.statusline.fields = cfg.statusline.fields.filter((f) => f !== 'task');
   }
+  // Session-level preset override — wins over config + compact. Useful for
+  // temporarily dialing a busy statusline down without editing the file.
+  if (env.CLAUDE_STATUSLINE_PRESET && STATUSLINE_PRESETS[env.CLAUDE_STATUSLINE_PRESET]) {
+    cfg.statusline.fields = STATUSLINE_PRESETS[env.CLAUDE_STATUSLINE_PRESET].slice();
+  }
 
   if (env.COMPACT_THRESHOLD) {
     const n = parseInt(env.COMPACT_THRESHOLD, 10);
@@ -153,6 +171,16 @@ function loadConfig() {
     cfg = deepMerge(cfg, unified);
   }
 
+  // Apply statusline preset unless the user set `fields` explicitly. A preset
+  // is a shorthand — explicit `fields` always wins. This runs after merge so
+  // an empty-default-values user file can still opt into a preset without
+  // maintaining the full fields array by hand.
+  const userSetFields = !!(unified && unified.statusline && Array.isArray(unified.statusline.fields));
+  const preset = cfg.statusline && cfg.statusline.preset;
+  if (!userSetFields && preset && STATUSLINE_PRESETS[preset]) {
+    cfg.statusline.fields = STATUSLINE_PRESETS[preset].slice();
+  }
+
   return applyEnvOverrides(cfg);
 }
 
@@ -189,6 +217,7 @@ function set(cfg, dottedKey, value) {
 
 module.exports = {
   DEFAULTS,
+  STATUSLINE_PRESETS,
   configPath,
   loadConfig,
   saveConfig,

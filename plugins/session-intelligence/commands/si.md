@@ -9,6 +9,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 ## Usage
 
 ```
+/si help                                  # list subcommands + one-line descriptions
 /si show                                  # print current config (pretty JSON)
 /si status                                # runtime state: hooks, statusline, session counters
 /si get <key>                             # print a single key (dotted path)
@@ -43,6 +44,8 @@ Examples:
    - `~/.claude/scripts/hooks/session-intelligence/lib/config.js` (legacy install)
 
 ### Step 2 — Dispatch on subcommand
+
+**`help`** (also `--help`, `-h`, or no args) — Print the one-line usage block above verbatim, followed by a short "Examples" block with 2–3 common commands. No diff, no config read, no side effects. This is the discovery path — do not link to the README or external docs, just show the available subcommands.
 
 **`show`** — Read the config file and print it. If the file doesn't exist, say so explicitly and show the effective defaults instead.
 

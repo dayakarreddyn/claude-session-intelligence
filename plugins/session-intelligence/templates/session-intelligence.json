@@ -1,5 +1,7 @@
 {
   "statusline": {
+    "_preset_options": "minimal | standard | verbose — sets fields unless you override them below",
+    "preset": "verbose",
     "fields": [
       "emoji", "model", "project", "branch", "issue", "diffstat", "tokens",
       "newline",
