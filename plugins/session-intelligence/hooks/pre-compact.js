@@ -52,6 +52,15 @@ const {
   resolveProjectDir,
 } = utils;
 
+// Context shape — observed tool-call history. Optional: falls back silently
+// when the module isn't on disk (e.g. fresh install that hasn't been synced).
+let ctxShape = null;
+try { ctxShape = require('../lib/context-shape'); }
+catch {
+  try { ctxShape = require('./session-intelligence/lib/context-shape'); }
+  catch { try { ctxShape = require(path.join(__dirname, '..', 'lib', 'context-shape')); } catch { /* not available */ } }
+}
+
 // Lines that are still template placeholders: either a "key: (…)" pair
 // with only parenthesised hint text, or a bullet that is just parens.
 // An unfilled session-context.md is worse than no guidance because Claude
@@ -151,6 +160,32 @@ async function main() {
   const cwd = stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir) || process.cwd();
   const projectDir = resolveProjectDir(cwd);
 
+  // Shape hints pulled from the live tool-usage history for THIS session id
+  // (same session id every other hook uses). Generated fresh at compact-time
+  // so we never feed the model stale hot/cold bands.
+  const rawSid = stdinInput.session_id || stdinInput.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
+  const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  let shapeInjection = '';
+  if (ctxShape) {
+    try {
+      const entries = ctxShape.readShape(sessionId);
+      const analysis = ctxShape.analyzeShape(entries);
+      if (analysis) {
+        shapeInjection = ctxShape.formatCompactInjection(analysis);
+      }
+      intelLog('pre-compact', 'info', 'shape analysis', {
+        entries: entries.length,
+        hasAnalysis: !!analysis,
+        shift: analysis && !!analysis.shift,
+        hot: analysis ? analysis.hot.length : 0,
+        cold: analysis ? analysis.cold.length : 0,
+        staleTokens: analysis ? analysis.staleTokens : 0,
+      });
+    } catch (err) {
+      intelLog('pre-compact', 'warn', 'shape analysis failed', { err: err && err.message });
+    }
+  }
+
   if (projectDir) {
     const contextFile = path.join(projectDir, 'session-context.md');
     const content = readFile(contextFile);
@@ -179,6 +214,15 @@ async function main() {
   } else {
     log('[PreCompact] No project directory found \u2014 compacting without hints');
     intelLog('pre-compact', 'warn', 'no project directory resolved', { cwd });
+  }
+
+  // Shape-derived hints get appended AFTER the session-context.md block so
+  // both guidance channels reach the model — user-authored first (stronger
+  // signal, manual curation), observed-shape second (grounded in what
+  // actually happened).
+  if (shapeInjection) {
+    process.stdout.write(shapeInjection);
+    log('[PreCompact] Injected observed context-shape hints');
   }
 
   process.exit(0);

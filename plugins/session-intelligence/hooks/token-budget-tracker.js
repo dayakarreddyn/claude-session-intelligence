@@ -23,6 +23,7 @@ const {
   log
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
+const { rootDirOf, appendShape } = require('../lib/context-shape');
 
 const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;
@@ -99,6 +100,38 @@ async function main() {
     }
   } catch {
     // Silently fail — this is supplementary tracking
+  }
+
+  // Shape tracking — observe which directories / phase events this tool call
+  // touched, so suggest-compact and pre-compact can generate grounded
+  // preserve/drop hints instead of generic "consider /compact". Observation
+  // only — decisions happen elsewhere. Never fails the hook.
+  try {
+    const toolName = (parsedInput && parsedInput.tool_name) || '';
+    const toolInput = (parsedInput && parsedInput.tool_input) || {};
+    const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
+    const root = rootDirOf(filePath);
+    const cmd = toolInput.command || '';
+    let event = null;
+    if (toolName === 'Bash' && typeof cmd === 'string') {
+      if (/^\s*git\s+commit\b/.test(cmd))                        event = 'commit';
+      else if (/^\s*git\s+push\b/.test(cmd))                     event = 'push';
+      else if (/^\s*gh\s+pr\s+(create|merge)\b/.test(cmd))       event = 'pr';
+    }
+    // Only append entries that carry a signal — a pure Bash echo with no file
+    // and no event adds noise without informing the analyzer.
+    if (root || event) {
+      appendShape(sessionId, {
+        t: Date.now(),
+        tok: cumulative,
+        tool: toolName || null,
+        root: root || null,
+        file: filePath ? String(filePath) : null,
+        event,
+      });
+    }
+  } catch (err) {
+    intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });
   }
 
   // Log at zone boundaries (only when crossing, not every call)

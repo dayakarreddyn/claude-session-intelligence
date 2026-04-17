@@ -39,6 +39,7 @@ const {
   readTranscriptTokens,
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
+const { readShape, analyzeShape, draftMessage } = require('../lib/context-shape');
 
 // Load unified config; env overrides already baked in by loadConfig().
 function loadSiConfig() {
@@ -148,14 +149,26 @@ async function main() {
       // very next tool call inside the same zone.
       try { writeFile(stateFile, zone); } catch { /* best effort */ }
 
+      // Grounded diagnosis — what's actually in the context right now?
+      // token-budget-tracker has been writing observation entries per tool
+      // call. analyzeShape returns null when there isn't enough signal to
+      // bother (short sessions, no file paths), which we handle below.
+      const shape = analyzeShape(readShape(sessionId));
+      const diagnosis = draftMessage(shape);
+
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
-      const msg =
-        `[StrategicCompact] ${header}. ` +
-        `Context at ~${formatTokens(tokenBudget)} tokens. ` +
-        `Consider \`/compact\` now (add "preserve current task context" if mid-task). ` +
-        `Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.`;
-      process.stderr.write(`${msg}\n`);
-      intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, { tokenBudget, count, lastZone });
+      const lines = [
+        `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens.`,
+      ];
+      if (diagnosis) lines.push(`Observed: ${diagnosis}.`);
+      lines.push(
+        `Run \`/compact\` — preserve/drop hints will be auto-injected from observed tool usage. ` +
+        `Free-text hint after /compact still works.`
+      );
+      lines.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
+      process.stderr.write(`${lines.join(' ')}\n`);
+      intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`,
+        { tokenBudget, count, lastZone, shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null });
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
     }
 
