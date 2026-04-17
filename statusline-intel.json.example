@@ -2,7 +2,7 @@
   "fields": [
     "emoji", "model", "project", "branch", "diffstat", "tokens",
     "newline",
-    "tools", "session", "cost", "deploy", "task"
+    "emoji2", "tools", "session", "cost", "deploy", "task"
   ],
   "tokenSource": "auto",
   "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },

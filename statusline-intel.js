@@ -414,6 +414,26 @@ function pickEmoji(ctx, input) {
   return '🟢';
 }
 
+/**
+ * Second-line emoji — reflects activity signals (tools/time/cost/deploy),
+ * not state. Priority order:
+ *   🚀 very recent deploy (<5min)
+ *   💸 cost above threshold (default $3)
+ *   🕐 long session (>2h)
+ *   🔧 heavy tool use (>100 calls)
+ *   📊 default (metrics/stats)
+ */
+function pickEmojiSecond(ctx) {
+  const deploy = readDeployBreadcrumb();
+  if (deploy && deploy.ageMs < 5 * 60 * 1000) return '🚀';
+
+  if (ctx.costUsd && ctx.costUsd >= 3) return '💸';
+  if (ctx.sessionDurationMs && ctx.sessionDurationMs > 2 * 60 * 60 * 1000) return '🕐';
+  if (ctx.tools && ctx.tools > 100) return '🔧';
+
+  return '📊';
+}
+
 // ─── Field renderers ─────────────────────────────────────────────────────────
 // Each renderer returns a string (possibly with ANSI) or '' to skip.
 
@@ -421,6 +441,9 @@ function buildRenderers(C) {
   return {
     /** Intelligent leading emoji — picks based on zone, dirty tree, task intent, deploy. */
     emoji: (input, ctx) => pickEmoji(ctx, input),
+
+    /** Activity-aware emoji for line 2 (tools/time/cost/deploy). */
+    emoji2: (_input, ctx) => pickEmojiSecond(ctx),
 
     model: (input) => {
       const m = input.model?.display_name || input.model?.id || 'claude';
@@ -649,10 +672,11 @@ function main() {
 
     if (rendered.length === 0) return '';
 
-    // Leading emoji sits flush against the next field (single space, no bullet).
+    // Leading emoji (primary OR secondary) sits flush against the next field
+    // with a single space, not a bullet separator.
     let leading = '';
     let rest = rendered;
-    if (rendered[0].name === 'emoji') {
+    if (rendered[0].name === 'emoji' || rendered[0].name === 'emoji2') {
       leading = rendered[0].text + ' ';
       rest = rendered.slice(1);
     }
@@ -661,11 +685,17 @@ function main() {
 
   const lines = groups.map(renderGroup).filter((l) => l.length > 0);
 
-  // If line 1 starts with the intelligent emoji (2-col wide + 1 space = 3 cells),
-  // indent subsequent lines by the same width so columns align visually.
+  // If a line's first field is one of our emoji pseudo-fields, it already
+  // carries its own width. Only lines without a leading emoji need indent
+  // to align under the line-1 emoji column (3 cells for typical 2-col emoji).
   const firstLineHasEmoji = groups.length > 0 && groups[0][0] === 'emoji';
   const indent = firstLineHasEmoji ? '   ' : '';
-  const finalLines = lines.map((l, i) => (i === 0 ? l : indent + l));
+  const finalLines = lines.map((l, i) => {
+    if (i === 0) return l;
+    const firstField = groups[i] && groups[i][0];
+    const leadsWithEmoji = firstField === 'emoji' || firstField === 'emoji2';
+    return leadsWithEmoji ? l : indent + l;
+  });
 
   process.stdout.write(finalLines.length ? finalLines.join('\n') : 'claude');
 }
