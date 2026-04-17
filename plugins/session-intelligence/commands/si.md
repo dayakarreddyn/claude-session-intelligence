@@ -10,6 +10,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 
 ```
 /si show                                  # print current config (pretty JSON)
+/si status                                # runtime state: hooks, statusline, session counters
 /si get <key>                             # print a single key (dotted path)
 /si set <key> <value>                     # stage a change, show diff, wait for YES
 /si reset <key|*>                         # reset a key (or all) to default
@@ -41,6 +42,16 @@ Examples:
 ### Step 2 — Dispatch on subcommand
 
 **`show`** — Read the config file and print it. If the file doesn't exist, say so explicitly and show the effective defaults instead.
+
+**`status`** — Run the read-only runtime report. Resolve the status script path in this order and invoke the first that exists with the current session id piped on stdin:
+
+```
+${CLAUDE_PLUGIN_ROOT}/hooks/status-report.js
+~/.claude/plugins/marketplaces/session-intelligence/plugins/session-intelligence/hooks/status-report.js
+~/.claude/scripts/hooks/status-report.js
+```
+
+Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's stdout verbatim — it's already formatted. Do not attempt to parse or summarise it unless the user asks a follow-up.
 
 **`get <key>`** — Print just the value at the dotted path. Report missing paths clearly.
 

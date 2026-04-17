@@ -189,6 +189,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `zone` | `orange` | Zone name only, colored |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (all tools, not just Edit/Write) |
 | `session` | `3h42m` | Duration since the first transcript timestamp |
+| `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open at once |
 | `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (cached by size+mtime for speed; prices configurable) |
 | `compactAge` | `compact:2h13mago` | Time since last `/compact` event (mtime of the pre-compact log) |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it) |
@@ -320,6 +321,7 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 
 ```text
 /si show                            # print the effective config
+/si status                          # runtime state: hooks, statusline, session counters
 /si get compact.promptTimeout       # read a single dotted key
 /si set compact.autoblock false     # stage + diff + confirm + write
 /si set taskChange.minTokens 150000

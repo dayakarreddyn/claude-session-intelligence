@@ -493,6 +493,18 @@ function buildRenderers(C) {
 
     task: (_input, ctx) => ctx.task ? `${C.dim}${ctx.task}${C.reset}` : '',
 
+    /**
+     * Short session id (first 8 chars of the UUID) — handy when you have
+     * multiple Claude Code windows open and want to tell them apart on
+     * the status line. Hidden when no session id is present.
+     */
+    sessionId: (input, _ctx) => {
+      const sid = input.session_id || input.sessionId || '';
+      if (!sid) return '';
+      const short = String(sid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 8);
+      return short ? `${C.dim}sid:${short}${C.reset}` : '';
+    },
+
     cost: (_input, ctx) => {
       if (!ctx.costUsd) return '';
       return `${C.dim}$${ctx.costUsd.toFixed(2)}${C.reset}`;
