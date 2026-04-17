@@ -43,6 +43,38 @@ function readStdinJson() {
   } catch { return null; }
 }
 
+/**
+ * Read authoritative context-size from the latest assistant-message usage
+ * block in the transcript JSONL. Returns 0 if the file is missing, empty, or
+ * has no usage block yet. Scans only the tail so large transcripts stay fast.
+ * Mirrors the status-line's logic so both surfaces see the same number.
+ */
+function readTranscriptTokens(transcriptPath) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+  try {
+    const stat = fs.statSync(transcriptPath);
+    const SCAN_BYTES = Math.min(stat.size, 512 * 1024);
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const buf = Buffer.alloc(SCAN_BYTES);
+      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const d = JSON.parse(lines[i]);
+          const u = d && d.message && d.message.usage;
+          if (u) {
+            return (u.input_tokens || 0)
+                 + (u.cache_creation_input_tokens || 0)
+                 + (u.cache_read_input_tokens || 0);
+          }
+        } catch { /* partial line on boundary */ }
+      }
+    } finally { fs.closeSync(fd); }
+  } catch { /* silent */ }
+  return 0;
+}
+
 async function main() {
   const cfg = loadSiConfig().compact || {};
   const stdinInput = readStdinJson();
@@ -66,17 +98,31 @@ async function main() {
     if (Number.isFinite(parsed) && parsed > 0) count = parsed;
   } catch { /* no count yet — tracker hasn't run */ }
 
-  // Read token budget (written by token-budget-tracker.js PostToolUse hook)
+  // Token budget — prefer the authoritative count from the transcript's latest
+  // assistant-message usage block (same source the status line reads). Fall
+  // back to the tracker estimate when the transcript isn't available or the
+  // hook runs before any assistant reply. The tracker estimate only counts
+  // tool I/O and misses messages/prompts/thinking, so it can severely
+  // under-report on long sessions.
   let tokenBudget = 0;
-  try {
-    const raw = fs.readFileSync(budgetFile, 'utf8').trim();
-    const parsed = parseInt(raw, 10);
-    if (Number.isFinite(parsed) && parsed > 0) {
-      tokenBudget = parsed;
-    }
-  } catch {
-    // No budget file yet — tracker hasn't run
+  let tokenSource = 'none';
+  const transcriptPath = stdinInput && stdinInput.transcript_path;
+  const transcriptTokens = readTranscriptTokens(transcriptPath);
+  if (transcriptTokens > 0) {
+    tokenBudget = transcriptTokens;
+    tokenSource = 'transcript';
+  } else {
+    try {
+      const raw = fs.readFileSync(budgetFile, 'utf8').trim();
+      const parsed = parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        tokenBudget = parsed;
+        tokenSource = 'estimate';
+      }
+    } catch { /* no budget file yet — tracker hasn't run */ }
   }
+  intelLog('suggest-compact', 'debug', 'token budget resolved',
+    { tokenBudget, tokenSource });
 
   const zone = getZone(tokenBudget);
   const budgetStr = tokenBudget > 0 ? ` (~${formatTokens(tokenBudget)} tokens, ${zone} zone)` : '';

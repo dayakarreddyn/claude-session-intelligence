@@ -223,6 +223,42 @@ function readTokenBudget(sessionId) {
   } catch { return 0; }
 }
 
+/**
+ * Prefer authoritative transcript-based count over the tracker estimate.
+ * Same helper as suggest-compact.js so both hooks see identical numbers.
+ */
+function readTranscriptTokens(transcriptPath) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+  try {
+    const stat = fs.statSync(transcriptPath);
+    const SCAN_BYTES = Math.min(stat.size, 512 * 1024);
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const buf = Buffer.alloc(SCAN_BYTES);
+      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const d = JSON.parse(lines[i]);
+          const u = d && d.message && d.message.usage;
+          if (u) {
+            return (u.input_tokens || 0)
+                 + (u.cache_creation_input_tokens || 0)
+                 + (u.cache_read_input_tokens || 0);
+          }
+        } catch { /* partial line */ }
+      }
+    } finally { fs.closeSync(fd); }
+  } catch { /* silent */ }
+  return 0;
+}
+
+function resolveTokenBudget(input, sessionId) {
+  const fromTranscript = readTranscriptTokens(input && input.transcript_path);
+  if (fromTranscript > 0) return fromTranscript;
+  return readTokenBudget(sessionId);
+}
+
 function fmtTokens(n) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
@@ -288,7 +324,7 @@ function main() {
     process.exit(0);
   }
 
-  const tokenBudget = readTokenBudget(sessionId);
+  const tokenBudget = resolveTokenBudget(input, sessionId);
   const minTokens = Number.isFinite(cfg.minTokens) ? cfg.minTokens : 100000;
   if (tokenBudget < minTokens) {
     intelLog('task-change', 'debug', 'below min-tokens threshold', { tokenBudget, minTokens });

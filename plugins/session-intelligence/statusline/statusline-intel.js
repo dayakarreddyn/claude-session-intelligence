@@ -54,10 +54,14 @@ function loadConfig() {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
   const defaults = {
-    fields: ['emoji', 'model', 'project', 'tokens', 'tools', 'task'],
+    fields: [
+      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'tokens',
+      'newline',
+      'emoji2', 'tools', 'session', 'cost', 'compactAge', 'deploy', 'task',
+    ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
-    maxTaskLength: 60,
+    maxTaskLength: 70,
     separator: ' · ',
     colors: true,
     serviceHealth: [],
@@ -244,6 +248,17 @@ function resolveProjectDir(cwd) {
   return null;
 }
 
+// Skip unfilled template values like "(bug-fix | feature | test | ...)"
+// or "(what you're working on)". Anything wrapped in parens that is still
+// the literal placeholder should not leak into the status line.
+function isPlaceholder(s) {
+  if (!s) return true;
+  const t = s.trim();
+  if (/^\(.*\)$/.test(t)) return true;           // whole value is (…)
+  if (/\|/.test(t) && /^\(/.test(t)) return true; // starts with "(" and has "|"
+  return false;
+}
+
 function loadCurrentTask(projectDir, maxLen = 60) {
   if (!projectDir) return '';
   const file = path.join(projectDir, 'session-context.md');
@@ -254,14 +269,24 @@ function loadCurrentTask(projectDir, maxLen = 60) {
   if (!match) return '';
 
   const body = match[1].trim();
-  const typeMatch = body.match(/^type:\s*([^\n\u2014-]+)(?:[\u2014-]\s*(.+))?/m);
-  if (typeMatch) {
-    const type = typeMatch[1].trim();
-    const desc = (typeMatch[2] || '').trim();
-    if (type && desc) return truncate(`${type} \u2014 ${desc}`, maxLen);
-    if (type) return truncate(type, maxLen);
+  // Grab the full value after "type:" first, then decide if it's a placeholder.
+  const typeLine = body.match(/^type:\s*(.+)$/m);
+  if (typeLine) {
+    const raw = typeLine[1].trim();
+    if (isPlaceholder(raw)) return '';
+    // Split on em-dash or " - " (surrounded by spaces) so hyphens inside
+    // values like "bug-fix" stay intact.
+    const sep = raw.match(/\s[\u2014-]\s/);
+    if (sep) {
+      const type = raw.slice(0, sep.index).trim();
+      const desc = raw.slice(sep.index + sep[0].length).trim();
+      if (type && desc) return truncate(`${type} \u2014 ${desc}`, maxLen);
+      if (type) return truncate(type, maxLen);
+    }
+    return truncate(raw, maxLen);
   }
   const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
+  if (isPlaceholder(firstLine)) return '';
   return truncate(firstLine.replace(/^[-*#\s]+/, ''), maxLen);
 }
 
@@ -491,7 +516,20 @@ function buildRenderers(C) {
       return `${C.dim}${fmtDuration(ctx.sessionDurationMs)}${C.reset}`;
     },
 
-    task: (_input, ctx) => ctx.task ? `${C.dim}${ctx.task}${C.reset}` : '',
+    task: (_input, ctx) => {
+      if (!ctx.task) return '';
+      // Color by task type keyword so bug/feature/deploy/etc are visually
+      // distinct at a glance. Match the same keyword vocabulary as pickEmoji.
+      const t = ctx.task.toLowerCase();
+      let color = C.dim;
+      if (/\b(bug|fix|issue|error|crash)\b/.test(t))           color = C.red;
+      else if (/\b(deploy|ship|release)\b/.test(t))            color = C.magenta;
+      else if (/\b(feat|feature|add|implement|create|build)\b/.test(t)) color = C.blue;
+      else if (/\b(test|spec)\b/.test(t))                      color = C.cyan;
+      else if (/\b(refactor|cleanup|simpl)\b/.test(t))         color = C.yellow;
+      else if (/\b(doc|readme)\b/.test(t))                     color = C.green;
+      return `${color}${ctx.task}${C.reset}`;
+    },
 
     /**
      * Short session id (first 8 chars of the UUID) — handy when you have
@@ -527,21 +565,31 @@ function buildRenderers(C) {
       return iss ? `${C.magenta}${iss}${C.reset}` : '';
     },
 
-    /** Minutes since last compaction event (pre-compact hook timestamps). */
+    /** Minutes since last compaction event (pre-compact hook timestamps).
+     *  Color escalates with age so a stale compact is easy to notice:
+     *    <30m  dim   — fresh, no action
+     *    <120m yellow — getting stale, consider /compact soon
+     *    >=120m orange — overdue, compact strongly suggested */
     compactAge: (_input, _ctx) => {
       const mins = minutesSinceLastCompact();
       if (mins === null) return '';
       const label = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`;
-      return `${C.dim}compact:${label}ago${C.reset}`;
+      const color = mins >= 120 ? C.orange : mins >= 30 ? C.yellow : C.dim;
+      return `${color}compact:${label} ago${C.reset}`;
     },
 
-    /** Last deploy target + how fresh, read from ~/.claude/logs/deploy-breadcrumb. */
+    /** Last deploy target + how fresh, read from ~/.claude/logs/deploy-breadcrumb.
+     *  Color reflects freshness so you notice a just-shipped change:
+     *    <5m    green  — just deployed
+     *    <60m   cyan   — recent
+     *    >=60m  dim    — historical */
     deploy: (_input, _ctx) => {
       const b = readDeployBreadcrumb();
       if (!b) return '';
       const mins = Math.floor(b.ageMs / 60000);
       const when = mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h${mins % 60}m ago`;
-      return `${C.dim}deploy:${b.target} ${when}${C.reset}`;
+      const color = mins < 5 ? C.green : mins < 60 ? C.cyan : C.dim;
+      return `${color}deploy:${b.target} ${when}${C.reset}`;
     },
 
     /** Output style indicator — explanatory, default, etc. */
