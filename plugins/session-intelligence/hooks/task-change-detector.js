@@ -299,59 +299,50 @@ function fmtTokens(n) {
 // ambiguous band [differentDomainScore, sameDomainScore], we ask Haiku for
 // a boolean verdict. Gated by taskChange.semanticFallback=true so no one
 // pays for it unless they opt in.
-
-// main() runs synchronously, so we call Haiku from a short-lived child node
-// process instead of using Node's async https directly. Avoids any event-loop
-// blocking trickery and keeps this hook's call site straightforward.
-function callHaikuSync(currentContext, newPrompt, cfg) {
+//
+// We shell out to the `claude` CLI rather than hitting api.anthropic.com
+// directly: (1) uses whatever auth the user already has — OAuth subscription
+// or ANTHROPIC_API_KEY — no env-forwarding of the API key to a child argv;
+// (2) no inline HTTPS / JSON wire code to maintain; (3) `--setting-sources ''`
+// prevents the subprocess from loading user settings.json, which means none
+// of the parent session's hooks (including THIS hook) fire in the child —
+// no recursion risk. `--tools ''` and `--no-session-persistence` keep the
+// call small and stateless.
+function callClassifier(currentContext, newPrompt, cfg) {
+  const model = cfg.haikuModel || 'claude-haiku-4-5';
   const timeoutMs = Number.isFinite(cfg.semanticTimeoutMs) ? cfg.semanticTimeoutMs : 3000;
-  const payload = JSON.stringify({ currentContext, newPrompt, cfg });
-  const script = `
-    const https = require('https');
-    const { currentContext, newPrompt, cfg } = JSON.parse(process.argv[2]);
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) { process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'no-api-key'})); return; }
-    const model = cfg.haikuModel || 'claude-haiku-4-5';
-    const body = JSON.stringify({
-      model, max_tokens: 8,
-      system: 'You classify whether two messages describe the same task/topic in an ongoing coding session. Answer with exactly one word: SAME or DIFFERENT. SAME = continuation/refinement. DIFFERENT = unrelated feature, file, or subsystem. No explanation.',
-      messages: [{ role: 'user', content: 'CURRENT CONTEXT:\\n' + currentContext + '\\n\\nNEW PROMPT:\\n' + newPrompt + '\\n\\nAre these the same task domain? Reply SAME or DIFFERENT.' }],
-    });
-    const req = https.request({
-      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-      headers: {
-        'Content-Type': 'application/json', 'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body),
-      },
-      timeout: ${timeoutMs},
-    }, (res) => {
-      let raw = '';
-      res.on('data', (c) => { raw += c.toString('utf8'); });
-      res.on('end', () => {
-        try {
-          const d = JSON.parse(raw);
-          if (d.error) return process.stdout.write(JSON.stringify({verdict:'unavailable',reason:d.error.message}));
-          const text = (d.content && d.content[0] && d.content[0].text || '').trim().toUpperCase();
-          if (text.startsWith('SAME'))      return process.stdout.write(JSON.stringify({verdict:'same',reason:text}));
-          if (text.startsWith('DIFFERENT')) return process.stdout.write(JSON.stringify({verdict:'different',reason:text}));
-          process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'unparsed:'+text.slice(0,40)}));
-        } catch (err) { process.stdout.write(JSON.stringify({verdict:'unavailable',reason:err.message})); }
-      });
-    });
-    req.on('error',   (err) => process.stdout.write(JSON.stringify({verdict:'unavailable',reason:err.message})));
-    req.on('timeout', () => { req.destroy(); process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'timeout'})); });
-    req.write(body); req.end();
-  `;
+
+  const prompt =
+    'Classify whether two messages describe the SAME task domain in an ongoing coding session.\n' +
+    'Reply with EXACTLY one word — SAME or DIFFERENT — no explanation.\n' +
+    'SAME = continuation/refinement of the current task.\n' +
+    'DIFFERENT = unrelated feature, file, or subsystem.\n\n' +
+    `CURRENT CONTEXT:\n${currentContext}\n\n` +
+    `NEW PROMPT:\n${newPrompt}\n\n` +
+    'Reply SAME or DIFFERENT.';
+
   try {
-    const out = execFileSync(process.execPath, ['-e', script, payload], {
+    const out = execFileSync('claude', [
+      '--print',
+      '--model', model,
+      '--tools', '',
+      '--no-session-persistence',
+      '--setting-sources', '',
+    ], {
+      input: prompt,
       encoding: 'utf8',
       timeout: timeoutMs + 500,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env: process.env,
+      stdio: ['pipe', 'pipe', 'ignore'],
     });
-    return JSON.parse(out.trim());
+    const text = (out || '').trim().toUpperCase();
+    if (text.startsWith('SAME'))      return { verdict: 'same',      reason: text.slice(0, 80) };
+    if (text.startsWith('DIFFERENT')) return { verdict: 'different', reason: text.slice(0, 80) };
+    return { verdict: 'unavailable', reason: `unparsed: ${text.slice(0, 40)}` };
   } catch (err) {
-    return { verdict: 'unavailable', reason: err.code || err.message };
+    // ENOENT → claude CLI not on PATH; ETIMEDOUT → classifier too slow; auth
+    // failure → non-zero exit. All collapse to "unavailable" so the caller
+    // falls back to the heuristic verdict without blocking the prompt.
+    return { verdict: 'unavailable', reason: err.code || (err.message || '').slice(0, 80) };
   }
 }
 
@@ -488,12 +479,13 @@ function main() {
     process.exit(0);
   }
 
-  // Layer 2: Haiku tie-breaker. Only in the ambiguous band and only when the
-  // user has explicitly opted in (and has ANTHROPIC_API_KEY set). A confident
-  // SAME verdict here overrides the heuristic and lets the prompt through.
+  // Layer 2: Haiku tie-breaker via the `claude` CLI. Only fires in the
+  // ambiguous band and only when the user has opted in. Auth is whatever the
+  // user's `claude` CLI already has (OAuth or ANTHROPIC_API_KEY); on any
+  // failure the verdict is "unavailable" and we fall back to the heuristic.
   let haikuVerdict = null;
   const inAmbiguousBand = combined.score > diffThresh && combined.score < sameThresh;
-  if (cfg.semanticFallback === true && inAmbiguousBand && process.env.ANTHROPIC_API_KEY) {
+  if (cfg.semanticFallback === true && inAmbiguousBand) {
     const recentFilesList = [...pooledFiles].slice(0, 15).join('\n');
     const contextBlob = [
       currentTask && `Current task: ${currentTask}`,
@@ -501,7 +493,7 @@ function main() {
       recentFilesList && `Recently touched:\n${recentFilesList}`,
     ].filter(Boolean).join('\n\n');
 
-    const result = callHaikuSync(contextBlob, prompt, cfg);
+    const result = callClassifier(contextBlob, prompt, cfg);
     haikuVerdict = result.verdict;
     intelLog('task-change', 'info', 'semantic tie-breaker', {
       verdict: haikuVerdict, reason: result.reason, score: combined.score,
