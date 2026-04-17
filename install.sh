@@ -146,18 +146,26 @@ const budgetEntry = {
 if (budgetIdx >= 0) settings.hooks.PostToolUse[budgetIdx] = budgetEntry;
 else settings.hooks.PostToolUse.push(budgetEntry);
 
-if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
-const suggestIdx = settings.hooks.PreToolUse.findIndex(h =>
-  h.id === 'pre:edit-write:suggest-compact' || h.id === 'si:suggest-compact'
+// suggest-compact moved from PreToolUse (blocking) to PostToolUse (feedback-only).
+// Strip any stale PreToolUse entry from older installs so we don't double-fire.
+if (settings.hooks.PreToolUse) {
+  settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(h =>
+    h.id !== 'pre:edit-write:suggest-compact' && h.id !== 'si:suggest-compact'
+  );
+  if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
+}
+
+const suggestIdx = settings.hooks.PostToolUse.findIndex(h =>
+  h.id === 'si:suggest-compact'
 );
 const suggestEntry = {
-  matcher: 'Bash|Read|Edit|Write|Grep|Glob',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/suggest-compact.js\"' }],
-  description: 'Session Intelligence: token-aware compaction suggestions + auto-block',
+  matcher: '*',
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/suggest-compact.js\"', timeout: 10 }],
+  description: 'Session Intelligence: token-aware compaction suggestions (PostToolUse, non-blocking)',
   id: 'si:suggest-compact'
 };
-if (suggestIdx >= 0) settings.hooks.PreToolUse[suggestIdx] = suggestEntry;
-else settings.hooks.PreToolUse.push(suggestEntry);
+if (suggestIdx >= 0) settings.hooks.PostToolUse[suggestIdx] = suggestEntry;
+else settings.hooks.PostToolUse.push(suggestEntry);
 
 if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
 const taskIdx = settings.hooks.UserPromptSubmit.findIndex(h =>

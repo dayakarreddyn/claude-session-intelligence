@@ -44,7 +44,7 @@ const DEFAULTS = {
   },
   compact: {
     threshold: 50,              // tool calls before first advisory
-    autoblock: true,            // block with inline message at orange/red zone
+    autoblock: true,            // surface orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
   },
   taskChange: {
     enabled: true,              // detect task-domain changes on UserPromptSubmit

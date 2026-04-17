@@ -1,14 +1,22 @@
 #!/usr/bin/env node
 /**
- * Strategic Compact Suggester (Enhanced with Token Budget Awareness)
+ * Strategic Compact Suggester (PostToolUse, non-blocking)
  *
  * Cross-platform (Windows, macOS, Linux)
  *
- * Runs on PreToolUse to suggest manual compaction at logical intervals.
- * Now combines tool-call counting WITH approximate token budget from
- * the token-budget-tracker PostToolUse hook.
+ * Runs on PostToolUse. Emits suggestions to compact the context at logical
+ * intervals without blocking any tool call — the tool already ran, we're
+ * just surfacing a heads-up for the next assistant turn.
  *
- * Why manual over auto-compact:
+ * Why PostToolUse, non-blocking:
+ * - Blocking on PreToolUse interrupts the current task. Users hit it mid-
+ *   edit, lose momentum, and the "this tool call was blocked" wording reads
+ *   like an error. Suggestions should inform, not interrupt.
+ * - PostToolUse exit 2 surfaces stderr to the assistant as hook feedback,
+ *   which is what we want: the model sees "context is filling up, consider
+ *   /compact" on its next turn and can react at a natural pause.
+ *
+ * Why still manual (not auto-compact):
  * - Auto-compact happens at arbitrary points, often mid-task
  * - Strategic compacting preserves context through logical phases
  * - Compact after exploration, before execution
@@ -116,10 +124,15 @@ async function main() {
     }
   }
 
-  // Auto-enforce: on escalation into orange/red, block the current tool call
-  // with a clear instruction for the user to run /compact. One-shot per
-  // zone-rank increase. When tokens drop (post-compact), state re-sets so the
-  // next escalation fires again. Disable via config: compact.autoblock=false.
+  // Surface the zone escalation to the assistant via PostToolUse exit 2
+  // (stderr becomes hook feedback on the next turn — does NOT block the
+  // tool that just ran). One-shot per zone-rank increase so we don't spam
+  // every tool call inside the same zone. When tokens drop (post-compact),
+  // state re-sets and the next escalation fires again.
+  //
+  // Disable the assistant-feedback channel with compact.autoblock=false
+  // (kept name for backwards compat — it's a misnomer now but changing the
+  // key would silently break existing configs).
   if (tokenBudget > 0 && cfg.autoblock !== false) {
     const stateFile = path.join(getTempDir(), `claude-compact-state-${sessionId}`);
     const rank = { green: 0, yellow: 1, orange: 2, red: 3 };
@@ -131,19 +144,19 @@ async function main() {
 
     const escalated = rank[zone] > rank[lastZone] && rank[zone] >= rank.orange;
     if (escalated) {
-      // Persist immediately so a second concurrent tool call doesn't re-block.
+      // Persist immediately so we don't re-emit the same escalation on the
+      // very next tool call inside the same zone.
       try { writeFile(stateFile, zone); } catch { /* best effort */ }
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
       const msg =
         `[StrategicCompact] ${header}. ` +
         `Context at ~${formatTokens(tokenBudget)} tokens. ` +
-        `Run \`/compact\` now (add "preserve current task context" if mid-task), ` +
-        `then retry. This tool call was blocked to force a compaction checkpoint. ` +
-        `Opt out with CLAUDE_COMPACT_AUTOBLOCK=0.`;
+        `Consider \`/compact\` now (add "preserve current task context" if mid-task). ` +
+        `Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.`;
       process.stderr.write(`${msg}\n`);
-      intelLog('suggest-compact', 'warn', `autoblock at ${zone}`, { tokenBudget, count, lastZone });
-      process.exit(2); // exit 2 = block tool; stderr is fed back to Claude
+      intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, { tokenBudget, count, lastZone });
+      process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
     }
 
     // Tokens dropped (likely after /compact) — re-arm for next escalation.

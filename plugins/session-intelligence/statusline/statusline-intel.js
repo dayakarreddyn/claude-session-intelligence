@@ -558,22 +558,11 @@ function buildRenderers(C) {
 
     task: (_input, ctx) => {
       if (!ctx.task) return '';
-      // Color by task type keyword so bug/feature/deploy/etc are visually
-      // distinct at a glance. Match the same keyword vocabulary as pickEmoji.
-      const t = ctx.task.toLowerCase();
-      let color = C.dim;
-      if (/\b(bug|fix|issue|error|crash)\b/.test(t))           color = C.red;
-      else if (/\b(deploy|ship|release)\b/.test(t))            color = C.magenta;
-      else if (/\b(feat|feature|add|implement|create|build)\b/.test(t)) color = C.blue;
-      else if (/\b(test|spec)\b/.test(t))                      color = C.cyan;
-      else if (/\b(refactor|cleanup|simpl)\b/.test(t))         color = C.yellow;
-      else if (/\b(doc|readme)\b/.test(t))                     color = C.green;
-      // Fallback sources get dimmed so you can tell at a glance whether
-      // the line is the committed reality (commit subject) or a pinned
-      // note (session-context.md).
-      if (ctx.taskSource === 'commit') color = C.dim;
-      if (ctx.taskSource === 'file-stale') color = C.dim;
-      return `${color}${ctx.task}${C.reset}`;
+      // Line 2 stays dim/grey so the status bar has one loud voice (tokens +
+      // compact alerts on line 1) and one quiet voice (the context on line 2).
+      // Keyword colouring here competed with the real signal and made the bar
+      // look carnival-bright. See statusline colour policy in README.
+      return `${C.dim}${ctx.task}${C.reset}`;
     },
 
     /**
@@ -611,30 +600,29 @@ function buildRenderers(C) {
     },
 
     /** Minutes since last compaction event (pre-compact hook timestamps).
-     *  Color escalates with age so a stale compact is easy to notice:
-     *    <30m  dim   — fresh, no action
-     *    <120m yellow — getting stale, consider /compact soon
-     *    >=120m orange — overdue, compact strongly suggested */
+     *  This is the only line-2 field that escalates colour — red is reserved
+     *  for the "you should compact now" alert so it stands out against the
+     *  otherwise dim second line:
+     *    <120m  dim  — fresh enough, no action
+     *    >=120m red  — overdue, compact strongly suggested */
     compactAge: (_input, _ctx) => {
       const mins = minutesSinceLastCompact();
       if (mins === null) return '';
       const label = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`;
-      const color = mins >= 120 ? C.orange : mins >= 30 ? C.yellow : C.dim;
+      const color = mins >= 120 ? C.red : C.dim;
       return `${color}compact:${label} ago${C.reset}`;
     },
 
     /** Last deploy target + how fresh, read from ~/.claude/logs/deploy-breadcrumb.
-     *  Color reflects freshness so you notice a just-shipped change:
-     *    <5m    green  — just deployed
-     *    <60m   cyan   — recent
-     *    >=60m  dim    — historical */
+     *  Always dim — the interesting signal about a fresh deploy already shows
+     *  up as the 🚀 line-2 emoji (see pickEmojiSecond). The text itself is
+     *  just reference context and shouldn't fight for attention. */
     deploy: (_input, _ctx) => {
       const b = readDeployBreadcrumb();
       if (!b) return '';
       const mins = Math.floor(b.ageMs / 60000);
       const when = mins < 1 ? 'now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h${mins % 60}m ago`;
-      const color = mins < 5 ? C.green : mins < 60 ? C.cyan : C.dim;
-      return `${color}deploy:${b.target} ${when}${C.reset}`;
+      return `${C.dim}deploy:${b.target} ${when}${C.reset}`;
     },
 
     /** Output style indicator — explanatory, default, etc. */

@@ -346,9 +346,9 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 
 Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
 
-## Auto-Compact Block
+## Auto-Compact Suggestions
 
-`suggest-compact.js` is a `PreToolUse` hook that watches token budget on every `Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob` call. When context **escalates** into a higher-severity zone, it blocks the tool call with an inline message Claude surfaces to you immediately.
+`suggest-compact.js` is a `PostToolUse` hook that watches token budget after every tool call. When context **escalates** into a higher-severity zone, it emits a message that Claude Code surfaces back to the assistant on its next turn — **without blocking the tool call** that just ran.
 
 ### Zone behavior
 
@@ -356,10 +356,10 @@ Every write shows a unified diff of the proposed change and waits for you to rep
 |---|---|---|
 | green | <200k | silent |
 | yellow | ≥200k | passive log suggestion ("good time to /compact between tasks") |
-| **orange** | **≥300k** | **block with inline instruction to run `/compact`** |
-| **red** | **≥400k** | **block with inline instruction (urgent wording)** |
+| **orange** | **≥300k** | **surface suggestion to assistant via hook feedback** |
+| **red** | **≥400k** | **surface urgent suggestion to assistant via hook feedback** |
 
-One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so the same zone doesn't block twice. After `/compact` runs, tokens drop and state re-arms for the next escalation.
+One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so the same zone doesn't spam every subsequent tool call. After `/compact` runs, tokens drop and state re-arms for the next escalation.
 
 ### What you see
 
@@ -367,20 +367,23 @@ When the budget first crosses 300k on a tool call:
 
 ```
 [StrategicCompact] ORANGE ZONE — context rot risk. Context at ~315k tokens.
-Run `/compact` now (add "preserve current task context" if mid-task), then retry.
-This tool call was blocked to force a compaction checkpoint.
-Opt out with CLAUDE_COMPACT_AUTOBLOCK=0.
+Consider `/compact` now (add "preserve current task context" if mid-task).
+Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```
 
-The hook exits `2` (stderr fed back to Claude Code), the tool call doesn't run, and Claude relays the message so you can decide whether to `/compact` or continue. No native dialog — the message is inline in the session, so full-screen apps / remote shells / non-macOS platforms all behave identically.
+The hook exits `2` (stderr fed back to Claude Code as hook feedback), but because this runs on `PostToolUse` the tool call itself already completed successfully — the message arrives on the next assistant turn as a heads-up, not an interruption. Claude can then decide whether to suggest `/compact` or keep going. No native dialog — the message is inline in the session, so full-screen apps / remote shells / non-macOS platforms all behave identically.
+
+### Why PostToolUse, not PreToolUse?
+
+Earlier versions blocked the tool call on `PreToolUse` to force a compaction checkpoint. In practice that broke momentum: the user would hit it mid-edit, lose the thread of what they were doing, and the wording ("this tool call was blocked") read like an error. Suggestions should inform, not interrupt — so the hook moved to `PostToolUse`. The tool runs, Claude sees the suggestion at a natural pause, and the user stays in flow.
 
 ### Why not auto-execute /compact?
 
-Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit structured JSON, but they have no API to invoke slash commands (`/compact` is interpreted by Claude Code's main loop, not a tool). The closest thing to "auto" is the inline block above: the decision is explicit, the instruction flows back via stderr, and nothing fires off-screen.
+Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit structured JSON, but they have no API to invoke slash commands (`/compact` is interpreted by Claude Code's main loop, not a tool). The closest thing to "auto" is the inline suggestion above: the decision is explicit, the instruction flows back via stderr, and nothing fires off-screen.
 
 ### Tunables
 
-- Opt out entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0`
+- Silence suggestions entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0` (the env var keeps its old name for backwards compat — it no longer blocks anything)
 - First advisory after N tool calls: `/si set compact.threshold 75`
 
 ## Task Change Detector
@@ -500,7 +503,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 |------|-------|---------|
 | `pre-compact.js` | PreCompact | Reads session-context.md, injects PRESERVE/DROP hints |
 | `token-budget-tracker.js` | PostToolUse | Estimates tokens from Read/Bash/Grep/Glob/Agent output |
-| `suggest-compact.js` | PreToolUse (Bash/Read/Edit/Write/Grep/Glob) | Warns at 200k, **blocks the tool call with an inline `/compact` instruction** at 300k/400k |
+| `suggest-compact.js` | PostToolUse | Warns at 200k, surfaces `/compact` suggestion as hook feedback at 300k/400k (non-blocking) |
 | `task-change-detector.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
 
 All three emit structured entries to the debug log (see above).
@@ -511,7 +514,7 @@ All three emit structured entries to the debug log (see above).
 |---|---|---|
 | `~/.claude/scripts/hooks/pre-compact.js` | `hooks/pre-compact.js` | Compaction hint injector |
 | `~/.claude/scripts/hooks/token-budget-tracker.js` | `hooks/token-budget-tracker.js` | Token estimator |
-| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Zone warnings + auto-block |
+| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Zone warnings (PostToolUse, non-blocking) |
 | `~/.claude/scripts/hooks/task-change-detector.js` | `hooks/task-change-detector.js` | Task-domain change detector |
 | `~/.claude/scripts/hooks/lib/config.js` (+ `session-intelligence/lib/`) | `lib/config.js` | Unified config loader |
 | `~/.claude/scripts/hooks/session-intelligence/lib/utils.js` | `lib/utils.js` | Minimal shared utils |
@@ -532,7 +535,7 @@ Prefer **`/si set <key> <value>`** over env vars — it's Claude-native, diffed,
 | Variable | Config equivalent | Description |
 |----------|---|---|
 | `COMPACT_THRESHOLD` | `compact.threshold` | Tool calls before first compact suggestion |
-| `CLAUDE_COMPACT_AUTOBLOCK` | `compact.autoblock` | `0` disables the orange/red auto-block |
+| `CLAUDE_COMPACT_AUTOBLOCK` | `compact.autoblock` | `0` silences the orange/red zone suggestions (legacy name — no longer blocks) |
 | `CLAUDE_TASK_CHANGE` | `taskChange.enabled` | `0` disables task-change detection entirely |
 | `CLAUDE_INTEL_DEBUG` | `debug.enabled` | Enable debug-level log entries |
 | `CLAUDE_INTEL_QUIET` | `debug.quiet` | Suppress all log entries except errors |
