@@ -75,9 +75,80 @@ function loadState() {
   catch { return {}; }
 }
 
+// Write state via tempfile + atomic rename so a crashed bootstrap never leaves
+// a half-written `.si-bootstrap-state` that the next load would silently
+// reset to `{}` (wiping every project's autoFill / seededContexts / injected
+// record). Paired with acquireStateLock in main() — rename is atomic against
+// concurrent readers, the lock is what serialises concurrent mutators.
 function saveState(state) {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8'); }
-  catch (err) { intelLog('bootstrap', 'warn', 'state save failed', { file: STATE_FILE, err: err.message }); }
+  const tmp = STATE_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tmp, STATE_FILE);
+  } catch (err) {
+    intelLog('bootstrap', 'warn', 'state save failed', { file: STATE_FILE, err: err.message });
+    try { fs.unlinkSync(tmp); } catch { /* tmp may not exist */ }
+  }
+}
+
+// Advisory cross-process lock on `.si-bootstrap-state`. Without it, two Claude
+// Code windows opening in different projects at the same time both loadState,
+// both mutate, and the last saveState clobbers the other's per-project
+// entries — we'd silently lose autoFill tracking or wiredStatuslinePrev.
+//
+// Design:
+//   * `fs.openSync(lock, 'wx')` is atomic-create — portable without flock(2).
+//   * On EEXIST, sleep briefly via Atomics.wait (real sleep, not busy-loop)
+//     and retry.
+//   * Stale locks (owner crashed before release) are broken after
+//     LOCK_STALE_MS so a dead process can't deadlock future sessions.
+//   * Absolute timeout LOCK_TOTAL_MS — if we can't acquire in 1s, run
+//     without the lock and log a warn. Falling back to the old race is
+//     better than hanging a SessionStart.
+const LOCK_FILE = STATE_FILE + '.lock';
+const LOCK_INTERVAL_MS = 20;
+const LOCK_TOTAL_MS = 1000;
+const LOCK_STALE_MS = 10_000;
+
+function sleepSync(ms) {
+  // Real sleep via shared-buffer wait; doesn't burn CPU like a Date.now() spin.
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch { /* SharedArrayBuffer unavailable — fall through, small busy-wait */
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* no-op */ }
+  }
+}
+
+function acquireStateLock() {
+  const start = Date.now();
+  while (Date.now() - start < LOCK_TOTAL_MS) {
+    try {
+      const fd = fs.openSync(LOCK_FILE, 'wx');
+      try { fs.writeSync(fd, `${process.pid}\n`); } catch { /* fine */ }
+      fs.closeSync(fd);
+      return true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') {
+        intelLog('bootstrap', 'warn', 'lock open failed', { err: err.message });
+        return false;
+      }
+      // Break a stale lock whose owner crashed without cleanup.
+      try {
+        const stat = fs.statSync(LOCK_FILE);
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(LOCK_FILE);
+          continue;
+        }
+      } catch { /* lock vanished between stat and unlink — retry */ }
+      sleepSync(LOCK_INTERVAL_MS);
+    }
+  }
+  intelLog('bootstrap', 'warn', 'lock acquire timeout — running unguarded');
+  return false;
+}
+
+function releaseStateLock() {
+  try { fs.unlinkSync(LOCK_FILE); } catch { /* already released or never held */ }
 }
 
 function notify(msg) {
@@ -463,15 +534,22 @@ function main() {
   const input = readStdinJsonOrEmpty();
   const cwd = input.cwd || input.workspace?.current_dir || process.cwd();
 
-  const state = loadState();
-  const didSeedConfig = seedConfig(state);
-  const didWire = wireStatusline(state);
-  const didSeedCtx = seedSessionContext(cwd, state);
-  const didAutoFill = autoFillSessionContext(cwd, state);
-  const didInject = injectClaudeMdRules(cwd, state);
+  // Ensure ~/.claude/ exists before we try to drop a lock file into it.
+  try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
+  const locked = acquireStateLock();
+  try {
+    const state = loadState();
+    const didSeedConfig = seedConfig(state);
+    const didWire = wireStatusline(state);
+    const didSeedCtx = seedSessionContext(cwd, state);
+    const didAutoFill = autoFillSessionContext(cwd, state);
+    const didInject = injectClaudeMdRules(cwd, state);
 
-  if (didSeedConfig || didWire || didSeedCtx || didAutoFill || didInject) {
-    saveState(state);
+    if (didSeedConfig || didWire || didSeedCtx || didAutoFill || didInject) {
+      saveState(state);
+    }
+  } finally {
+    if (locked) releaseStateLock();
   }
 
   process.exit(0);
