@@ -14,6 +14,15 @@
 #   CLAUDE_STATUSLINE_NO_INTEL=1   — skip the intel line
 #   CLAUDE_STATUSLINE_SEP="..."    — separator between them (default newline)
 #
+# Trust model:
+#   PREV_STATUSLINE is executed via `bash -c` on every statusline redraw.
+#   It originates from your own `~/.claude/settings.json → statusLine.command`
+#   which Claude Code would execute anyway — we don't add any new privilege.
+#   Bootstrap validates the value before baking (no NUL/newline, ≤4 KB) and
+#   writes this file 0700 so other local users can't read or swap it. Anyone
+#   who can write ~/.claude/ already has full user-level access; this script
+#   is not the trust boundary.
+#
 # Rationale: most existing statusLine commands (ccstatusline and friends)
 # already emit multiple lines, so we always want the intel line as a new,
 # separate line at the bottom rather than a same-line append.

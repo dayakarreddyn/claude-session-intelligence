@@ -116,6 +116,19 @@ function readExistingPrevFromChain(chainPath) {
   } catch { return ''; }
 }
 
+// The baked PREV_STATUSLINE gets executed via `bash -c` on every statusline
+// redraw. The user's own `statusLine.command` is the intended input, but a
+// corrupted or mistakenly-written value (NUL bytes, embedded newlines, runaway
+// length) would silently become shell code. Validate before baking.
+const MAX_PREV_LEN = 4096;
+function sanitizePrevStatusline(cmd) {
+  if (typeof cmd !== 'string') return { ok: false, reason: 'not a string' };
+  if (cmd.length === 0) return { ok: true, safe: '' };
+  if (cmd.length > MAX_PREV_LEN) return { ok: false, reason: `longer than ${MAX_PREV_LEN} chars` };
+  if (/[\x00\r\n]/.test(cmd)) return { ok: false, reason: 'contains NUL or newline' };
+  return { ok: true, safe: cmd };
+}
+
 function prepareChainScript(state) {
   // The shipped chain script has __PREV_STATUSLINE__ placeholder. Substitute
   // whatever the user currently has in settings.json → statusLine.command so
@@ -145,8 +158,13 @@ function prepareChainScript(state) {
   const prev = existingBaked || recordedPrev;
 
   // If our instance exists, baked-in PREV matches memory, and settings.json
-  // already points at us, nothing to do.
+  // already points at us, nothing to do — beyond ensuring the script is 0700.
+  // (Older installs rendered 0755; tighten in-place without re-writing the body.)
   if (isAlreadyOurs && fs.existsSync(instanceChain) && prev === recordedPrev) {
+    try {
+      const { mode } = fs.statSync(instanceChain);
+      if ((mode & 0o777) !== 0o700) fs.chmodSync(instanceChain, 0o700);
+    } catch { /* not fatal — chain still runs at its current mode */ }
     return instanceChain;
   }
 
@@ -154,11 +172,22 @@ function prepareChainScript(state) {
   try { tmpl = fs.readFileSync(CHAIN_SH, 'utf8'); }
   catch { return null; }
 
-  const resolvedPrev = isAlreadyOurs ? prev : currentCmd;
+  const candidatePrev = isAlreadyOurs ? prev : currentCmd;
+  const sanitized = sanitizePrevStatusline(candidatePrev);
+  if (!sanitized.ok) {
+    // A malformed statusLine.command would become shell code via `bash -c`.
+    // Refuse to bake it; fall back to an empty prev so the intel line still
+    // renders cleanly. Surface in the debug log so the user can investigate.
+    notify(`statusline prev rejected (${sanitized.reason}) — preserving empty`);
+    intelLog('bootstrap', 'warn', 'prev statusline rejected', {
+      reason: sanitized.reason, length: candidatePrev.length,
+    });
+  }
+  const resolvedPrev = sanitized.ok ? sanitized.safe : '';
+
   // Only substitute the assignment line. The template also uses
-  // __PREV_STATUSLINE__ in the safety guard (line 33) as a "still-unrendered"
-  // sentinel; replacing it globally inverted that check and meant the chain
-  // never actually ran the previous command.
+  // __PREV_STATUSLINE__ in the safety guard as a "still-unrendered" sentinel;
+  // replacing it globally would invert that check and break the chain.
   const escapedPrev = resolvedPrev.replace(/\\/g, '\\\\').replace(/'/g, "'\\''");
   const rendered = tmpl.replace(
     /^(\s*PREV_STATUSLINE=)'__PREV_STATUSLINE__'/m,
@@ -172,11 +201,14 @@ function prepareChainScript(state) {
 
   try {
     fs.mkdirSync(path.dirname(instanceChain), { recursive: true });
-    fs.writeFileSync(instanceChain, withIntelPath, { mode: 0o755 });
+    // Owner-only (0700): the baked PREV_STATUSLINE is the user's own shell
+    // command; no other local user should be able to read or re-execute it.
+    fs.writeFileSync(instanceChain, withIntelPath, { mode: 0o700 });
     state.wiredStatuslinePrev = resolvedPrev;
     return instanceChain;
   } catch (err) {
     notify(`statusline chain write failed: ${err.message}`);
+    intelLog('bootstrap', 'warn', 'chain write failed', { path: instanceChain, err: err.message });
     return null;
   }
 }
