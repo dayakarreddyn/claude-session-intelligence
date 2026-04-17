@@ -177,7 +177,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `zone` | `orange` | Zone name only, colored |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (all tools, not just Edit/Write) |
 | `session` | `3h42m` | Duration since the first transcript timestamp |
-| `cost` | `$0.76` | Estimated cost from the transcript usage block (prices configurable) |
+| `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (cached by size+mtime for speed; prices configurable) |
 | `compactAge` | `compact:2h13mago` | Time since last `/compact` event (mtime of the pre-compact log) |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it) |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (from stdin or env) |
@@ -212,9 +212,9 @@ Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your work
 ```json
 {
   "fields": [
-    "emoji", "model", "project", "branch", "diffstat", "tokens",
+    "emoji", "model", "project", "branch", "issue", "diffstat", "tokens",
     "newline",
-    "tools", "session", "cost", "deploy", "task"
+    "emoji2", "tools", "session", "cost", "compactAge", "deploy", "task"
   ],
   "tokenSource": "auto",
   "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
@@ -286,6 +286,44 @@ Probes run async (detached `curl`), results cached in `/tmp/claude-health-<name>
 
 Open `~/.claude/scripts/statusline-chain.sh` and edit the `PREV_STATUSLINE=…` line — anything between the quotes gets run on each redraw. Or re-point `~/.claude/settings.json` → `statusLine.command` directly at whatever you want.
 
+## Auto-Compact with Prompt
+
+`suggest-compact.js` is a `PreToolUse` hook that watches token budget on every `Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob` call. When context **escalates** into a higher-severity zone, it interrupts the tool call and asks the user what to do:
+
+### Zone behavior
+
+| Zone | Threshold | Action |
+|---|---|---|
+| green | <200k | silent |
+| yellow | ≥200k | passive log suggestion ("good time to /compact between tasks") |
+| **orange** | **≥300k** | **prompt + block** — native dialog "Run /compact now?" |
+| **red** | **≥400k** | **prompt + block (urgent)** — same flow, stronger wording |
+
+One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so you won't be re-prompted for the same zone. After `/compact` runs, tokens drop and state re-arms for the next escalation.
+
+### Prompt flow (macOS)
+
+1. You hit 300k tokens on your next Edit/Write/Bash/…
+2. A native dialog pops:
+   > *"Context at ~310k tokens — ORANGE ZONE (context rot risk). Run /compact now to preserve context before continuing?"*
+   > `[ Skip ]   [ Compact now ]`
+3. Outcomes:
+   - **Compact now** → tool call blocked with exit 2, Claude is told "User approved compaction — please run /compact now" and will prompt you to type `/compact`
+   - **Skip** → tool call proceeds, state saved so you won't be re-asked for this zone
+   - **Timeout (30s default)** → falls through to plain exit-2 block with the instruction
+
+### Why not auto-execute /compact?
+
+Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit structured JSON, but they have no API to invoke slash commands (`/compact` is interpreted by Claude Code's main loop, not a tool). The closest we can get to "auto" is the native dialog above: the decision is explicit, the prompt is unmissable, and the instruction flows back to Claude via stderr. You still press Enter on `/compact`, but you can't miss the moment.
+
+### Tunables
+
+- Opt out entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0`
+- Skip the GUI dialog (passive block only): `export CLAUDE_COMPACT_PROMPT=0`
+- Dialog timeout in seconds: `export CLAUDE_COMPACT_PROMPT_TIMEOUT=60`
+
+Linux/Windows users currently hit the exit-2 fallback directly (no native dialog). Easy to extend `askUserCompact()` in `suggest-compact.js` with `zenity` / PowerShell prompts.
+
 ## Debug Log
 
 All three hooks (plus `intelLog` calls from your own scripts) write structured, timestamped lines to:
@@ -342,7 +380,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 |------|-------|---------|
 | `pre-compact.js` | PreCompact | Reads session-context.md, injects PRESERVE/DROP hints |
 | `token-budget-tracker.js` | PostToolUse | Estimates tokens from Read/Bash/Grep/Glob/Agent output |
-| `suggest-compact.js` | PreToolUse | Warns at zone transitions (200k/300k/400k) |
+| `suggest-compact.js` | PreToolUse (Bash/Read/Edit/Write/Grep/Glob) | Warns at 200k, **auto-blocks + prompts the user** at 300k/400k (native macOS dialog, graceful fallback to exit-2 block) |
 
 All three emit structured entries to the debug log (see above).
 
@@ -365,6 +403,9 @@ All three emit structured entries to the debug log (see above).
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMPACT_THRESHOLD` | `50` | Tool calls before first compact suggestion |
+| `CLAUDE_COMPACT_AUTOBLOCK` | on | Set to `0` to disable the orange/red auto-block entirely (falls back to passive warnings) |
+| `CLAUDE_COMPACT_PROMPT` | on (macOS) | Set to `0` to skip the native yes/no dialog and go straight to exit-2 block |
+| `CLAUDE_COMPACT_PROMPT_TIMEOUT` | `30` | Seconds before the dialog auto-times-out and falls through to exit-2 block |
 | `CLAUDE_INTEL_DEBUG` | off | Enable debug-level log entries |
 | `CLAUDE_INTEL_QUIET` | off | Suppress all log entries except errors |
 | `CLAUDE_STATUSLINE_NO_PREV` | off | Suppress the previous statusLine command |

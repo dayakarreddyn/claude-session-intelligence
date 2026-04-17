@@ -90,6 +90,56 @@ async function main() {
     }
   }
 
+  // Auto-enforce: on escalation into orange/red, block the current tool call
+  // with a clear instruction for the user to run /compact. One-shot per
+  // zone-rank increase. When tokens drop (post-compact), state re-sets so the
+  // next escalation fires again. Opt-out with CLAUDE_COMPACT_AUTOBLOCK=0.
+  if (tokenBudget > 0 && process.env.CLAUDE_COMPACT_AUTOBLOCK !== '0') {
+    const stateFile = path.join(getTempDir(), `claude-compact-state-${sessionId}`);
+    const rank = { green: 0, yellow: 1, orange: 2, red: 3 };
+    let lastZone = 'green';
+    try {
+      const raw = fs.readFileSync(stateFile, 'utf8').trim();
+      if (rank[raw] !== undefined) lastZone = raw;
+    } catch { /* no prior state */ }
+
+    const escalated = rank[zone] > rank[lastZone] && rank[zone] >= rank.orange;
+    if (escalated) {
+      // Persist immediately so a second concurrent tool call doesn't re-prompt.
+      try { writeFile(stateFile, zone); } catch { /* best effort */ }
+
+      const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
+      const answer = askUserCompact(zone, tokenBudget);
+      intelLog('suggest-compact', 'info', `zone escalation prompt`, { zone, answer, tokenBudget });
+
+      if (answer === 'skip') {
+        // User chose to continue without compacting — allow the tool through.
+        log(`[StrategicCompact] ${header} acknowledged — continuing without compaction (~${formatTokens(tokenBudget)} tokens).`);
+        process.exit(0);
+      }
+
+      // "yes", "timeout", "unavailable", or dialog-missing all fall through to
+      // exit-2 with instruction, so the user still sees a clear next step.
+      const approvedPrefix = answer === 'yes'
+        ? 'User approved compaction via prompt. '
+        : '';
+      const msg =
+        `[StrategicCompact] ${header}. ${approvedPrefix}` +
+        `Context at ~${formatTokens(tokenBudget)} tokens. ` +
+        `Run \`/compact\` now (add "preserve current task context" if mid-task), ` +
+        `then retry. This tool call was blocked to force a compaction checkpoint. ` +
+        `Opt out with CLAUDE_COMPACT_AUTOBLOCK=0.`;
+      process.stderr.write(`${msg}\n`);
+      intelLog('suggest-compact', 'warn', `autoblock at ${zone}`, { tokenBudget, count, lastZone, answer });
+      process.exit(2); // exit 2 = block tool; stderr is fed back to Claude
+    }
+
+    // Tokens dropped (likely after /compact) — re-arm for next escalation.
+    if (rank[zone] < rank[lastZone]) {
+      try { writeFile(stateFile, zone); } catch { /* best effort */ }
+    }
+  }
+
   process.exit(0);
 }
 
@@ -98,6 +148,46 @@ function getZone(tokens) {
   if (tokens >= 300000) return 'orange';
   if (tokens >= 200000) return 'yellow';
   return 'green';
+}
+
+/**
+ * Ask the user via a native OS dialog whether to compact now.
+ * Returns 'yes' | 'skip' | 'timeout' | 'unavailable'.
+ * Currently implemented for macOS (osascript). Other platforms return
+ * 'unavailable' and callers fall back to the stderr-block behaviour.
+ */
+function askUserCompact(zone, tokens) {
+  if (process.env.CLAUDE_COMPACT_PROMPT === '0') return 'unavailable';
+  if (process.platform !== 'darwin') return 'unavailable';
+
+  const { execFileSync } = require('child_process');
+  const zoneLabel = zone === 'red'
+    ? 'RED ZONE (urgent)'
+    : 'ORANGE ZONE (context rot risk)';
+  const body = `Context at ~${formatTokens(tokens)} tokens — ${zoneLabel}.\n\n` +
+    `Run /compact now to preserve context before continuing?`;
+  const icon = zone === 'red' ? 'stop' : 'caution';
+  const timeoutSec = parseInt(process.env.CLAUDE_COMPACT_PROMPT_TIMEOUT || '30', 10);
+
+  const script =
+    `display dialog ${JSON.stringify(body)} ` +
+    `buttons {"Skip", "Compact now"} default button "Compact now" ` +
+    `with title "Claude Code — Auto-Compact" with icon ${icon} ` +
+    `giving up after ${timeoutSec}`;
+
+  try {
+    const out = execFileSync('osascript', ['-e', script], {
+      encoding: 'utf8',
+      timeout: (timeoutSec + 5) * 1000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (/gave up:\s*true/.test(out)) return 'timeout';
+    if (/button returned:\s*Compact now/.test(out)) return 'yes';
+    if (/button returned:\s*Skip/.test(out)) return 'skip';
+    return 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
 }
 
 function formatTokens(n) {

@@ -573,6 +573,50 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
        + per(u.output_tokens, prices.output);
 }
 
+/**
+ * Cumulative session cost: sum per-turn usage across every assistant message
+ * in the transcript. Each turn's cache_read/cache_creation/input/output is
+ * billed separately by Anthropic, so summing is correct.
+ *
+ * Cached by (size, mtime) in /tmp to keep statusLine fast on large transcripts.
+ */
+function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+
+  let stat;
+  try { stat = fs.statSync(transcriptPath); } catch { return 0; }
+
+  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) {
+      return cached.cost || 0;
+    }
+  } catch { /* cache miss */ }
+
+  let cost = 0;
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf8');
+    const lines = raw.split('\n');
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const d = JSON.parse(line);
+        const u = d && d.message && d.message.usage;
+        if (u) cost += costFromUsage(u, prices);
+      } catch { /* partial/invalid line */ }
+    }
+  } catch { return 0; }
+
+  try {
+    fs.writeFileSync(cacheFile,
+      JSON.stringify({ size: stat.size, mtime: stat.mtimeMs, cost }), 'utf8');
+  } catch { /* best effort */ }
+
+  return cost;
+}
+
 // ─── Session duration ────────────────────────────────────────────────────────
 
 function readSessionStartTime(transcriptPath) {
@@ -627,10 +671,10 @@ function main() {
     if (start) sessionDurationMs = Date.now() - start;
   }
 
-  // Cost from transcript usage.
+  // Cost from transcript usage — sum across every assistant turn (cumulative).
   let costUsd = 0;
-  if (cfg.fields.includes('cost') && usage) {
-    costUsd = costFromUsage(usage, cfg.prices || DEFAULT_PRICES);
+  if (cfg.fields.includes('cost')) {
+    costUsd = totalCostFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
   }
 
   const projectDir = resolveProjectDir(cwd);
