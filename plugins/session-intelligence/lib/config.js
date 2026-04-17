@@ -50,6 +50,7 @@ const DEFAULTS = {
   compact: {
     threshold: 50,              // tool calls before first advisory
     autoblock: true,            // surface orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
+    memoryOffload: true,        // inject a "offload rich detail to auto-memory" directive into pre-compact stdout
   },
   taskChange: {
     enabled: true,              // detect task-domain changes on UserPromptSubmit
@@ -139,6 +140,7 @@ function applyEnvOverrides(cfg) {
     if (Number.isFinite(n) && n > 0 && n <= 10000) cfg.compact.threshold = n;
   }
   if (env.CLAUDE_COMPACT_AUTOBLOCK === '0') cfg.compact.autoblock = false;
+  if (env.CLAUDE_COMPACT_MEMORY_OFFLOAD === '0') cfg.compact.memoryOffload = false;
 
   if (env.CLAUDE_TASK_CHANGE === '0') cfg.taskChange.enabled = false;
 

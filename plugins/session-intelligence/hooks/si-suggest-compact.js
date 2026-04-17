@@ -55,6 +55,7 @@ const {
   log,
   readStdinJson,
   readTranscriptTokens,
+  resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const { readShape, analyzeShape, draftMessage } = require(path.join(SI_LIB, 'context-shape'));
@@ -159,7 +160,7 @@ async function main() {
     const prevZone = getZone(tokenBudget - 5000, zonesCfg);
 
     if (zone === 'yellow' && prevZone === 'green') {
-      log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks.`);
+      log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks (offload rich detail to auto-memory first).`);
       intelLog('suggest-compact', 'info', `suggestion: yellow-zone`, { tokenBudget, count });
     } else if (zone === 'orange' && prevZone === 'yellow') {
       log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — CONTEXT ROT ZONE. Compact now: /compact [preserve current task context]`);
@@ -207,6 +208,20 @@ async function main() {
         `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens${costStr}.`,
       ];
       if (diagnosis) lines.push(`Observed: ${diagnosis}.`);
+
+      // Memory-offload nudge — give Claude a turn to write rich detail to
+      // auto-memory BEFORE /compact collapses it. Context is still live at
+      // zone crossover; once compacted, the detail is already lost. Gated
+      // by the same config key that controls the pre-compact directive.
+      if (cfg.memoryOffload !== false) {
+        const cwd = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
+        const projectDir = resolveProjectDir(cwd);
+        const memLine = projectDir
+          ? `Offload to auto-memory FIRST: write under ${path.join(projectDir, 'memory')}/ (project_session_*.md / reference_*.md + MEMORY.md index), THEN /compact.`
+          : 'Offload rich detail to auto-memory FIRST (project-session + reference files + MEMORY.md index), THEN /compact.';
+        lines.push(memLine);
+      }
+
       lines.push(
         `Run \`/compact\` — preserve/drop hints will be auto-injected from observed tool usage. ` +
         `Free-text hint after /compact still works.`

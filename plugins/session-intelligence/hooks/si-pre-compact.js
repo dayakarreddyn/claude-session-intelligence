@@ -108,6 +108,50 @@ function parseSessionContext(content) {
  * an empty string when every section is placeholder-only — we'd rather
  * ship no guidance than misleading guidance.
  */
+/**
+ * Build a memory-offload directive that tells Claude to preserve rich detail
+ * in auto-memory BEFORE the compact summary collapses it. Pre-compact stdout
+ * lands in the conversation context Claude sees during + after summarisation,
+ * so the directive acts as a standing instruction the post-compact turn will
+ * honour even if tool calls aren't emitted during summarisation itself.
+ *
+ * Returns '' when projectDir is null — no memory home to write to.
+ */
+function buildMemoryOffloadBlock(projectDir) {
+  if (!projectDir) return '';
+  const memoryDir = path.join(projectDir, 'memory');
+  const today = new Date();
+  const ymd = `${today.getFullYear()}_${String(today.getMonth() + 1).padStart(2, '0')}_${String(today.getDate()).padStart(2, '0')}`;
+
+  return [
+    '',
+    'MEMORY OFFLOAD CHECKPOINT (pre-compact):',
+    '\u2501'.repeat(50),
+    'Compact will compress this session. Before detail is lost, write auto-memory',
+    `under ${memoryDir}/ following the frontmatter + MEMORY.md index convention`,
+    'already defined in your system prompt. Two files suggested — skip either if',
+    'there\'s nothing new to record:',
+    '',
+    `  1. project_session_${ymd}.md (type: project)`,
+    '     - Decisions made, files touched with paths, follow-ups / open issues,',
+    '       any non-obvious context that took >3 attempts to discover',
+    '     - Why: detail the compact summary won\'t retain',
+    '     - How to apply: how to pick up this thread in the next session',
+    '',
+    '  2. reference_<pattern>.md (type: reference or project) — ONLY if a',
+    '     reusable recipe, layout, or rule was discovered this session. Skip',
+    '     otherwise. Examples: file-layout convention, test fixture pattern,',
+    '     debugging approach that worked.',
+    '',
+    `Then update ${memoryDir}/MEMORY.md with one-line pointer(s). Do not`,
+    'duplicate content already captured in prior memories — update those in',
+    'place instead. If nothing new is worth persisting, say so and move on.',
+    '',
+    '\u2501'.repeat(50),
+    '',
+  ].join('\n');
+}
+
 function formatCompactionHints(sections) {
   const sectionMap = [
     // At compact-time the work under "## Current Task" is the task we were
@@ -216,17 +260,32 @@ async function main() {
     intelLog('pre-compact', 'warn', 'no project directory resolved', { cwd });
   }
 
+  // Memory-offload directive — tell Claude to write rich detail into
+  // auto-memory before compact compresses the session. Gated by config so
+  // users who don't want this can disable (CLAUDE_COMPACT_MEMORY_OFFLOAD=0
+  // or compact.memoryOffload:false in ~/.claude/session-intelligence.json).
+  let memoryOffload = '';
+  try {
+    const cfg = require(path.join(SI_LIB, 'config')).loadConfig();
+    if (cfg && cfg.compact && cfg.compact.memoryOffload !== false) {
+      memoryOffload = buildMemoryOffloadBlock(projectDir);
+    }
+  } catch { /* config optional — default is to emit the block */
+    memoryOffload = buildMemoryOffloadBlock(projectDir);
+  }
+
   // Emit a single top-level "Session Intelligence" heading so the model
   // knows this structured block came from the plugin (vs. arbitrary user
   // text). Only when at least one sub-block has content — a lonely heading
   // with no guidance under it wastes tokens and confuses the summariser.
-  if (hints || shapeInjection) {
+  if (hints || shapeInjection || memoryOffload) {
     const bar = '\u2501'.repeat(50);
     process.stdout.write(`\n${bar}\n  SESSION INTELLIGENCE \u2014 compaction guidance\n${bar}\n`);
   }
 
   // User-authored session-context.md hints first (manual curation, stronger
-  // signal), then observed shape (grounded in what actually happened).
+  // signal), then observed shape (grounded in what actually happened), then
+  // the memory-offload directive (stands alone; doesn't depend on the others).
   if (hints) {
     process.stdout.write(hints);
     log('[PreCompact] Injected compaction hints from session-context.md');
@@ -234,6 +293,14 @@ async function main() {
   if (shapeInjection) {
     process.stdout.write(shapeInjection);
     log('[PreCompact] Injected observed context-shape hints');
+  }
+  if (memoryOffload) {
+    process.stdout.write(memoryOffload);
+    log('[PreCompact] Injected memory-offload checkpoint directive');
+    intelLog('pre-compact', 'info', 'memory offload directive emitted', {
+      projectDir: path.basename(projectDir || ''),
+      bytes: memoryOffload.length,
+    });
   }
 
   // Learning-loop logging: record this compaction event so future sessions
