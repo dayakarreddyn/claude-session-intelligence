@@ -52,7 +52,19 @@ echo ""
 
 mkdir -p "$HOOKS_DIR" "$LIB_DIR" "$SCRIPTS_DIR" "$LOGS_DIR" "$COMMANDS_DIR"
 
-for hook in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
+# Migrate any pre-rename (unprefixed) SI hooks left behind by older installs.
+# We only remove files we authored — match on the "Session Intelligence"
+# banner so we don't trample a same-named file from another source.
+for legacy in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
+  if [ -f "${HOOKS_DIR}/${legacy}" ] && grep -q "Session Intelligence" "${HOOKS_DIR}/${legacy}" 2>/dev/null; then
+    mv "${HOOKS_DIR}/${legacy}" "${HOOKS_DIR}/${legacy}.bak-pre-si-rename"
+    warn "  Migrated ${legacy} → ${legacy}.bak-pre-si-rename (renamed with si- prefix)"
+  fi
+done
+
+# New install path (all hooks carry the si- prefix for discoverability in
+# shared hook directories).
+for hook in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
   if [ -f "${HOOKS_DIR}/${hook}" ]; then
     if grep -q "Session Intelligence" "${HOOKS_DIR}/${hook}" 2>/dev/null; then
       info "  ${hook} already installed, updating..."
@@ -63,10 +75,11 @@ for hook in pre-compact.js suggest-compact.js token-budget-tracker.js task-chang
   fi
 done
 
-cp "${PLUGIN_SRC}/hooks/pre-compact.js"            "${HOOKS_DIR}/pre-compact.js"
-cp "${PLUGIN_SRC}/hooks/suggest-compact.js"        "${HOOKS_DIR}/suggest-compact.js"
-cp "${PLUGIN_SRC}/hooks/token-budget-tracker.js"   "${HOOKS_DIR}/token-budget-tracker.js"
-cp "${PLUGIN_SRC}/hooks/task-change-detector.js"   "${HOOKS_DIR}/task-change-detector.js"
+cp "${PLUGIN_SRC}/hooks/si-pre-compact.js"     "${HOOKS_DIR}/si-pre-compact.js"
+cp "${PLUGIN_SRC}/hooks/si-suggest-compact.js" "${HOOKS_DIR}/si-suggest-compact.js"
+cp "${PLUGIN_SRC}/hooks/si-token-budget.js"    "${HOOKS_DIR}/si-token-budget.js"
+cp "${PLUGIN_SRC}/hooks/si-task-change.js"     "${HOOKS_DIR}/si-task-change.js"
+cp "${PLUGIN_SRC}/hooks/si-status-report.js"   "${HOOKS_DIR}/si-status-report.js"
 cp "${PLUGIN_SRC}/lib/utils.js"                    "${LIB_DIR}/utils.js"
 cp "${PLUGIN_SRC}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
 cp "${PLUGIN_SRC}/lib/config.js"                   "${LIB_DIR}/config.js"
@@ -99,10 +112,11 @@ if [ -f "${PLUGIN_SRC}/commands/si.md" ]; then
   ok "Installed /si slash command → ${COMMANDS_DIR}/si.md"
 fi
 
-chmod +x "${HOOKS_DIR}/pre-compact.js"
-chmod +x "${HOOKS_DIR}/suggest-compact.js"
-chmod +x "${HOOKS_DIR}/token-budget-tracker.js"
-chmod +x "${HOOKS_DIR}/task-change-detector.js"
+chmod +x "${HOOKS_DIR}/si-pre-compact.js"
+chmod +x "${HOOKS_DIR}/si-suggest-compact.js"
+chmod +x "${HOOKS_DIR}/si-token-budget.js"
+chmod +x "${HOOKS_DIR}/si-task-change.js"
+chmod +x "${HOOKS_DIR}/si-status-report.js"
 
 ok "Hooks + lib installed to ${HOOKS_DIR}/"
 
@@ -126,7 +140,7 @@ const preCompactIdx = settings.hooks.PreCompact.findIndex(h =>
 );
 const preCompactEntry = {
   matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/pre-compact.js\"' }],
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-pre-compact.js\"' }],
   description: 'Session Intelligence: inject compaction hints from session-context.md',
   id: 'si:pre-compact'
 };
@@ -135,13 +149,13 @@ else settings.hooks.PreCompact.push(preCompactEntry);
 
 if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
 const budgetIdx = settings.hooks.PostToolUse.findIndex(h =>
-  h.id === 'post:token-budget-tracker' || h.id === 'si:token-budget-tracker'
+  h.id === 'post:token-budget-tracker' || h.id === 'si:token-budget-tracker' || h.id === 'si:token-budget'
 );
 const budgetEntry = {
   matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/token-budget-tracker.js\"', async: true, timeout: 5 }],
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-token-budget.js\"', async: true, timeout: 5 }],
   description: 'Session Intelligence: track token usage + unified tool count across ALL tools',
-  id: 'si:token-budget-tracker'
+  id: 'si:token-budget'
 };
 if (budgetIdx >= 0) settings.hooks.PostToolUse[budgetIdx] = budgetEntry;
 else settings.hooks.PostToolUse.push(budgetEntry);
@@ -160,7 +174,7 @@ const suggestIdx = settings.hooks.PostToolUse.findIndex(h =>
 );
 const suggestEntry = {
   matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/suggest-compact.js\"', timeout: 10 }],
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-suggest-compact.js\"', timeout: 10 }],
   description: 'Session Intelligence: token-aware compaction suggestions (PostToolUse, non-blocking)',
   id: 'si:suggest-compact'
 };
@@ -169,13 +183,13 @@ else settings.hooks.PostToolUse.push(suggestEntry);
 
 if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
 const taskIdx = settings.hooks.UserPromptSubmit.findIndex(h =>
-  h.id === 'si:task-change-detector'
+  h.id === 'si:task-change-detector' || h.id === 'si:task-change'
 );
 const taskEntry = {
   matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/task-change-detector.js\"' }],
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-task-change.js\"' }],
   description: 'Session Intelligence: detect task-domain changes at prompt submit',
-  id: 'si:task-change-detector'
+  id: 'si:task-change'
 };
 if (taskIdx >= 0) settings.hooks.UserPromptSubmit[taskIdx] = taskEntry;
 else settings.hooks.UserPromptSubmit.push(taskEntry);
@@ -261,7 +275,7 @@ echo ""
 info "Validating installation..."
 
 PASS=true
-for f in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
+for f in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
   if node -c "${HOOKS_DIR}/${f}" 2>/dev/null; then
     ok "  ${f} — syntax OK"
   else

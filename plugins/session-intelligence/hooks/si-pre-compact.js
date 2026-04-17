@@ -129,7 +129,10 @@ function parseSessionContext(content) {
  */
 function formatCompactionHints(sections) {
   const sectionMap = [
-    ['Current Task', 'CURRENT TASK:'],
+    // At compact-time the work under "## Current Task" is the task we were
+    // just on — from the post-compact summariser's perspective it's the
+    // last one. "LAST TASK" reads more accurately than "CURRENT TASK" here.
+    ['Current Task', 'LAST TASK:'],
     ['Key Files', 'KEY FILES (must preserve):'],
     ['Key Decisions', 'KEY DECISIONS (must preserve):'],
     ['On Compact', 'COMPACTION INSTRUCTIONS:'],
@@ -203,16 +206,15 @@ async function main() {
     }
   }
 
+  let hints = '';
   if (projectDir) {
     const contextFile = path.join(projectDir, 'session-context.md');
     const content = readFile(contextFile);
 
     if (content && content.trim().length > 0) {
       const sections = parseSessionContext(content);
-      const hints = formatCompactionHints(sections);
+      hints = formatCompactionHints(sections);
       if (hints) {
-        process.stdout.write(hints);
-        log(`[PreCompact] Injected compaction hints from session-context.md`);
         intelLog('pre-compact', 'info', 'injected hints', {
           projectDir: path.basename(projectDir),
           sections: Object.keys(sections).filter((k) => sections[k]),
@@ -233,10 +235,21 @@ async function main() {
     intelLog('pre-compact', 'warn', 'no project directory resolved', { cwd });
   }
 
-  // Shape-derived hints get appended AFTER the session-context.md block so
-  // both guidance channels reach the model — user-authored first (stronger
-  // signal, manual curation), observed-shape second (grounded in what
-  // actually happened).
+  // Emit a single top-level "Session Intelligence" heading so the model
+  // knows this structured block came from the plugin (vs. arbitrary user
+  // text). Only when at least one sub-block has content — a lonely heading
+  // with no guidance under it wastes tokens and confuses the summariser.
+  if (hints || shapeInjection) {
+    const bar = '\u2501'.repeat(50);
+    process.stdout.write(`\n${bar}\n  SESSION INTELLIGENCE \u2014 compaction guidance\n${bar}\n`);
+  }
+
+  // User-authored session-context.md hints first (manual curation, stronger
+  // signal), then observed shape (grounded in what actually happened).
+  if (hints) {
+    process.stdout.write(hints);
+    log('[PreCompact] Injected compaction hints from session-context.md');
+  }
   if (shapeInjection) {
     process.stdout.write(shapeInjection);
     log('[PreCompact] Injected observed context-shape hints');
@@ -276,7 +289,7 @@ async function main() {
       compactHistory.appendHistory(historyEntry);
 
       // Snapshot drives post-compact regret monitoring for up to 30 calls
-      // or 30 min — whichever first. token-budget-tracker.js consumes it.
+      // or 30 min — whichever first. si-token-budget.js consumes it.
       compactHistory.writeSnapshot(sessionId, {
         t: historyEntry.t,
         tokens,

@@ -5,7 +5,7 @@
  * Cross-platform (Windows, macOS, Linux)
  *
  * Tracks approximate token usage per session by measuring tool output sizes.
- * Writes cumulative estimate to a temp file that suggest-compact.js reads
+ * Writes cumulative estimate to a temp file that si-suggest-compact.js reads
  * to provide token-aware compaction suggestions.
  *
  * Token estimation (rough but directionally correct):

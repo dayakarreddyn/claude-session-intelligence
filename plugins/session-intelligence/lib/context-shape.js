@@ -188,7 +188,7 @@ function analyzeShape(entries) {
 }
 
 /**
- * Short one-liner suitable for stderr in suggest-compact.js. Designed to
+ * Short one-liner suitable for stderr in si-suggest-compact.js. Designed to
  * ride under the existing "ORANGE ZONE (315k)" zone header, so it should
  * read like a diagnosis, not a second alert.
  *
@@ -214,7 +214,7 @@ function draftMessage(analysis) {
 }
 
 /**
- * Structured hints for pre-compact.js to inject into the compaction prompt.
+ * Structured hints for si-pre-compact.js to inject into the compaction prompt.
  * This is what gets baked into the model's compaction instructions — so
  * wording here goes straight into Claude Code's compaction pipeline.
  */

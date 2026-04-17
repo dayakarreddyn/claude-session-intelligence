@@ -379,7 +379,7 @@ Every write shows a unified diff of the proposed change and waits for you to rep
 
 ## Auto-Compact Suggestions
 
-`suggest-compact.js` is a `PostToolUse` hook that watches token budget after every tool call. When context **escalates** into a higher-severity zone, it emits a **grounded diagnosis** that Claude Code surfaces back to the assistant on its next turn — **without blocking the tool call** that just ran.
+`si-suggest-compact.js` is a `PostToolUse` hook that watches token budget after every tool call. When context **escalates** into a higher-severity zone, it emits a **grounded diagnosis** that Claude Code surfaces back to the assistant on its next turn — **without blocking the tool call** that just ran.
 
 ### Zone behavior
 
@@ -434,7 +434,7 @@ A cheap, append-only observer of where Claude's tool calls are **actually** land
 
 ### What it observes
 
-Every `PostToolUse` call, `token-budget-tracker.js` appends one line to `/tmp/claude-ctx-shape-<sid>.jsonl`:
+Every `PostToolUse` call, `si-token-budget.js` appends one line to `/tmp/claude-ctx-shape-<sid>.jsonl`:
 
 ```json
 {"t":1714000000,"tok":155432,"tool":"Read","root":"src/auth","file":"src/auth/login.ts"}
@@ -463,7 +463,7 @@ Phase events flagged automatically: `git commit`, `git push`, `gh pr create`, `g
 ### Where it shows up
 
 1. **Suggest-compact message**: the `Observed:` line above.
-2. **Pre-compact injection**: at the moment of `/compact`, `pre-compact.js` regenerates the analysis and streams this to stdout (which Claude Code feeds to the model as compaction guidance):
+2. **Pre-compact injection**: at the moment of `/compact`, `si-pre-compact.js` regenerates the analysis and streams this to stdout (which Claude Code feeds to the model as compaction guidance):
 
 ```
 OBSERVED CONTEXT SHAPE (auto-generated from tool usage):
@@ -508,7 +508,7 @@ Size-bounded at 200 entries / 256 KB with automatic rotation. Cross-session — 
 
 ### 2. Adaptive zone thresholds
 
-With ≥5 compacts in history, `suggest-compact.js` swaps the static 200k/300k/400k thresholds for ones learned from your pattern:
+With ≥5 compacts in history, `si-suggest-compact.js` swaps the static 200k/300k/400k thresholds for ones learned from your pattern:
 
 - `orange` = `floor(P50 * 0.9)` — slightly below where you typically pull the trigger, so warnings land before you've already decided to compact
 - `yellow` = `orange - 80k`
@@ -522,7 +522,7 @@ All bounded **±30% from defaults** so a degenerate history can't silence warnin
 
 ### 3. Post-compact regret detection
 
-When `pre-compact.js` writes PRESERVE/DROP bands, it also snapshots them to `/tmp/claude-compact-snapshot-<sid>.json`:
+When `si-pre-compact.js` writes PRESERVE/DROP bands, it also snapshots them to `/tmp/claude-compact-snapshot-<sid>.json`:
 
 ```json
 {"t":1714000000,"tokens":265000,"cost":2.14,
@@ -530,7 +530,7 @@ When `pre-compact.js` writes PRESERVE/DROP bands, it also snapshots them to `/tm
  "callsSince":0,"regretHits":[]}
 ```
 
-For the next **30 tool calls** or **30 minutes** (whichever first), `token-budget-tracker.js` checks every file path against `droppedDirs`. A match = "regret hit": you told the model to drop that context, but then you (or Claude) reached back for it. Hits accrue into the snapshot; when the window closes, the count gets stamped back into the original history entry as `regretCount`.
+For the next **30 tool calls** or **30 minutes** (whichever first), `si-token-budget.js` checks every file path against `droppedDirs`. A match = "regret hit": you told the model to drop that context, but then you (or Claude) reached back for it. Hits accrue into the snapshot; when the window closes, the count gets stamped back into the original history entry as `regretCount`.
 
 The **regret rate across your last 10 compacts** feeds back into `adaptiveZones()` — if ≥1 regret per compact on average, orange pushes **out** by 10% (be more conservative, the user apparently needs that context).
 
@@ -550,7 +550,7 @@ The **regret rate across your last 10 compacts** feeds back into `adaptiveZones(
 
 ## Task Change Detector
 
-When you submit a prompt, `task-change-detector.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, asks whether you want to `/compact`, `/clear`, or keep going before it processes the prompt.
+When you submit a prompt, `si-task-change.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, asks whether you want to `/compact`, `/clear`, or keep going before it processes the prompt.
 
 ### Layer 1 — heuristic signals (always on)
 
@@ -663,11 +663,11 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules |
-| `pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
-| `token-budget-tracker.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
-| `suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
-| `task-change-detector.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
+| `si-bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules |
+| `si-pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
+| `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
+| `si-suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
+| `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
 
 All emit structured entries to the debug log (see above).
 
@@ -675,11 +675,11 @@ All emit structured entries to the debug log (see above).
 
 | Target | Source | Purpose |
 |---|---|---|
-| `~/.claude/scripts/hooks/bootstrap.js` | `hooks/bootstrap.js` | SessionStart bootstrapper |
-| `~/.claude/scripts/hooks/pre-compact.js` | `hooks/pre-compact.js` | Compaction hint injector (session-context + shape + history logging) |
-| `~/.claude/scripts/hooks/token-budget-tracker.js` | `hooks/token-budget-tracker.js` | Token estimator + shape observer + regret detector |
-| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Grounded zone warnings with adaptive thresholds |
-| `~/.claude/scripts/hooks/task-change-detector.js` | `hooks/task-change-detector.js` | Task-domain change detector |
+| `~/.claude/scripts/hooks/si-bootstrap.js` | `hooks/si-bootstrap.js` | SessionStart bootstrapper |
+| `~/.claude/scripts/hooks/si-pre-compact.js` | `hooks/si-pre-compact.js` | Compaction hint injector (session-context + shape + history logging) |
+| `~/.claude/scripts/hooks/si-token-budget.js` | `hooks/si-token-budget.js` | Token estimator + shape observer + regret detector |
+| `~/.claude/scripts/hooks/si-suggest-compact.js` | `hooks/si-suggest-compact.js` | Grounded zone warnings with adaptive thresholds |
+| `~/.claude/scripts/hooks/si-task-change.js` | `hooks/si-task-change.js` | Task-domain change detector |
 | `~/.claude/scripts/hooks/session-intelligence/lib/config.js` | `lib/config.js` | Unified config loader + presets |
 | `~/.claude/scripts/hooks/session-intelligence/lib/context-shape.js` | `lib/context-shape.js` | Shape observer: appendShape / analyzeShape / formatCompactInjection |
 | `~/.claude/scripts/hooks/session-intelligence/lib/compact-history.js` | `lib/compact-history.js` | History log + adaptive zones + post-compact regret tracking |
@@ -723,7 +723,7 @@ Three paths, from preferred to least:
    /si set statusline.zones.orange 350000
    /si set statusline.zones.red 450000
    ```
-3. **Hardcoded edit** — only if you want to change the fallback defaults used when history is empty. Edit the `getZone()` function in `suggest-compact.js`, `token-budget-tracker.js`, and `statusline-intel.js`:
+3. **Hardcoded edit** — only if you want to change the fallback defaults used when history is empty. Edit the `getZone()` function in `si-suggest-compact.js`, `si-token-budget.js`, and `statusline-intel.js`:
 
 ```js
 function getZone(tokens, zones) {

@@ -70,7 +70,7 @@ Every message in a Claude Code conversation sits in the same window:
 
 Tool results dominate long sessions. A single Read of a 2000-line file is ~8000 tokens. A Grep with 50 matches can be 10-30k. Twenty Bash calls producing 500 lines each is 40k. The model re-processes all of it on every subsequent turn until compaction.
 
-The plugin's `token-budget-tracker.js` approximates this by summing tool I/O at 4 chars/token (conservative for code, generous for natural language). The authoritative number comes from `transcript_path.message.usage` — the plugin prefers this when available, falls back to the estimate otherwise.
+The plugin's `si-token-budget.js` approximates this by summing tool I/O at 4 chars/token (conservative for code, generous for natural language). The authoritative number comes from `transcript_path.message.usage` — the plugin prefers this when available, falls back to the estimate otherwise.
 
 ---
 
@@ -283,7 +283,7 @@ No syntax to memorize. No "preserve X, drop Y" to type mid-flow when you're alre
 
 Claude Code exposes a `PreCompact` hook that fires before the compaction prompt reaches the model. Whatever the hook writes to stdout gets **prepended to Claude's compaction instructions.**
 
-Our `pre-compact.js` writes two blocks:
+Our `si-pre-compact.js` writes two blocks:
 
 1. **COMPACTION GUIDANCE (from session-context.md)** — user-authored, curated hints from the session context file (existing behaviour)
 2. **OBSERVED CONTEXT SHAPE** — freshly regenerated PRESERVE/DROP bands from the shape log
@@ -292,7 +292,7 @@ The model sees both, user-curated first (stronger signal, manual intent), observ
 
 ### 5.3 Example injection
 
-Full stdout written by `pre-compact.js` at the moment of /compact:
+Full stdout written by `si-pre-compact.js` at the moment of /compact:
 
 ```
 COMPACTION GUIDANCE (from session-context.md):
@@ -410,7 +410,7 @@ Claude Code doesn't expose a PostCompact hook, so there's no direct way to ask "
 
 ### 7.2 The snapshot mechanism
 
-At the moment of `/compact`, `pre-compact.js` writes a per-session snapshot:
+At the moment of `/compact`, `si-pre-compact.js` writes a per-session snapshot:
 
 ```json
 {
@@ -537,11 +537,11 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 
 | Hook | Event | Responsibility |
 |---|---|---|
-| `bootstrap.js` | SessionStart | Seed session-context.md from git; wire statusline chain; inject CLAUDE.md rules |
-| `token-budget-tracker.js` | PostToolUse | Sum tool I/O → `tokenBudget`; append shape entry; post-compact regret check |
-| `suggest-compact.js` | PostToolUse | Adaptive zones; grounded diagnosis; zone-crossover stderr message |
-| `pre-compact.js` | PreCompact | Inject session-context.md + observed shape; log history entry; write post-compact snapshot |
-| `task-change-detector.js` | UserPromptSubmit | Heuristic same-domain score + Haiku tie-breaker on domain shift |
+| `si-bootstrap.js` | SessionStart | Seed session-context.md from git; wire statusline chain; inject CLAUDE.md rules |
+| `si-token-budget.js` | PostToolUse | Sum tool I/O → `tokenBudget`; append shape entry; post-compact regret check |
+| `si-suggest-compact.js` | PostToolUse | Adaptive zones; grounded diagnosis; zone-crossover stderr message |
+| `si-pre-compact.js` | PreCompact | Inject session-context.md + observed shape; log history entry; write post-compact snapshot |
+| `si-task-change.js` | UserPromptSubmit | Heuristic same-domain score + Haiku tie-breaker on domain shift |
 
 ### 10.2 Libraries
 
@@ -571,24 +571,24 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 
 ```
 SessionStart
-  └─ bootstrap.js: seed session-context.md, wire statusline, inject rules
+  └─ si-bootstrap.js: seed session-context.md, wire statusline, inject rules
 
 loop on user turn:
 
   UserPromptSubmit
-    └─ task-change-detector.js: score domain shift, maybe offer /compact|/clear
+    └─ si-task-change.js: score domain shift, maybe offer /compact|/clear
 
   loop on tool call:
 
     (tool executes)
 
     PostToolUse
-      ├─ token-budget-tracker.js:
+      ├─ si-token-budget.js:
       │     - sum tool I/O, update budget file
       │     - append shape entry (if file or event)
       │     - check post-compact regret (if snapshot live)
       │
-      └─ suggest-compact.js:
+      └─ si-suggest-compact.js:
             - load compact history, compute adaptive zones
             - evaluate zone for current budget
             - if crossover to orange/red:
@@ -598,7 +598,7 @@ loop on user turn:
 
   if user types /compact:
     PreCompact
-      └─ pre-compact.js:
+      └─ si-pre-compact.js:
             - read session-context.md, format hints block
             - read shape, analyze, format shape-injection block
             - append to history; write snapshot
@@ -653,13 +653,13 @@ User: (starts work on auth refactor)
 User: (finishes auth work, runs tests, commits)
 User: Now let's look at the billing side.
 
-[task-change-detector.js: same-domain score 0.1, below threshold]
+[si-task-change.js: same-domain score 0.1, below threshold]
 [offers: Compact / Clear / Continue]
 
 User: Compact
 
 [plugin observes: /compact typed]
-    [pre-compact.js writes:
+    [si-pre-compact.js writes:
        - session-context.md hints
        - OBSERVED CONTEXT SHAPE:
            DOMAIN SHIFT DETECTED: src/auth → (tests pending)
@@ -733,9 +733,9 @@ Plugin source (this repo):
 - `lib/context-shape.js` — observation log, band classification, shift detection, injection formatting
 - `lib/compact-history.js` — history logging, adaptive zones, post-compact regret
 - `lib/cost-estimation.js` — incremental cost-from-transcript, cost-band classification
-- `hooks/pre-compact.js` — PreCompact injection + history logging + snapshot write
-- `hooks/suggest-compact.js` — grounded diagnosis + adaptive thresholds
-- `hooks/token-budget-tracker.js` — shape observation + regret detection
+- `hooks/si-pre-compact.js` — PreCompact injection + history logging + snapshot write
+- `hooks/si-suggest-compact.js` — grounded diagnosis + adaptive thresholds
+- `hooks/si-token-budget.js` — shape observation + regret detection
 
 ---
 

@@ -65,7 +65,7 @@ async function main() {
     ? cfg.threshold
     : 50;
 
-  // Tool counting is now owned by token-budget-tracker.js (PostToolUse with
+  // Tool counting is now owned by si-token-budget.js (PostToolUse with
   // wider matcher). We only READ the count here to drive threshold warnings.
   let count = 0;
   try {

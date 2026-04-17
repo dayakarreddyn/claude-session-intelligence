@@ -11,8 +11,8 @@
  *     task-change one-shot state, last compaction timestamp
  *
  * Usage:
- *   echo '{"session_id":"<sid>"}' | node status-report.js
- *   node status-report.js --session <sid>
+ *   echo '{"session_id":"<sid>"}' | node si-status-report.js
+ *   node si-status-report.js --session <sid>
  *
  * When a session id is unavailable, falls back to the tmp-file with the
  * newest mtime, then to "default". The script never mutates anything —
@@ -117,7 +117,11 @@ function collectInstallation() {
     ? readJson(path.join(plugin, 'plugins', 'session-intelligence', '.claude-plugin', 'plugin.json'))
       || readJson(path.join(plugin, '.claude-plugin', 'plugin.json'))
     : null;
+  // Detect both post-rename (si-prefixed) and legacy (unprefixed) hook files.
+  // Older installs wrote unprefixed names; newer installs use si- prefix.
   const bashHooks = [
+    'si-pre-compact.js', 'si-suggest-compact.js',
+    'si-token-budget.js', 'si-task-change.js', 'si-bootstrap.js',
     'pre-compact.js', 'suggest-compact.js',
     'token-budget-tracker.js', 'task-change-detector.js',
   ].filter((h) => exists(path.join(BASH_HOOK_DIR, h)));
@@ -141,6 +145,11 @@ function collectInstallation() {
 }
 
 const OUR_HOOK_FILES = [
+  // Current (si-prefixed) names
+  'si-pre-compact.js', 'si-suggest-compact.js',
+  'si-token-budget.js', 'si-task-change.js', 'si-bootstrap.js',
+  // Legacy unprefixed names — kept so status still reports correctly on
+  // older installs that haven't re-run install.sh since the rename.
   'pre-compact.js', 'suggest-compact.js',
   'token-budget-tracker.js', 'task-change-detector.js',
   'bootstrap.js',

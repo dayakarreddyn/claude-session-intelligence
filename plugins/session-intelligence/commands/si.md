@@ -52,8 +52,11 @@ Examples:
 **`status`** — Run the read-only runtime report. Resolve the status script path in this order and invoke the first that exists with the current session id piped on stdin:
 
 ```
+${CLAUDE_PLUGIN_ROOT}/hooks/si-status-report.js
+~/.claude/plugins/marketplaces/session-intelligence/plugins/session-intelligence/hooks/si-status-report.js
+~/.claude/scripts/hooks/si-status-report.js
+# Legacy fallbacks (older installs pre si- rename):
 ${CLAUDE_PLUGIN_ROOT}/hooks/status-report.js
-~/.claude/plugins/marketplaces/session-intelligence/plugins/session-intelligence/hooks/status-report.js
 ~/.claude/scripts/hooks/status-report.js
 ```
 

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/bootstrap.js",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/si-bootstrap.js",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact.js",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/si-pre-compact.js",
             "timeout": 5
           }
         ]
@@ -30,12 +30,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/token-budget-tracker.js",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/si-token-budget.js",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/suggest-compact.js",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/si-suggest-compact.js",
             "timeout": 10
           }
         ]
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/task-change-detector.js",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/si-task-change.js",
             "timeout": 30
           }
         ]

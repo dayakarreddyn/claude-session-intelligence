@@ -20,20 +20,25 @@ ok()    { echo -e "${GREEN}[SI]${NC} $1"; }
 
 info "Uninstalling Session Intelligence..."
 
-# Remove our hooks
-for f in token-budget-tracker.js; do
-  if [ -f "${HOOKS_DIR}/${f}" ]; then
+# Remove our hooks (both current si-prefixed names and any pre-rename
+# unprefixed copies left behind by older installs).
+for f in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js si-status-report.js \
+         pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js status-report.js; do
+  if [ -f "${HOOKS_DIR}/${f}" ] && grep -q "Session Intelligence" "${HOOKS_DIR}/${f}" 2>/dev/null; then
     rm "${HOOKS_DIR}/${f}"
     ok "Removed ${f}"
   fi
 done
 
-# Restore backups for hooks that may have existed before us
-for hook in pre-compact.js suggest-compact.js; do
-  if [ -f "${HOOKS_DIR}/${hook}.bak" ]; then
-    mv "${HOOKS_DIR}/${hook}.bak" "${HOOKS_DIR}/${hook}"
-    ok "Restored ${hook} from backup"
-  fi
+# Restore backups left behind by the pre-rename migration (if we had shadowed
+# a same-named hook from another source before install).
+for hook in pre-compact.js suggest-compact.js si-pre-compact.js si-suggest-compact.js; do
+  for suffix in .bak .bak-pre-si-rename; do
+    if [ -f "${HOOKS_DIR}/${hook}${suffix}" ]; then
+      mv "${HOOKS_DIR}/${hook}${suffix}" "${HOOKS_DIR}/${hook}"
+      ok "Restored ${hook} from backup (${suffix})"
+    fi
+  done
 done
 
 # Remove bundled lib (utils + intel-debug)
