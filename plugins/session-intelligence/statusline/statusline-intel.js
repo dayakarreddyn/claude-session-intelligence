@@ -512,22 +512,26 @@ function buildRenderers(C) {
     /** Activity-aware emoji for line 2 (tools/time/cost/deploy). */
     emoji2: (_input, ctx) => pickEmojiSecond(ctx),
 
+    // Colour policy (see README "Statusline palette"): line 1 is all dim
+    // except `tokens`, which is the one signal worth a colour because the
+    // whole bar exists to warn about context pressure. Every other field is
+    // context FOR that signal — making them bright just adds noise.
     model: (input) => {
       const m = input.model?.display_name || input.model?.id || 'claude';
-      return `${C.bold}${m}${C.reset}`;
+      return `${C.dim}${m}${C.reset}`;
     },
 
-    project: (input) => `${C.cyan}${projectLabel(input.cwd)}${C.reset}`,
+    project: (input) => `${C.dim}${projectLabel(input.cwd)}${C.reset}`,
 
     branch: (input) => {
       const b = gitBranch(input.cwd);
-      return b ? `${C.magenta}${b}${C.reset}` : '';
+      return b ? `${C.dim}${b}${C.reset}` : '';
     },
 
     dirty: (input) => {
       const n = gitDirtyCount(input.cwd);
       if (n === 0) return '';
-      return `${C.yellow}±${n}${C.reset}`;
+      return `${C.dim}\u00b1${n}${C.reset}`;
     },
 
     tokens: (input, ctx) => {
@@ -584,19 +588,19 @@ function buildRenderers(C) {
 
     /**
      * Git diff-stat: (+N,-M) across all uncommitted changes in HEAD + untracked.
-     * Skipped silently when clean.
+     * Skipped silently when clean. All dim — see colour policy above.
      */
     diffstat: (input, _ctx) => {
       const s = gitDiffStat(input.cwd);
       if (!s.added && !s.deleted) return '';
-      return `${C.dim}(${C.green}+${s.added}${C.dim},${C.red}-${s.deleted}${C.dim})${C.reset}`;
+      return `${C.dim}(+${s.added},-${s.deleted})${C.reset}`;
     },
 
     /** GH issue number (#164) parsed from branch or current task. */
     issue: (input, ctx) => {
       const branch = gitBranch(input.cwd);
       const iss = extractIssueNumber(branch, ctx.task);
-      return iss ? `${C.magenta}${iss}${C.reset}` : '';
+      return iss ? `${C.dim}${iss}${C.reset}` : '';
     },
 
     /** Minutes since last compaction event (pre-compact hook timestamps).

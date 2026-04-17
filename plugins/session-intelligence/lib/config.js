@@ -17,13 +17,18 @@ const os = require('os');
 // Preset shapes for `statusline.preset`. Using a preset is a shortcut that
 // sets `fields` without losing the ability to override individual fields —
 // if the user sets `statusline.fields` explicitly the preset is ignored.
+//
+// No emoji / emoji2 in presets: one colour, one signal. The bar is there to
+// warn about context pressure; everything else is context FOR that signal.
+// Emoji renderers remain in the codebase for users who still want them, but
+// default output stays typography-only. See README "Statusline palette".
 const STATUSLINE_PRESETS = {
-  minimal:  ['emoji', 'tokens'],
-  standard: ['emoji', 'model', 'project', 'tokens', 'newline', 'task'],
+  minimal:  ['tokens'],
+  standard: ['model', 'project', 'tokens', 'newline', 'task'],
   verbose:  [
-    'emoji', 'model', 'project', 'branch', 'diffstat', 'tokens',
+    'model', 'project', 'branch', 'diffstat', 'tokens',
     'newline',
-    'emoji2', 'tools', 'session', 'cost', 'task',
+    'tools', 'session', 'cost', 'task',
   ],
 };
 
