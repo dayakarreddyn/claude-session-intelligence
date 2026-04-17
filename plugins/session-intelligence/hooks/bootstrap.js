@@ -92,6 +92,18 @@ function seedConfig(state) {
 
 // ─── Step 2: wire statusline chain ───────────────────────────────────────────
 
+// Read the current PREV_STATUSLINE= value from an existing chain script so
+// we can preserve whatever the user (or a prior install) set. Parses a line
+// of the form `PREV_STATUSLINE='...'` allowing internal escaped quotes.
+function readExistingPrevFromChain(chainPath) {
+  try {
+    const raw = fs.readFileSync(chainPath, 'utf8');
+    const m = raw.match(/^\s*PREV_STATUSLINE='((?:[^'\\]|\\.|'\\'')*)'\s*$/m);
+    if (!m) return '';
+    return m[1].replace(/'\\''/g, "'").replace(/\\(.)/g, '$1');
+  } catch { return ''; }
+}
+
 function prepareChainScript(state) {
   // The shipped chain script has __PREV_STATUSLINE__ placeholder. Substitute
   // whatever the user currently has in settings.json → statusLine.command so
@@ -111,9 +123,18 @@ function prepareChainScript(state) {
 
   const instanceChain = path.join(CLAUDE_DIR, 'scripts', 'si-statusline-chain.sh');
 
-  // If our instance exists and matches, skip re-write.
-  const prev = state.wiredStatuslinePrev || '';
-  if (isAlreadyOurs && fs.existsSync(instanceChain) && prev === currentCmd) {
+  // Source-of-truth for the "previous" command when we're already wired:
+  // (1) whatever the live chain script already has baked in (user may have
+  //     edited it by hand), (2) what we recorded last time we wired,
+  //     (3) empty. This is the critical fix for "I set PREV_STATUSLINE to
+  //     ccstatusline and bootstrap wiped it on the next session".
+  const existingBaked = isAlreadyOurs ? readExistingPrevFromChain(instanceChain) : '';
+  const recordedPrev = state.wiredStatuslinePrev || '';
+  const prev = existingBaked || recordedPrev;
+
+  // If our instance exists, baked-in PREV matches memory, and settings.json
+  // already points at us, nothing to do.
+  if (isAlreadyOurs && fs.existsSync(instanceChain) && prev === recordedPrev) {
     return instanceChain;
   }
 
@@ -122,8 +143,15 @@ function prepareChainScript(state) {
   catch { return null; }
 
   const resolvedPrev = isAlreadyOurs ? prev : currentCmd;
-  const rendered = tmpl.replace(/__PREV_STATUSLINE__/g,
-    resolvedPrev.replace(/\\/g, '\\\\').replace(/'/g, "'\\''"));
+  // Only substitute the assignment line. The template also uses
+  // __PREV_STATUSLINE__ in the safety guard (line 33) as a "still-unrendered"
+  // sentinel; replacing it globally inverted that check and meant the chain
+  // never actually ran the previous command.
+  const escapedPrev = resolvedPrev.replace(/\\/g, '\\\\').replace(/'/g, "'\\''");
+  const rendered = tmpl.replace(
+    /^(\s*PREV_STATUSLINE=)'__PREV_STATUSLINE__'/m,
+    `$1'${escapedPrev}'`,
+  );
   const intelScript = path.join(PLUGIN_ROOT, 'statusline', 'statusline-intel.js');
   const withIntelPath = rendered.replace(
     /INTEL_SCRIPT=.*$/m,
