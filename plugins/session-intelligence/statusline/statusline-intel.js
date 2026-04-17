@@ -685,7 +685,11 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
  * in the transcript. Each turn's cache_read/cache_creation/input/output is
  * billed separately by Anthropic, so summing is correct.
  *
- * Cached by (size, mtime) in /tmp to keep statusLine fast on large transcripts.
+ * Keyed by sessionId, cached as `{offset, cost}` in /tmp. On each call we
+ * read only the bytes between the cached offset and stat.size — a handful of
+ * KB per turn instead of the full multi-MB transcript. The old `(size, mtime)`
+ * cache only helped when the transcript hadn't changed, i.e. never during
+ * active use, so it read and re-parsed the entire file on every keypress.
  */
 function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
@@ -695,33 +699,59 @@ function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRI
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
   const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
+
+  let cachedOffset = 0;
+  let cachedCost = 0;
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) {
-      return cached.cost || 0;
+    if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
+        && cached.offset >= 0 && cached.offset <= stat.size) {
+      cachedOffset = cached.offset;
+      cachedCost = cached.cost;
     }
-  } catch { /* cache miss */ }
+    // Older installs wrote {size, mtime, cost} — no `offset` field. We just
+    // ignore it and re-read from 0 once, then the next call hits the new cache.
+  } catch { /* cache miss or corrupt — read from 0 */ }
 
-  let cost = 0;
+  // File shrank (rotation / clear) → drop cache, re-read whole thing.
+  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; }
+
+  // No new bytes — short-circuit the I/O entirely.
+  if (stat.size === cachedOffset) return cachedCost;
+
+  let newCost = cachedCost;
+  let newOffset = cachedOffset;
   try {
-    const raw = fs.readFileSync(transcriptPath, 'utf8');
-    const lines = raw.split('\n');
-    for (const line of lines) {
-      if (!line) continue;
-      try {
-        const d = JSON.parse(line);
-        const u = d && d.message && d.message.usage;
-        if (u) cost += costFromUsage(u, prices);
-      } catch { /* partial/invalid line */ }
-    }
-  } catch { return 0; }
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const bytesToRead = stat.size - cachedOffset;
+      const buf = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buf, 0, bytesToRead, cachedOffset);
+      // Only consume up to the last complete line. The tail may be a partial
+      // write being flushed — leave it for next call so we don't double-count.
+      const lastNl = buf.lastIndexOf(0x0A); // ASCII '\n'
+      if (lastNl >= 0) {
+        const text = buf.slice(0, lastNl).toString('utf8');
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          try {
+            const d = JSON.parse(line);
+            const u = d && d.message && d.message.usage;
+            if (u) newCost += costFromUsage(u, prices);
+          } catch { /* invalid line — skip, caller can retry next turn */ }
+        }
+        newOffset = cachedOffset + lastNl + 1;
+      }
+      // No newline in the new bytes → nothing complete yet; keep old cache.
+    } finally { fs.closeSync(fd); }
+  } catch { return cachedCost; } // read failed — return stale rather than zero
 
   try {
     fs.writeFileSync(cacheFile,
-      JSON.stringify({ size: stat.size, mtime: stat.mtimeMs, cost }), 'utf8');
+      JSON.stringify({ offset: newOffset, cost: newCost }), 'utf8');
   } catch { /* best effort */ }
 
-  return cost;
+  return newCost;
 }
 
 // ─── Session duration ────────────────────────────────────────────────────────
