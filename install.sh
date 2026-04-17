@@ -102,13 +102,44 @@ cp "${PLUGIN_SRC}/lib/utils.js"                    "${LIB_DIR}/utils.js"
 cp "${PLUGIN_SRC}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
 cp "${PLUGIN_SRC}/lib/config.js"                   "${LIB_DIR}/config.js"
 
-# Hooks load lib/config via ../lib — mirror that layout so relative requires
-# resolve the same whether the hook is run from the repo or from ~/.claude.
+# Repair ECC-owned lib dir if an older SI install clobbered it.
+#
+# Background: previous versions of this script copied SI's utils.js /
+# intel-debug.js / config.js into ${HOOKS_DIR}/../lib (which resolves to
+# ${CLAUDE_DIR}/scripts/lib, an ECC-owned directory). The intent was to
+# satisfy `require('../lib/*')` from SI hooks, but that's now handled by
+# a runtime sentinel resolver inside each hook that prefers the bundled
+# ./session-intelligence/lib/ copies. The shim only broke ECC — its own
+# utils.js exports symbols (getSessionSearchDirs, stripAnsi, etc.) that
+# SI's shorter utils.js didn't, so session-start, desktop-notify,
+# evaluate-session and cost-tracker would fail on missing exports.
+#
+# Repair steps:
+#   1. If ~/.claude/scripts/lib/utils.js still carries SI's banner and an
+#      ECC marketplace copy is on disk, restore the ECC original.
+#   2. Delete ~/.claude/scripts/lib/intel-debug.js and
+#      ~/.claude/scripts/lib/config.js if they're SI plants (ECC doesn't
+#      ship these names; only SI did).
+ECC_LIB_UTILS_SRC="${CLAUDE_DIR}/plugins/marketplaces/ecc/scripts/lib/utils.js"
 HOOK_LIB_SHIM="${HOOKS_DIR}/../lib"
-mkdir -p "${HOOK_LIB_SHIM}"
-cp "${PLUGIN_SRC}/lib/utils.js"       "${HOOK_LIB_SHIM}/utils.js"
-cp "${PLUGIN_SRC}/lib/intel-debug.js" "${HOOK_LIB_SHIM}/intel-debug.js"
-cp "${PLUGIN_SRC}/lib/config.js"      "${HOOK_LIB_SHIM}/config.js"
+if [ -f "${HOOK_LIB_SHIM}/utils.js" ] \
+   && grep -q "session-intelligence hooks" "${HOOK_LIB_SHIM}/utils.js" 2>/dev/null; then
+  if [ -f "$ECC_LIB_UTILS_SRC" ]; then
+    cp "$ECC_LIB_UTILS_SRC" "${HOOK_LIB_SHIM}/utils.js"
+    warn "  Restored ECC utils.js over prior SI shim (${HOOK_LIB_SHIM}/utils.js)"
+  else
+    # No ECC source to restore from — removing would break anything that
+    # depended on the shim. Leave alone and warn.
+    warn "  Detected SI-shimmed utils.js at ${HOOK_LIB_SHIM}/ but no ECC source to restore. Reinstall ECC to fix."
+  fi
+fi
+for orphan in intel-debug.js config.js; do
+  path="${HOOK_LIB_SHIM}/${orphan}"
+  if [ -f "$path" ] && grep -q "Session Intelligence" "$path" 2>/dev/null; then
+    rm -f "$path"
+    info "  Removed SI plant ${path#${CLAUDE_DIR}/}"
+  fi
+done
 
 # Install unified config if one doesn't exist yet.
 if [ ! -f "$UNIFIED_CONFIG" ] && [ -f "${PLUGIN_SRC}/templates/session-intelligence.json" ]; then
