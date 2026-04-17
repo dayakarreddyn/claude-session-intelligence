@@ -18,16 +18,31 @@
 
 const fs = require('fs');
 const path = require('path');
+
+// Resolve SI lib dir. Source layout: ../lib. Installed layout: bundled under
+// ./session-intelligence/lib. Sentinel: context-shape.js is SI-only.
+function resolveSiLibDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'context-shape.js'))) return dir;
+  }
+  return candidates[0];
+}
+const SI_LIB = resolveSiLibDir();
+
 const {
   getTempDir,
   log
-} = require('../lib/utils');
-const { intelLog } = require('../lib/intel-debug');
-const { rootDirOf, appendShape } = require('../lib/context-shape');
+} = require(path.join(SI_LIB, 'utils'));
+const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
+const { rootDirOf, appendShape } = require(path.join(SI_LIB, 'context-shape'));
 // Post-compact regret monitoring is optional — degrade silently when the
 // module is not on disk yet (fresh install not synced).
 let compactHistory = null;
-try { compactHistory = require('../lib/compact-history'); } catch { /* optional */ }
+try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 
 const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;

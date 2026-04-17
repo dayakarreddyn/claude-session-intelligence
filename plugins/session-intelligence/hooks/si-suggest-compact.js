@@ -31,23 +31,41 @@
 
 const fs = require('fs');
 const path = require('path');
+
+// Resolve SI lib dir. Source layout: ../lib (sibling of hooks/).
+// Installed layout: ./session-intelligence/lib (bundled under ECC scripts/hooks/).
+// context-shape.js is SI-only, so we use it as the sentinel that distinguishes
+// the full SI bundle from ECC's partial lib dir (which has utils/intel-debug
+// but none of the SI-specific modules).
+function resolveSiLibDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'context-shape.js'))) return dir;
+  }
+  return candidates[0];
+}
+const SI_LIB = resolveSiLibDir();
+
 const {
   getTempDir,
   writeFile,
   log,
   readStdinJson,
   readTranscriptTokens,
-} = require('../lib/utils');
-const { intelLog } = require('../lib/intel-debug');
-const { readShape, analyzeShape, draftMessage } = require('../lib/context-shape');
+} = require(path.join(SI_LIB, 'utils'));
+const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
+const { readShape, analyzeShape, draftMessage } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
-try { compactHistory = require('../lib/compact-history'); } catch { /* optional */ }
+try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 let costEst = null;
-try { costEst = require('../lib/cost-estimation'); } catch { /* optional */ }
+try { costEst = require(path.join(SI_LIB, 'cost-estimation')); } catch { /* optional */ }
 
 // Load unified config; env overrides already baked in by loadConfig().
 function loadSiConfig() {
-  try { return require('../lib/config').loadConfig(); }
+  try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
   catch { return { compact: { threshold: 50, autoblock: true } }; }
 }
 

@@ -13,31 +13,28 @@
 const fs = require('fs');
 const path = require('path');
 
-// Try ECC utils first, fall back to bundled
-let utils;
-try {
-  utils = require('../lib/utils');
-} catch {
-  try {
-    utils = require('./session-intelligence/lib/utils');
-  } catch {
-    utils = require(path.join(__dirname, '..', 'lib', 'utils'));
+// Resolve SI lib dir. Source layout: ../lib (sibling of hooks/).
+// Installed layout: ./session-intelligence/lib (bundled under ECC scripts/hooks/).
+// context-shape.js is SI-only, so it's the sentinel distinguishing the full
+// SI bundle from an ECC lib dir that happens to carry utils/intel-debug but
+// none of the SI-specific modules (and an older utils.js that predates
+// readStdinJson, which is the actual source of past crashes).
+function resolveSiLibDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'context-shape.js'))) return dir;
   }
+  return candidates[0];
 }
+const SI_LIB = resolveSiLibDir();
 
-// intel-debug: same fallback chain. Falls back to a no-op if missing.
+const utils = require(path.join(SI_LIB, 'utils'));
+
 let intelLog = () => {};
-try {
-  ({ intelLog } = require('../lib/intel-debug'));
-} catch {
-  try {
-    ({ intelLog } = require('./session-intelligence/lib/intel-debug'));
-  } catch {
-    try {
-      ({ intelLog } = require(path.join(__dirname, '..', 'lib', 'intel-debug')));
-    } catch { /* debug logging unavailable — hook still runs */ }
-  }
-}
+try { ({ intelLog } = require(path.join(SI_LIB, 'intel-debug'))); } catch { /* debug logging unavailable — hook still runs */ }
 
 const {
   getSessionsDir,
@@ -52,31 +49,15 @@ const {
   resolveProjectDir,
 } = utils;
 
-// Context shape — observed tool-call history. Optional: falls back silently
-// when the module isn't on disk (e.g. fresh install that hasn't been synced).
+// Optional SI-only modules — degrade silently if absent.
 let ctxShape = null;
-try { ctxShape = require('../lib/context-shape'); }
-catch {
-  try { ctxShape = require('./session-intelligence/lib/context-shape'); }
-  catch { try { ctxShape = require(path.join(__dirname, '..', 'lib', 'context-shape')); } catch { /* not available */ } }
-}
+try { ctxShape = require(path.join(SI_LIB, 'context-shape')); } catch { /* not available */ }
 
-// Compact history + per-session snapshot — enables adaptive zones and
-// post-compact regret detection.
 let compactHistory = null;
-try { compactHistory = require('../lib/compact-history'); }
-catch {
-  try { compactHistory = require('./session-intelligence/lib/compact-history'); }
-  catch { try { compactHistory = require(path.join(__dirname, '..', 'lib', 'compact-history')); } catch { /* not available */ } }
-}
+try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* not available */ }
 
-// Cost estimation — transcript-derived session cost, used for telemetry only.
 let costEst = null;
-try { costEst = require('../lib/cost-estimation'); }
-catch {
-  try { costEst = require('./session-intelligence/lib/cost-estimation'); }
-  catch { try { costEst = require(path.join(__dirname, '..', 'lib', 'cost-estimation')); } catch { /* not available */ } }
-}
+try { costEst = require(path.join(SI_LIB, 'cost-estimation')); } catch { /* not available */ }
 
 // Lines that are still template placeholders: either a "key: (…)" pair
 // with only parenthesised hint text, or a bullet that is just parens.

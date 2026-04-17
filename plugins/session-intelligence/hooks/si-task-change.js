@@ -33,17 +33,32 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
+
+// Resolve SI lib dir. Source layout: ../lib. Installed layout: bundled under
+// ./session-intelligence/lib. Sentinel: context-shape.js is SI-only.
+function resolveSiLibDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'context-shape.js'))) return dir;
+  }
+  return candidates[0];
+}
+const SI_LIB = resolveSiLibDir();
+
 const {
   getTempDir,
   writeFile,
   log,
   resolveProjectDir,
   readTranscriptTokens,
-} = require('../lib/utils');
-const { intelLog } = require('../lib/intel-debug');
+} = require(path.join(SI_LIB, 'utils'));
+const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 
 function loadSiConfig() {
-  try { return require('../lib/config').loadConfig(); }
+  try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
   catch { return null; }
 }
 
