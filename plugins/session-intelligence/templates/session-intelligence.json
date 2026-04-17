@@ -22,9 +22,7 @@
   },
   "compact": {
     "threshold": 50,
-    "autoblock": true,
-    "prompt": true,
-    "promptTimeout": 30
+    "autoblock": true
   },
   "taskChange": {
     "enabled": true,

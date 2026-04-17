@@ -25,7 +25,7 @@ Examples:
 
 ```
 /si set compact.autoblock false
-/si set compact.promptTimeout 45
+/si set compact.threshold 75
 /si set taskChange.minTokens 150000
 /si set statusline.zones.orange 350000
 /si set statusline.fields '["emoji","model","project","tokens"]'

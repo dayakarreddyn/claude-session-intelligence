@@ -44,9 +44,7 @@ const DEFAULTS = {
   },
   compact: {
     threshold: 50,              // tool calls before first advisory
-    autoblock: true,            // block + prompt at orange/red
-    prompt: true,               // show native GUI dialog
-    promptTimeout: 30,          // dialog timeout (seconds)
+    autoblock: true,            // block with inline message at orange/red zone
   },
   taskChange: {
     enabled: true,              // detect task-domain changes on UserPromptSubmit
@@ -136,11 +134,6 @@ function applyEnvOverrides(cfg) {
     if (Number.isFinite(n) && n > 0 && n <= 10000) cfg.compact.threshold = n;
   }
   if (env.CLAUDE_COMPACT_AUTOBLOCK === '0') cfg.compact.autoblock = false;
-  if (env.CLAUDE_COMPACT_PROMPT === '0') cfg.compact.prompt = false;
-  if (env.CLAUDE_COMPACT_PROMPT_TIMEOUT) {
-    const n = parseInt(env.CLAUDE_COMPACT_PROMPT_TIMEOUT, 10);
-    if (Number.isFinite(n) && n > 0) cfg.compact.promptTimeout = n;
-  }
 
   if (env.CLAUDE_TASK_CHANGE === '0') cfg.taskChange.enabled = false;
 

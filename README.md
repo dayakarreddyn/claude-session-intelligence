@@ -315,8 +315,7 @@ All configuration lives in **`~/.claude/session-intelligence.json`** — one fil
 {
   "statusline": { "fields": [...], "zones": {...}, "prices": {...},
                   "taskStaleHours": 12, ... },
-  "compact":     { "threshold": 50, "autoblock": true, "prompt": true,
-                   "promptTimeout": 30 },
+  "compact":     { "threshold": 50, "autoblock": true },
   "taskChange":  { "enabled": true, "minTokens": 100000,
                    "sameDomainScore": 0.5, "differentDomainScore": 0.2,
                    "prompt": true, "promptTimeout": 20,
@@ -335,7 +334,7 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 ```text
 /si show                            # print the effective config
 /si status                          # runtime state: hooks, statusline, session counters
-/si get compact.promptTimeout       # read a single dotted key
+/si get compact.threshold           # read a single dotted key
 /si set compact.autoblock false     # stage + diff + confirm + write
 /si set taskChange.minTokens 150000
 /si set statusline.zones.orange 350000
@@ -347,9 +346,9 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 
 Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
 
-## Auto-Compact with Prompt
+## Auto-Compact Block
 
-`suggest-compact.js` is a `PreToolUse` hook that watches token budget on every `Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob` call. When context **escalates** into a higher-severity zone, it interrupts the tool call and asks the user what to do:
+`suggest-compact.js` is a `PreToolUse` hook that watches token budget on every `Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob` call. When context **escalates** into a higher-severity zone, it blocks the tool call with an inline message Claude surfaces to you immediately.
 
 ### Zone behavior
 
@@ -357,33 +356,32 @@ Every write shows a unified diff of the proposed change and waits for you to rep
 |---|---|---|
 | green | <200k | silent |
 | yellow | ≥200k | passive log suggestion ("good time to /compact between tasks") |
-| **orange** | **≥300k** | **prompt + block** — native dialog "Run /compact now?" |
-| **red** | **≥400k** | **prompt + block (urgent)** — same flow, stronger wording |
+| **orange** | **≥300k** | **block with inline instruction to run `/compact`** |
+| **red** | **≥400k** | **block with inline instruction (urgent wording)** |
 
-One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so you won't be re-prompted for the same zone. After `/compact` runs, tokens drop and state re-arms for the next escalation.
+One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so the same zone doesn't block twice. After `/compact` runs, tokens drop and state re-arms for the next escalation.
 
-### Prompt flow (macOS)
+### What you see
 
-1. You hit 300k tokens on your next Edit/Write/Bash/…
-2. A native dialog pops:
-   > *"Context at ~310k tokens — ORANGE ZONE (context rot risk). Run /compact now to preserve context before continuing?"*
-   > `[ Skip ]   [ Compact now ]`
-3. Outcomes:
-   - **Compact now** → tool call blocked with exit 2, Claude is told "User approved compaction — please run /compact now" and will prompt you to type `/compact`
-   - **Skip** → tool call proceeds, state saved so you won't be re-asked for this zone
-   - **Timeout (30s default)** → falls through to plain exit-2 block with the instruction
+When the budget first crosses 300k on a tool call:
+
+```
+[StrategicCompact] ORANGE ZONE — context rot risk. Context at ~315k tokens.
+Run `/compact` now (add "preserve current task context" if mid-task), then retry.
+This tool call was blocked to force a compaction checkpoint.
+Opt out with CLAUDE_COMPACT_AUTOBLOCK=0.
+```
+
+The hook exits `2` (stderr fed back to Claude Code), the tool call doesn't run, and Claude relays the message so you can decide whether to `/compact` or continue. No native dialog — the message is inline in the session, so full-screen apps / remote shells / non-macOS platforms all behave identically.
 
 ### Why not auto-execute /compact?
 
-Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit structured JSON, but they have no API to invoke slash commands (`/compact` is interpreted by Claude Code's main loop, not a tool). The closest we can get to "auto" is the native dialog above: the decision is explicit, the prompt is unmissable, and the instruction flows back to Claude via stderr. You still press Enter on `/compact`, but you can't miss the moment.
+Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit structured JSON, but they have no API to invoke slash commands (`/compact` is interpreted by Claude Code's main loop, not a tool). The closest thing to "auto" is the inline block above: the decision is explicit, the instruction flows back via stderr, and nothing fires off-screen.
 
 ### Tunables
 
 - Opt out entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0`
-- Skip the GUI dialog (passive block only): `export CLAUDE_COMPACT_PROMPT=0`
-- Dialog timeout in seconds: `export CLAUDE_COMPACT_PROMPT_TIMEOUT=60`
-
-Linux/Windows users currently hit the exit-2 fallback directly (no native dialog). Easy to extend `askUserCompact()` in `suggest-compact.js` with `zenity` / PowerShell prompts.
+- First advisory after N tool calls: `/si set compact.threshold 75`
 
 ## Task Change Detector
 
@@ -405,12 +403,13 @@ Absent signals are neutral — a prompt that mentions no paths is judged on keyw
 
 ### Layer 2 — Claude Haiku tie-breaker (opt-in)
 
-When the heuristic score falls in the ambiguous band (`differentDomainScore < score < sameDomainScore`) and `taskChange.semanticFallback=true`, the hook calls Claude Haiku with a short `SAME / DIFFERENT` prompt using your `ANTHROPIC_API_KEY`. A confident `SAME` verdict overrides the heuristic and lets the prompt through.
+When the heuristic score falls in the ambiguous band (`differentDomainScore < score < sameDomainScore`) and `taskChange.semanticFallback=true`, the hook shells out to `claude --print` with a short `SAME / DIFFERENT` prompt. A confident `SAME` verdict overrides the heuristic and lets the prompt through.
 
-- Bounded 3s timeout (`taskChange.semanticTimeoutMs`), falls through to the heuristic decision on failure/timeout
+- Uses whatever auth your `claude` CLI already has — OAuth subscription or `ANTHROPIC_API_KEY`, no env-forwarding of the key into the child process
+- `--setting-sources ''` prevents the subprocess from loading settings.json, so none of your hooks (including this one) re-fire in the child — no recursion
+- Bounded 3s timeout (`taskChange.semanticTimeoutMs`); falls through to the heuristic on failure/timeout
 - Model configurable via `taskChange.haikuModel` (default `claude-haiku-4-5`)
 - Only fires in the ambiguous band, not on every prompt — typical cost ≈ $0.0002 per disputed submission
-- Requires `ANTHROPIC_API_KEY` to be exported in your shell
 
 ### Decision
 
@@ -441,7 +440,6 @@ Everything is in `taskChange.*`:
 /si set taskChange.semanticFallback true        # enable Haiku tie-breaker
 /si set taskChange.semanticTimeoutMs 3000       # Haiku call timeout
 /si set taskChange.haikuModel claude-haiku-4-5  # override tie-breaker model
-/si set compact.prompt false                    # suggest-compact inline-only
 ```
 
 You don't *need* to fill `session-context.md` for the detector to work — the pooled baseline (recent commits + transcript file mentions + dirty tree) is usually enough. Filling it helps the pre-compact hint injection more than it helps the detector. No baseline at all (placeholder-only template + no recent git activity + no transcript file refs) = silent. Short conversational prompts (under `conversationalMaxLen` chars with no `@path` or backtick code references) also stay silent — they're follow-up talk, not task drift.
@@ -502,7 +500,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 |------|-------|---------|
 | `pre-compact.js` | PreCompact | Reads session-context.md, injects PRESERVE/DROP hints |
 | `token-budget-tracker.js` | PostToolUse | Estimates tokens from Read/Bash/Grep/Glob/Agent output |
-| `suggest-compact.js` | PreToolUse (Bash/Read/Edit/Write/Grep/Glob) | Warns at 200k, **auto-blocks + prompts the user** at 300k/400k (native macOS dialog, graceful fallback to exit-2 block) |
+| `suggest-compact.js` | PreToolUse (Bash/Read/Edit/Write/Grep/Glob) | Warns at 200k, **blocks the tool call with an inline `/compact` instruction** at 300k/400k |
 | `task-change-detector.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
 
 All three emit structured entries to the debug log (see above).
@@ -535,8 +533,6 @@ Prefer **`/si set <key> <value>`** over env vars — it's Claude-native, diffed,
 |----------|---|---|
 | `COMPACT_THRESHOLD` | `compact.threshold` | Tool calls before first compact suggestion |
 | `CLAUDE_COMPACT_AUTOBLOCK` | `compact.autoblock` | `0` disables the orange/red auto-block |
-| `CLAUDE_COMPACT_PROMPT` | `compact.prompt` | `0` skips the native GUI dialog |
-| `CLAUDE_COMPACT_PROMPT_TIMEOUT` | `compact.promptTimeout` | Dialog timeout (seconds) |
 | `CLAUDE_TASK_CHANGE` | `taskChange.enabled` | `0` disables task-change detection entirely |
 | `CLAUDE_INTEL_DEBUG` | `debug.enabled` | Enable debug-level log entries |
 | `CLAUDE_INTEL_QUIET` | `debug.quiet` | Suppress all log entries except errors |

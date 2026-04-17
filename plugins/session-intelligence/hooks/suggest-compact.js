@@ -35,7 +35,7 @@ const { intelLog } = require('../lib/intel-debug');
 // Load unified config; env overrides already baked in by loadConfig().
 function loadSiConfig() {
   try { return require('../lib/config').loadConfig(); }
-  catch { return { compact: { threshold: 50, autoblock: true, prompt: true, promptTimeout: 30 } }; }
+  catch { return { compact: { threshold: 50, autoblock: true } }; }
 }
 
 async function main() {
@@ -131,32 +131,18 @@ async function main() {
 
     const escalated = rank[zone] > rank[lastZone] && rank[zone] >= rank.orange;
     if (escalated) {
-      // Persist immediately so a second concurrent tool call doesn't re-prompt.
+      // Persist immediately so a second concurrent tool call doesn't re-block.
       try { writeFile(stateFile, zone); } catch { /* best effort */ }
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
-      const answer = askUserCompact(zone, tokenBudget, cfg);
-      intelLog('suggest-compact', 'info', `zone escalation prompt`, { zone, answer, tokenBudget });
-
-      if (answer === 'skip') {
-        // User chose to continue without compacting — allow the tool through.
-        log(`[StrategicCompact] ${header} acknowledged — continuing without compaction (~${formatTokens(tokenBudget)} tokens).`);
-        process.exit(0);
-      }
-
-      // "yes", "timeout", "unavailable", or dialog-missing all fall through to
-      // exit-2 with instruction, so the user still sees a clear next step.
-      const approvedPrefix = answer === 'yes'
-        ? 'User approved compaction via prompt. '
-        : '';
       const msg =
-        `[StrategicCompact] ${header}. ${approvedPrefix}` +
+        `[StrategicCompact] ${header}. ` +
         `Context at ~${formatTokens(tokenBudget)} tokens. ` +
         `Run \`/compact\` now (add "preserve current task context" if mid-task), ` +
         `then retry. This tool call was blocked to force a compaction checkpoint. ` +
         `Opt out with CLAUDE_COMPACT_AUTOBLOCK=0.`;
       process.stderr.write(`${msg}\n`);
-      intelLog('suggest-compact', 'warn', `autoblock at ${zone}`, { tokenBudget, count, lastZone, answer });
+      intelLog('suggest-compact', 'warn', `autoblock at ${zone}`, { tokenBudget, count, lastZone });
       process.exit(2); // exit 2 = block tool; stderr is fed back to Claude
     }
 
@@ -174,47 +160,6 @@ function getZone(tokens) {
   if (tokens >= 300000) return 'orange';
   if (tokens >= 200000) return 'yellow';
   return 'green';
-}
-
-/**
- * Ask the user via a native OS dialog whether to compact now.
- * Returns 'yes' | 'skip' | 'timeout' | 'unavailable'.
- * Currently implemented for macOS (osascript). Other platforms return
- * 'unavailable' and callers fall back to the stderr-block behaviour.
- */
-function askUserCompact(zone, tokens, cfg = {}) {
-  if (cfg.prompt === false) return 'unavailable';
-  if (process.platform !== 'darwin') return 'unavailable';
-
-  const { execFileSync } = require('child_process');
-  const zoneLabel = zone === 'red'
-    ? 'RED ZONE (urgent)'
-    : 'ORANGE ZONE (context rot risk)';
-  const body = `Context at ~${formatTokens(tokens)} tokens — ${zoneLabel}.\n\n` +
-    `Run /compact now to preserve context before continuing?`;
-  const icon = zone === 'red' ? 'stop' : 'caution';
-  const timeoutSec = Number.isFinite(cfg.promptTimeout) && cfg.promptTimeout > 0
-    ? cfg.promptTimeout : 30;
-
-  const script =
-    `display dialog ${JSON.stringify(body)} ` +
-    `buttons {"Skip", "Compact now"} default button "Compact now" ` +
-    `with title "Claude Code — Auto-Compact" with icon ${icon} ` +
-    `giving up after ${timeoutSec}`;
-
-  try {
-    const out = execFileSync('osascript', ['-e', script], {
-      encoding: 'utf8',
-      timeout: (timeoutSec + 5) * 1000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (/gave up:\s*true/.test(out)) return 'timeout';
-    if (/button returned:\s*Compact now/.test(out)) return 'yes';
-    if (/button returned:\s*Skip/.test(out)) return 'skip';
-    return 'unavailable';
-  } catch {
-    return 'unavailable';
-  }
 }
 
 function formatTokens(n) {

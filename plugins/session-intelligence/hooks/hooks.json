@@ -43,7 +43,7 @@
           {
             "type": "command",
             "command": "node ${CLAUDE_PLUGIN_ROOT}/hooks/suggest-compact.js",
-            "timeout": 45
+            "timeout": 10
           }
         ]
       }
