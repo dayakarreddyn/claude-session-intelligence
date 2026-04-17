@@ -25,6 +25,20 @@ try {
   }
 }
 
+// intel-debug: same fallback chain. Falls back to a no-op if missing.
+let intelLog = () => {};
+try {
+  ({ intelLog } = require('../lib/intel-debug'));
+} catch {
+  try {
+    ({ intelLog } = require('./session-intelligence/lib/intel-debug'));
+  } catch {
+    try {
+      ({ intelLog } = require(path.join(__dirname, '..', 'lib', 'intel-debug')));
+    } catch { /* debug logging unavailable — hook still runs */ }
+  }
+}
+
 const {
   getClaudeDir,
   getSessionsDir,
@@ -154,11 +168,18 @@ async function main() {
       const hints = formatCompactionHints(sections);
       process.stdout.write(hints);
       log(`[PreCompact] Injected compaction hints from session-context.md`);
+      intelLog('pre-compact', 'info', 'injected hints', {
+        projectDir: path.basename(projectDir),
+        sections: Object.keys(sections),
+        bytes: hints.length,
+      });
     } else {
       log('[PreCompact] No session-context.md found \u2014 compacting without hints');
+      intelLog('pre-compact', 'warn', 'no session-context.md found', { projectDir: path.basename(projectDir) });
     }
   } else {
     log('[PreCompact] No project directory found \u2014 compacting without hints');
+    intelLog('pre-compact', 'warn', 'no project directory resolved', { cwd });
   }
 
   process.exit(0);
@@ -166,5 +187,6 @@ async function main() {
 
 main().catch(err => {
   console.error('[PreCompact] Error:', err.message);
+  intelLog('pre-compact', 'error', 'hook crashed', { err: err.message });
   process.exit(0);
 });

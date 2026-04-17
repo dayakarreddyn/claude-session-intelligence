@@ -19,10 +19,25 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// intel-debug: optional timestamped logger. Falls back to a no-op if missing.
+let intelLog = () => {};
+try {
+  ({ intelLog } = require('../lib/intel-debug'));
+} catch {
+  try {
+    ({ intelLog } = require('./session-intelligence/lib/intel-debug'));
+  } catch {
+    try {
+      ({ intelLog } = require(path.join(__dirname, '..', 'lib', 'intel-debug')));
+    } catch { /* debug logging unavailable — hook still runs */ }
+  }
+}
+
 async function main() {
   const sessionId = (process.env.CLAUDE_SESSION_ID || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(os.tmpdir(), `claude-tool-count-${sessionId}`);
   const budgetFile = path.join(os.tmpdir(), `claude-token-budget-${sessionId}`);
+  intelLog('suggest-compact', 'debug', 'hook fired', { sessionId });
   const rawThreshold = parseInt(process.env.COMPACT_THRESHOLD || '50', 10);
   const threshold = Number.isFinite(rawThreshold) && rawThreshold > 0 && rawThreshold <= 10000
     ? rawThreshold
@@ -77,10 +92,13 @@ async function main() {
     const prevZone = getZone(tokenBudget - 5000);
     if (zone === 'yellow' && prevZone === 'green') {
       console.error(`[StrategicCompact] ~${fmt(tokenBudget)} tokens \u2014 entering caution zone. Good time to /compact between tasks.`);
+      intelLog('suggest-compact', 'info', 'suggestion: yellow-zone', { tokenBudget, count });
     } else if (zone === 'orange' && prevZone === 'yellow') {
       console.error(`[StrategicCompact] ~${fmt(tokenBudget)} tokens \u2014 CONTEXT ROT ZONE. Compact now: /compact [preserve current task context]`);
+      intelLog('suggest-compact', 'warn', 'suggestion: orange-zone', { tokenBudget, count });
     } else if (zone === 'red' && prevZone === 'orange') {
       console.error(`[StrategicCompact] ~${fmt(tokenBudget)} tokens \u2014 URGENT. /compact immediately or /clear and start fresh.`);
+      intelLog('suggest-compact', 'warn', 'suggestion: red-zone', { tokenBudget, count });
     }
   }
 
@@ -102,5 +120,6 @@ function fmt(n) {
 
 main().catch(err => {
   console.error('[StrategicCompact] Error:', err.message);
+  intelLog('suggest-compact', 'error', 'hook crashed', { err: err.message });
   process.exit(0);
 });

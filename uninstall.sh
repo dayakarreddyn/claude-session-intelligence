@@ -7,6 +7,7 @@ set -euo pipefail
 
 CLAUDE_DIR="${HOME}/.claude"
 HOOKS_DIR="${CLAUDE_DIR}/scripts/hooks"
+SCRIPTS_DIR="${CLAUDE_DIR}/scripts"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 
 RED='\033[0;31m'
@@ -19,7 +20,7 @@ ok()    { echo -e "${GREEN}[SI]${NC} $1"; }
 
 info "Uninstalling Session Intelligence..."
 
-# Remove hooks
+# Remove our hooks
 for f in token-budget-tracker.js; do
   if [ -f "${HOOKS_DIR}/${f}" ]; then
     rm "${HOOKS_DIR}/${f}"
@@ -27,7 +28,7 @@ for f in token-budget-tracker.js; do
   fi
 done
 
-# Restore backups if they exist
+# Restore backups for hooks that may have existed before us
 for hook in pre-compact.js suggest-compact.js; do
   if [ -f "${HOOKS_DIR}/${hook}.bak" ]; then
     mv "${HOOKS_DIR}/${hook}.bak" "${HOOKS_DIR}/${hook}"
@@ -35,13 +36,23 @@ for hook in pre-compact.js suggest-compact.js; do
   fi
 done
 
-# Remove bundled lib
+# Remove bundled lib (utils + intel-debug)
 if [ -d "${HOOKS_DIR}/session-intelligence" ]; then
   rm -rf "${HOOKS_DIR}/session-intelligence"
   ok "Removed session-intelligence lib"
 fi
 
-# Remove hook registrations from settings.json
+# Remove status line scripts
+for f in statusline-intel.js statusline-chain.sh; do
+  if [ -f "${SCRIPTS_DIR}/${f}" ]; then
+    rm "${SCRIPTS_DIR}/${f}"
+    ok "Removed ${f}"
+  fi
+done
+
+# Clean settings.json: drop si:* hooks, and restore the prior statusLine
+# that statusline-chain.sh was wrapping (recorded in the script's
+# PREV_STATUSLINE variable before we removed it above).
 if [ -f "$SETTINGS" ]; then
   node -e "
   const fs = require('fs');
@@ -53,13 +64,24 @@ if [ -f "$SETTINGS" ]; then
       hooks[event] = entries.filter(h => !String(h.id || '').startsWith('si:'));
     }
   }
-
   settings.hooks = hooks;
+
+  // If current statusLine points at our chain (which we just deleted),
+  // remove it so the bar doesn't break. Users can re-configure later.
+  const cmd = settings.statusLine && settings.statusLine.command;
+  if (typeof cmd === 'string' && cmd.includes('statusline-chain.sh')) {
+    delete settings.statusLine;
+  }
+
   fs.writeFileSync('${SETTINGS}', JSON.stringify(settings, null, 2), 'utf8');
   console.log('OK');
-  " && ok "Removed hook registrations from settings.json" || echo -e "${RED}[SI]${NC} Failed to clean settings.json"
+  " && ok "Removed hook + statusLine registrations from settings.json" || echo -e "${RED}[SI]${NC} Failed to clean settings.json"
 fi
 
 echo ""
-ok "Uninstall complete. Session-context.md files in projects are preserved."
-echo "  (Remove them manually if you want: find ~/.claude/projects -name session-context.md)"
+ok "Uninstall complete. session-context.md files in projects are preserved."
+echo "  Remove them manually if you want:"
+echo "    find ~/.claude/projects -name session-context.md"
+echo ""
+echo "  Debug logs also preserved:"
+echo "    ls ~/.claude/logs/session-intel-*.log"

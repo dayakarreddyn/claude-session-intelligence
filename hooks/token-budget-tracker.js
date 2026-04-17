@@ -15,12 +15,27 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// intel-debug: optional timestamped logger. Falls back to a no-op if missing.
+let intelLog = () => {};
+try {
+  ({ intelLog } = require('../lib/intel-debug'));
+} catch {
+  try {
+    ({ intelLog } = require('./session-intelligence/lib/intel-debug'));
+  } catch {
+    try {
+      ({ intelLog } = require(path.join(__dirname, '..', 'lib', 'intel-debug')));
+    } catch { /* debug logging unavailable — hook still runs */ }
+  }
+}
+
 const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;
 
 async function main() {
   const sessionId = (process.env.CLAUDE_SESSION_ID || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const budgetFile = path.join(os.tmpdir(), `claude-token-budget-${sessionId}`);
+  intelLog('token-budget', 'debug', 'hook fired', { sessionId, budgetFile });
 
   // Read stdin for tool output data
   let inputData = '';
@@ -79,6 +94,9 @@ async function main() {
       red:    `[TokenBudget] ~${fmt(cumulative)} tokens — compact immediately to prevent degraded output`
     };
     console.error(messages[newZone] || '');
+    intelLog('token-budget', 'info', `zone transition ${prevZone} → ${newZone}`, { cumulative, callTokens });
+  } else {
+    intelLog('token-budget', 'debug', `tick ${newZone}`, { cumulative, callTokens });
   }
 
   process.exit(0);
@@ -99,5 +117,6 @@ function fmt(n) {
 
 main().catch(err => {
   console.error('[TokenBudget] Error:', err.message);
+  intelLog('token-budget', 'error', 'hook crashed', { err: err.message });
   process.exit(0);
 });
