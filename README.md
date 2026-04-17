@@ -145,22 +145,96 @@ Claude uses these hints to make better compaction decisions.
 
 ## Status Line
 
-A single-line indicator rendered at the bottom of Claude Code's status bar on every redraw:
+Configurable, multi-line, color-coded status bar rendered at the bottom of Claude Code on every redraw:
 
 ```
-Opus 4.7 · CSM · ▰▱▱▱ 23k tok · 39 tools · idle — session 28 ended 2026-04-17 clean
+🔥 Opus 4.7 (1M) · CSM · dev · ▰▰▰▰ 425k
+   70 tools · $0.76 · deploy:gateway 5m ago · feat — statusline v2
 ```
 
-Fields:
-- **Model** — from the stdin payload Claude Code provides
-- **Project** — basename of the working directory
-- **Zone bar + token count** — colored green → yellow → orange → red as the budget grows
-- **Tool count** — total hook-tracked tool invocations this session
-- **Current task** — the `type: …` line from `session-context.md`, truncated
+Line 1 = identity + token zone. Line 2 = activity. The intelligent emoji at the head reflects the highest-severity signal (red zone, dirty tree, task intent). Line 2 is indented to align with line 1 under the emoji.
+
+### Real token count
+
+By default we read `transcript_path` from the stdin payload Claude Code provides and extract the most recent assistant message's `usage` block. That gives the **authoritative Anthropic API count** — `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. This is what Claude actually sees.
+
+When a transcript isn't available (first redraw of a new session, or `tokenSource: "estimate"` in config), we fall back to the tool-I/O estimate maintained by the PostToolUse hook. Estimate values are prefixed with `~` so you can tell which source is active.
+
+### Available fields
+
+Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. Each one is optional; unconfigured fields render nothing.
+
+| Field | Example | Description |
+|---|---|---|
+| `emoji` | `🔥` | Intelligent state emoji — picked from zone, task intent, dirty tree, deploy freshness (see priority list below) |
+| `model` | `Opus 4.7 (1M)` | Model display name from Claude Code's stdin |
+| `project` | `CSM` | Basename of the working directory |
+| `branch` | `dev` | Current git branch |
+| `dirty` | `±3` | Simple count of dirty files |
+| `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree |
+| `issue` | `#164` | GH issue number parsed from branch name or current task |
+| `tokens` | `▰▰▰▱ 425k` | Zone bar + count (colored by zone). Prefixed with `~` when using the estimate fallback |
+| `zone` | `orange` | Zone name only, colored |
+| `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (all tools, not just Edit/Write) |
+| `session` | `3h42m` | Duration since the first transcript timestamp |
+| `cost` | `$0.76` | Estimated cost from the transcript usage block (prices configurable) |
+| `compactAge` | `compact:2h13mago` | Time since last `/compact` event (mtime of the pre-compact log) |
+| `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it) |
+| `outputStyle` | `style:explanatory` | Current Claude Code output style (from stdin or env) |
+| `health` | `[●●○]` | Colored dot per service URL configured in `serviceHealth` — curl probe cached 30s |
+| `task` | `feat — statusline v2` | `type:` line extracted from `session-context.md`, truncated to `maxTaskLength` |
+| `newline` | *(pseudo-field)* | Forces a line break at this point so long bars wrap into 2+ lines |
+
+### Intelligent emoji priority
+
+First matching signal wins:
+
+| | When |
+|---|---|
+| 🔥 | Red zone (≥400k tokens) |
+| ⚠️  | Orange zone (300–400k) |
+| 🚀 | Deploy breadcrumb written less than 15 min ago |
+| 🐛 | Task mentions `bug`, `fix`, `issue`, `error`, `crash` |
+| 🏗️ | Task mentions `build`, `feat`, `add`, `implement`, `create` |
+| 🧹 | Task mentions `refactor`, `cleanup`, `simpl*` |
+| 🧪 | Task mentions `test`, `spec` |
+| 🚀 | Task mentions `deploy`, `ship`, `release` |
+| 📝 | Task mentions `doc`, `readme` |
+| ✏️  | Dirty working tree (any uncommitted change) |
+| 🟡 | Yellow zone (200–300k) |
+| ✨ | Task looks idle/done/clean and we're in green zone |
+| 🟢 | Default fallback |
+
+Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your workflow.
+
+### Example config: `~/.claude/statusline-intel.json`
+
+```json
+{
+  "fields": [
+    "emoji", "model", "project", "branch", "diffstat", "tokens",
+    "newline",
+    "tools", "session", "cost", "deploy", "task"
+  ],
+  "tokenSource": "auto",
+  "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
+  "maxTaskLength": 70,
+  "separator": " · ",
+  "colors": true,
+  "serviceHealth": [
+    { "name": "api", "url": "https://api.example.com/healthz", "ttlSec": 30 }
+  ],
+  "prices": {
+    "input": 15, "cache_creation": 18.75, "cache_read": 1.5, "output": 75
+  }
+}
+```
+
+The installer drops this file at `~/.claude/statusline-intel.json` on first install (copied from `statusline-intel.json.example`). Edit freely — changes take effect on the next redraw.
 
 ### Append, don't replace
 
-Most users already have a statusLine — ccstatusline, starship, a custom script. The installer detects it and wires a chain wrapper (`statusline-chain.sh`) that runs your previous command first, then the intel line as a new line below:
+Most users already have a statusLine — ccstatusline, starship, a custom script. The installer detects it and wires a chain wrapper (`statusline-chain.sh`) that runs your previous command first, then the intel line as new lines below:
 
 ```
 🌴 main · ⎇ dev · (+0,-0) · /Users/you/project       ← your existing statusLine
@@ -168,20 +242,45 @@ Most users already have a statusLine — ccstatusline, starship, a custom script
 ⏱️ Session: 0m · 💰 3hr 42m
 👾 Opus 4.7 (1M)
 ⏳ Weekly: 3.0% · Weekly Reset: 6d 10hr
-Opus 4.7 · project · ▰▱▱▱ 23k tok · 39 tools · idle         ← appended by us
+🔥 Opus 4.7 · project · dev · ▰▰▰▰ 425k            ← appended by us (line 1)
+   70 tools · $0.76 · feat — statusline v2          ← appended by us (line 2)
 ```
 
-If you had no statusLine configured, you get just the intel line.
+If you had no statusLine configured, you get just the intel lines.
 
 ### Status-line env knobs
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_STATUSLINE_NO_PREV=1` | Skip the previous command — show only our intel line |
-| `CLAUDE_STATUSLINE_NO_INTEL=1` | Skip our line — show only the previous command |
-| `CLAUDE_STATUSLINE_SEP="..."` | Separator between the two (default: newline) |
-| `CLAUDE_STATUSLINE_COMPACT=1` | Drop the task-description tail from the intel line |
-| `CLAUDE_STATUSLINE_NO_COLOR=1` / `NO_COLOR=1` | Strip ANSI from the intel line |
+| `CLAUDE_STATUSLINE_FIELDS` | Comma-separated field list — overrides the config file for this session |
+| `CLAUDE_STATUSLINE_TOKEN_SOURCE` | `auto` / `transcript` / `estimate` — force a source |
+| `CLAUDE_STATUSLINE_SEP_INLINE` | In-line separator (default `" · "`) — for the config, not for chain |
+| `CLAUDE_STATUSLINE_COMPACT=1` | Drop the `task` field from the rendered line |
+| `CLAUDE_STATUSLINE_NO_COLOR=1` / `NO_COLOR=1` | Strip ANSI |
+| `CLAUDE_STATUSLINE_NO_PREV=1` | (Chain) Skip the previous command — show only our intel line |
+| `CLAUDE_STATUSLINE_NO_INTEL=1` | (Chain) Skip our line — show only the previous command |
+| `CLAUDE_STATUSLINE_SEP="..."` | (Chain) Separator between previous and intel (default: newline) |
+
+### Deploy breadcrumb
+
+To make the `deploy` field light up after a deploy, have your deploy script write one line to the breadcrumb:
+
+```bash
+echo "gateway $(date -u +%FT%TZ)" > ~/.claude/logs/deploy-breadcrumb
+```
+
+Format: `<target-name> <ISO-timestamp>`. The status line parses it and shows `deploy:<target> <age> ago`. Good targets to breadcrumb: gateway restart, frontend CF Pages deploy, production cutover, schema migration.
+
+### Service health
+
+Configure one or more URLs in `serviceHealth`. The status line shows a colored dot per service:
+
+- 🟢 `●` — HTTP 2xx
+- 🟡 `●` — HTTP 3xx (redirect)
+- 🔴 `●` — anything else
+- ⚪ `○` — no cached probe result yet
+
+Probes run async (detached `curl`), results cached in `/tmp/claude-health-<name>` for `ttlSec` (default 30s). The redraw reads the cache — never blocks on the network.
 
 ### Swap back to your original statusLine
 

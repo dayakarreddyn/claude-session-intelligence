@@ -61,6 +61,13 @@ cp "${SCRIPT_DIR}/hooks/token-budget-tracker.js"   "${HOOKS_DIR}/token-budget-tr
 cp "${SCRIPT_DIR}/lib/utils.js"                   "${LIB_DIR}/utils.js"
 cp "${SCRIPT_DIR}/lib/intel-debug.js"             "${LIB_DIR}/intel-debug.js"
 
+# Install an example statusline config if one doesn't exist yet. Users can
+# edit ~/.claude/statusline-intel.json to pick fields, zones, colors, etc.
+if [ ! -f "${CLAUDE_DIR}/statusline-intel.json" ] && [ -f "${SCRIPT_DIR}/statusline-intel.json.example" ]; then
+  cp "${SCRIPT_DIR}/statusline-intel.json.example" "${CLAUDE_DIR}/statusline-intel.json"
+  ok "Installed default config: ~/.claude/statusline-intel.json"
+fi
+
 chmod +x "${HOOKS_DIR}/pre-compact.js"
 chmod +x "${HOOKS_DIR}/suggest-compact.js"
 chmod +x "${HOOKS_DIR}/token-budget-tracker.js"
@@ -99,9 +106,9 @@ const budgetIdx = settings.hooks.PostToolUse.findIndex(h =>
   h.id === 'post:token-budget-tracker' || h.id === 'si:token-budget-tracker'
 );
 const budgetEntry = {
-  matcher: 'Read|Bash|Grep|Glob|Agent',
+  matcher: '*',
   hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/token-budget-tracker.js\"', async: true, timeout: 5 }],
-  description: 'Session Intelligence: track approximate token usage for context rot prevention',
+  description: 'Session Intelligence: track token usage + unified tool count across ALL tools',
   id: 'si:token-budget-tracker'
 };
 if (budgetIdx >= 0) settings.hooks.PostToolUse[budgetIdx] = budgetEntry;
