@@ -41,8 +41,18 @@ function getLogFile(date = new Date()) {
 }
 
 function timestamp() {
+  // Local time, matching getLogFile()'s local-date filename. Using toISOString
+  // here would emit UTC, which made entries look a day off from the filename
+  // for users east of UTC after local midnight.
   const now = new Date();
-  return now.toISOString().replace('T', ' ').slice(0, 23);
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  const ms = String(now.getMilliseconds()).padStart(3, '0');
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}.${ms}`;
 }
 
 function truncate(value, maxLen = 200) {
