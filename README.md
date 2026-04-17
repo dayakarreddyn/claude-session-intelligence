@@ -1,49 +1,62 @@
 # Session Intelligence for Claude Code
 
-Prevent context rot and bad compactions in Claude Code sessions. Adds task-aware compaction hints, token budget tracking, proactive compact suggestions, a structured debug log, and a colored status-line indicator that appends to whatever statusLine you already have.
+Prevent context rot and bad compactions in Claude Code sessions. Adds task-aware compaction hints, token budget tracking, a context-shape tracker that auto-generates PRESERVE/DROP hints from your actual tool usage, a learning loop that adapts zone thresholds to your own compact history, a structured debug log, and a colored status-line indicator that appends to whatever statusLine you already have.
 
-The 1M token context window lets Claude work autonomously for longer, but performance degrades as context grows (~300-400k tokens). This plugin gives Claude — and you — live visibility into where the session is on that curve, and makes every compaction deliberate instead of guessed.
+The 1M token context window lets Claude work autonomously for longer, but performance degrades as context grows (~300-400k tokens). This plugin gives Claude — and you — live visibility into where the session is on that curve, and makes every compaction deliberate instead of guessed. When you type `/compact`, the hook auto-injects preserve/drop hints grounded in the directories you've actually been touching — so you don't have to remember the `/compact preserve X, drop Y` syntax.
 
 ## The Problem
 
 Without session intelligence:
 - Auto-compact fires at arbitrary points and **drops context you need**
-- No way to tell Claude "preserve X, drop Y" during compaction
+- No way to tell Claude "preserve X, drop Y" during compaction — and remembering the syntax mid-flow is its own tax
 - You rediscover the same findings 2-3 times across compaction boundaries
 - Context rot degrades output quality long before hitting the 1M limit
 - No way to tell from the CLI how close you are to the rot zone
+- Zone thresholds are one-size-fits-all — your actual compact pattern doesn't feed back into the warnings
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────┐
-│ 1. Claude updates session-context.md        │
-│    at each task boundary                    │
-│                                             │
-│ 2. Token budget tracker estimates usage     │
-│    from tool I/O (~4 chars/token)           │
-│                                             │
-│ 3. Suggest-compact warns at zone borders    │
-│    Yellow (200k) → Orange (300k) → Red (400k)│
-│                                             │
-│ 4. On compact: pre-compact hook reads       │
-│    session-context.md and injects           │
-│    PRESERVE/DROP hints into the prompt      │
-│                                             │
-│ 5. Every prompt: status line appends a      │
-│    colored zone indicator beneath your      │
-│    existing statusLine                      │
-└─────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ 1. Claude updates session-context.md at each       │
+│    task boundary (auto-seeded from git)            │
+│                                                    │
+│ 2. Token-budget-tracker estimates usage per tool   │
+│    call AND appends a shape entry {root, file,     │
+│    event} to /tmp/claude-ctx-shape-<sid>.jsonl     │
+│                                                    │
+│ 3. Suggest-compact warns at zone borders with a    │
+│    grounded diagnosis ("shifted auth→billing,      │
+│    $1.43 spent, 82k stale in tests/") — zones      │
+│    adapt to your past compact history after 5      │
+│    samples                                         │
+│                                                    │
+│ 4. On /compact: pre-compact injects BOTH the       │
+│    session-context.md hints AND auto-generated     │
+│    PRESERVE/DROP bands from observed shape.        │
+│    Writes a history entry + ephemeral snapshot     │
+│                                                    │
+│ 5. Next 30 tool calls: token-budget-tracker        │
+│    watches for "regret" — touching a dropped       │
+│    rootDir. Regret rate dampens future drop        │
+│    eagerness                                       │
+│                                                    │
+│ 6. Status line: dim context + one coloured signal  │
+│    (tokens zone). Red only for stale-compact       │
+│    alert on line 2                                 │
+└────────────────────────────────────────────────────┘
 ```
 
 ### Token Zones
 
-| Zone | Tokens | Action |
+| Zone | Tokens (default) | Action |
 |------|--------|--------|
 | Green | <200k | Free zone — work normally |
 | Yellow | 200-300k | Caution — compact between tasks |
 | Orange | 300-400k | Context rot — compact now |
 | Red | >400k | Urgent — compact immediately |
+
+After **≥5 compacts** land in `~/.claude/logs/compact-history.jsonl`, the zones adapt to your own pattern: `orange` anchors to P50 of your historical compact-at-tokens, `red` to P90. Bounded ±30% from defaults so a noisy history can't silence the warnings. See [Learning Loop](#learning-loop) below.
 
 ## Install
 
@@ -163,14 +176,14 @@ Claude uses these hints to make better compaction decisions.
 
 ## Status Line
 
-Configurable, multi-line, color-coded status bar rendered at the bottom of Claude Code on every redraw:
+Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw:
 
 ```
-🔥 Opus 4.7 (1M) · CSM · dev · ▰▰▰▰ 425k
-   70 tools · $0.76 · deploy:gateway 5m ago · feat — statusline v2
+Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰ 425k
+70 tools · compact:2h13m ago · feat — statusline v2
 ```
 
-Line 1 = identity + token zone. Line 2 = activity. The intelligent emoji at the head reflects the highest-severity signal (red zone, dirty tree, task intent). Line 2 is indented to align with line 1 under the emoji.
+**Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim except `compactAge` which goes **red** when the last /compact was ≥2h ago. Emojis are off by default in the shipped presets — they added width and a second decision point ("what does that glyph mean?") on top of already-loud text. They're opt-in via the `emoji` / `emoji2` fields if you want them back.
 
 ### Real token count
 
@@ -184,29 +197,42 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 
 | Field | Example | Description |
 |---|---|---|
-| `emoji` | `🔥` | Intelligent state emoji — picked from zone, task intent, dirty tree, deploy freshness (see priority list below) |
-| `model` | `Opus 4.7 (1M)` | Model display name from Claude Code's stdin |
-| `project` | `CSM` | Basename of the working directory |
-| `branch` | `dev` | Current git branch |
-| `dirty` | `±3` | Simple count of dirty files |
-| `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree |
-| `issue` | `#164` | GH issue number parsed from branch name or current task |
-| `tokens` | `▰▰▰▱ 425k` | Zone bar + count (colored by zone). Prefixed with `~` when using the estimate fallback |
-| `zone` | `orange` | Zone name only, colored |
-| `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (all tools, not just Edit/Write) |
-| `session` | `3h42m` | Duration since the first transcript timestamp |
-| `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open at once |
-| `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (cached by size+mtime for speed; prices configurable) |
-| `compactAge` | `compact:2h13m ago` | Time since last `/compact` event (mtime of the pre-compact log). Color escalates: dim `<30m`, yellow `30–120m`, orange `≥2h` |
-| `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it). Color by freshness: green `<5m`, cyan `<60m`, dim thereafter |
-| `outputStyle` | `style:explanatory` | Current Claude Code output style (from stdin or env) |
-| `health` | `[●●○]` | Colored dot per service URL configured in `serviceHealth` — curl probe cached 30s |
-| `task` | `feat — statusline v2` | Shows what you're working on, in order of freshness: (1) the `type:` line from `session-context.md` when it's real content and the file's mtime is under `taskStaleHours` (default 12h); (2) the same line suffixed ` (stale)` in dim when older; (3) the last commit subject (`git log -1 --pretty=%s`) in dim when (1)/(2) aren't available. Colored by keyword (bug → red, deploy → magenta, feat → blue, test → cyan, refactor → yellow, doc → green) |
+| `model` | `Opus 4.7 (1M)` | Model display name from Claude Code's stdin (dim) |
+| `project` | `CSM` | Basename of the working directory (dim) |
+| `branch` | `dev` | Current git branch (dim) |
+| `dirty` | `±3` | Simple count of dirty files (dim) |
+| `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
+| `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
+| `tokens` | `▰▰▰▱ 425k` | **Zone bar + count** — the ONE coloured field. Green → yellow → orange → red. Prefixed with `~` when using the estimate fallback |
+| `zone` | `orange` | Zone name only, coloured |
+| `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
+| `session` | `3h42m` | Duration since the first transcript timestamp (dim) |
+| `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open (dim) |
+| `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (dim; prices configurable) |
+| `compactAge` | `compact:2h13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
+| `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (dim) |
+| `outputStyle` | `style:explanatory` | Current Claude Code output style (dim) |
+| `health` | `[●●○]` | Coloured dot per service URL configured in `serviceHealth` — curl probe cached 30s |
+| `task` | `feat — statusline v2` | What you're working on, in order of freshness: (1) `type:` line from `session-context.md` if real and fresh, (2) same suffixed ` (stale)` if older than `taskStaleHours`, (3) last commit subject. Always dim |
+| `emoji` | `🔥` | (Opt-in.) Intelligent state emoji — red-zone / orange-zone / dirty / task-intent / deploy. Not in any default preset — add to `fields` if you want it. See [emoji priority](#intelligent-emoji-priority-opt-in) |
+| `emoji2` | `📊` | (Opt-in.) Activity emoji for line 2 — deploy / cost / session-long / heavy-tools. Same opt-in rule |
 | `newline` | *(pseudo-field)* | Forces a line break at this point so long bars wrap into 2+ lines |
 
-### Intelligent emoji priority
+### Presets
 
-First matching signal wins:
+`statusline.preset` is a shorthand for the `fields` array. Setting `fields` explicitly always wins — presets are just the fallback:
+
+| Preset | Fields |
+|---|---|
+| `minimal` | `tokens` |
+| `standard` | `model`, `project`, `tokens`, `newline`, `task` |
+| `verbose` (default) | `model`, `project`, `branch`, `diffstat`, `tokens`, `newline`, `tools`, `session`, `cost`, `task` |
+
+Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
+
+### Intelligent emoji priority (opt-in)
+
+First matching signal wins. Add `emoji` / `emoji2` to your `fields` array to enable:
 
 | | When |
 |---|---|
@@ -226,30 +252,33 @@ First matching signal wins:
 
 Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your workflow.
 
-### Example config: `~/.claude/statusline-intel.json`
+### Example config: `~/.claude/session-intelligence.json`
 
 ```json
 {
-  "fields": [
-    "emoji", "model", "project", "branch", "issue", "diffstat", "tokens",
-    "newline",
-    "emoji2", "tools", "session", "cost", "compactAge", "deploy", "task"
-  ],
-  "tokenSource": "auto",
-  "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
-  "maxTaskLength": 70,
-  "separator": " · ",
-  "colors": true,
-  "serviceHealth": [
-    { "name": "api", "url": "https://api.example.com/healthz", "ttlSec": 30 }
-  ],
-  "prices": {
-    "input": 15, "cache_creation": 18.75, "cache_read": 1.5, "output": 75
+  "statusline": {
+    "preset": "verbose",
+    "fields": [
+      "model", "project", "branch", "issue", "diffstat", "tokens",
+      "newline",
+      "tools", "session", "cost", "compactAge", "deploy", "task"
+    ],
+    "tokenSource": "auto",
+    "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
+    "maxTaskLength": 70,
+    "separator": " · ",
+    "colors": true,
+    "serviceHealth": [
+      { "name": "api", "url": "https://api.example.com/healthz", "ttlSec": 30 }
+    ],
+    "prices": {
+      "input": 15, "cache_creation": 18.75, "cache_read": 1.5, "output": 75
+    }
   }
 }
 ```
 
-The installer drops this file at `~/.claude/statusline-intel.json` on first install (copied from `statusline-intel.json.example`). Edit freely — changes take effect on the next redraw.
+The installer drops this file at `~/.claude/session-intelligence.json` on first install (copied from `templates/session-intelligence.json`). Edit freely — changes take effect on the next redraw.
 
 ### Append, don't replace
 
@@ -348,30 +377,41 @@ Every write shows a unified diff of the proposed change and waits for you to rep
 
 ## Auto-Compact Suggestions
 
-`suggest-compact.js` is a `PostToolUse` hook that watches token budget after every tool call. When context **escalates** into a higher-severity zone, it emits a message that Claude Code surfaces back to the assistant on its next turn — **without blocking the tool call** that just ran.
+`suggest-compact.js` is a `PostToolUse` hook that watches token budget after every tool call. When context **escalates** into a higher-severity zone, it emits a **grounded diagnosis** that Claude Code surfaces back to the assistant on its next turn — **without blocking the tool call** that just ran.
 
 ### Zone behavior
 
-| Zone | Threshold | Action |
+| Zone | Threshold (default) | Action |
 |---|---|---|
 | green | <200k | silent |
 | yellow | ≥200k | passive log suggestion ("good time to /compact between tasks") |
-| **orange** | **≥300k** | **surface suggestion to assistant via hook feedback** |
-| **red** | **≥400k** | **surface urgent suggestion to assistant via hook feedback** |
+| **orange** | **≥300k** | **surface grounded suggestion to assistant via hook feedback** |
+| **red** | **≥400k** | **surface urgent grounded suggestion** |
 
 One-shot per escalation. State is persisted to `/tmp/claude-compact-state-<session>` so the same zone doesn't spam every subsequent tool call. After `/compact` runs, tokens drop and state re-arms for the next escalation.
 
+After **≥5 compacts** land in your history, the thresholds adapt: orange anchors to P50 of your historical compact points, red to P90 (bounded ±30% from defaults).
+
 ### What you see
 
-When the budget first crosses 300k on a tool call:
+When the budget first crosses orange on a tool call:
 
 ```
-[StrategicCompact] ORANGE ZONE — context rot risk. Context at ~315k tokens.
-Consider `/compact` now (add "preserve current task context" if mid-task).
+[StrategicCompact] ORANGE ZONE — context rot risk. Context at ~260k tokens, $1.43 spent.
+Observed: shifted src/auth → src/billing · ~82k stale in tests/browser · hot: src/billing.
+Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage.
+Free-text hint after /compact still works.
+(Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
 Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```
 
-The hook exits `2` (stderr fed back to Claude Code as hook feedback), but because this runs on `PostToolUse` the tool call itself already completed successfully — the message arrives on the next assistant turn as a heads-up, not an interruption. Claude can then decide whether to suggest `/compact` or keep going. No native dialog — the message is inline in the session, so full-screen apps / remote shells / non-macOS platforms all behave identically.
+Four layers in the message:
+- **Header** — zone + tokens + cost so Claude knows the stakes in dollars, not just tokens
+- **Diagnosis** — what the shape tracker observed: domain shifts, stale bands, hot dirs
+- **Action** — plain `/compact` suffices; hints auto-inject via the PreCompact hook
+- **Adaptive footnote** — only appears when zones learned from your history
+
+The hook exits `2` (stderr fed back to Claude Code as hook feedback), but because this runs on `PostToolUse` the tool call itself already completed successfully — the message arrives on the next assistant turn as a heads-up, not an interruption.
 
 ### Why PostToolUse, not PreToolUse?
 
@@ -385,6 +425,126 @@ Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit 
 
 - Silence suggestions entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0` (the env var keeps its old name for backwards compat — it no longer blocks anything)
 - First advisory after N tool calls: `/si set compact.threshold 75`
+
+## Context Shape Tracker
+
+A cheap, append-only observer of where Claude's tool calls are **actually** landing — which directories, which files, at what cumulative token cost. Turns generic "consider /compact" into grounded "you shifted from auth → billing 40k ago, ~82k of tests/ context is stale, here's what to preserve."
+
+### What it observes
+
+Every `PostToolUse` call, `token-budget-tracker.js` appends one line to `/tmp/claude-ctx-shape-<sid>.jsonl`:
+
+```json
+{"t":1714000000,"tok":155432,"tool":"Read","root":"src/auth","file":"src/auth/login.ts"}
+{"t":1714000012,"tok":156812,"tool":"Edit","root":"src/auth","file":"src/auth/login.ts"}
+{"t":1714000145,"tok":184320,"tool":"Bash","root":null,"file":null,"event":"commit"}
+```
+
+Size-bounded to 200 entries / 128 KB. Only entries that carry a signal (a file path OR a phase event) get appended — a pure Bash echo with no path adds no information.
+
+Phase events flagged automatically: `git commit`, `git push`, `gh pr create`, `gh pr merge`.
+
+### How it's analyzed
+
+`lib/context-shape.js` classifies rootDirs into bands by **where in the token span they were last touched**:
+
+| Band | Definition | Meaning |
+|---|---|---|
+| HOT | last 20% of token-span | preserve — still in active use |
+| WARM | 20–60% | keep one-line summary |
+| COLD | only in first 40%, untouched since | safe to drop |
+
+**Domain shift** — Jaccard overlap of the first-N vs last-N rootDir sets. < 0.3 = pivot detected.
+
+**Stale tokens** — rough estimate of how much of the context is spent in COLD dirs.
+
+### Where it shows up
+
+1. **Suggest-compact message**: the `Observed:` line above.
+2. **Pre-compact injection**: at the moment of `/compact`, `pre-compact.js` regenerates the analysis and streams this to stdout (which Claude Code feeds to the model as compaction guidance):
+
+```
+OBSERVED CONTEXT SHAPE (auto-generated from tool usage):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DOMAIN SHIFT DETECTED: src/auth → src/billing
+(Jaccard overlap 0 across recent tool calls)
+
+PRESERVE (recently active, still in use):
+  - src/billing (15 calls) — e.g. src/billing/invoice.ts, src/billing/ledger.ts
+
+SAFE TO DROP (untouched for most of the session, ~82k tokens):
+  - tests/browser (12 calls earlier) — e.g. tests/browser/auth.spec.ts
+
+Keep only one-line summaries of what happened in the DROP section — the detail is no longer load-bearing.
+
+PHASE MARKERS OBSERVED:
+  - commit at ~145k tokens
+```
+
+This gets *appended* to whatever you have in `session-context.md`, so user-curated hints still come first (stronger signal, manual curation) and observed shape comes second (grounded in reality).
+
+### You just type `/compact`
+
+No need to remember preserve/drop syntax. Plain `/compact` works — the hook injects hints automatically. Free-text `/compact preserve auth refactor, drop old browser tests` still works too and composes on top of the auto-injection (your words go in first, hook adds its block after).
+
+## Learning Loop
+
+Three cooperating mechanisms so the plugin **gets better the longer you use it**:
+
+### 1. Compact history
+
+Every `/compact` appends an entry to `~/.claude/logs/compact-history.jsonl`:
+
+```json
+{"t":1714000000,"sid":"abc","cwd":"/proj","tokens":265000,"cost":2.14,
+ "hotDirs":["src/auth"],"droppedDirs":["tests/browser","scripts/old"],
+ "hadShift":true,"regretCount":0}
+```
+
+Size-bounded at 200 entries / 256 KB with automatic rotation. Cross-session — history persists across every Claude Code session you run.
+
+### 2. Adaptive zone thresholds
+
+With ≥5 compacts in history, `suggest-compact.js` swaps the static 200k/300k/400k thresholds for ones learned from your pattern:
+
+- `orange` = `floor(P50 * 0.9)` — slightly below where you typically pull the trigger, so warnings land before you've already decided to compact
+- `yellow` = `orange - 80k`
+- `red` = `max(orange + 60k, P90 * 1.05)` — the scramble zone above your heaviest compacts
+
+All bounded **±30% from defaults** so a degenerate history can't silence warnings entirely. The escalation message includes a disclosure footnote when adaptive zones are active:
+
+```
+(Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
+```
+
+### 3. Post-compact regret detection
+
+When `pre-compact.js` writes PRESERVE/DROP bands, it also snapshots them to `/tmp/claude-compact-snapshot-<sid>.json`:
+
+```json
+{"t":1714000000,"tokens":265000,"cost":2.14,
+ "hotDirs":["src/auth"],"droppedDirs":["tests/browser"],
+ "callsSince":0,"regretHits":[]}
+```
+
+For the next **30 tool calls** or **30 minutes** (whichever first), `token-budget-tracker.js` checks every file path against `droppedDirs`. A match = "regret hit": you told the model to drop that context, but then you (or Claude) reached back for it. Hits accrue into the snapshot; when the window closes, the count gets stamped back into the original history entry as `regretCount`.
+
+The **regret rate across your last 10 compacts** feeds back into `adaptiveZones()` — if ≥1 regret per compact on average, orange pushes **out** by 10% (be more conservative, the user apparently needs that context).
+
+### What you get from it
+
+- **Zones match your actual work pattern** — the warning never fires "too late" for your style
+- **Drop suggestions learn** — if you keep re-reaching for `tests/` after dropping it, the plugin starts recommending drop less aggressively
+- **No opt-in required** — history logs automatically, adapts when there's enough data, otherwise falls back to static defaults silently
+
+### Files written
+
+| Path | Contents | Lifetime |
+|---|---|---|
+| `/tmp/claude-ctx-shape-<sid>.jsonl` | observation log, last 200 tool calls | per-session (temp) |
+| `/tmp/claude-compact-snapshot-<sid>.json` | pre-compact snapshot of dropped/hot dirs | 30 calls / 30 min post-compact |
+| `~/.claude/logs/compact-history.jsonl` | cross-session compact history | persistent, bounded 200 entries |
 
 ## Task Change Detector
 
@@ -501,26 +661,31 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `pre-compact.js` | PreCompact | Reads session-context.md, injects PRESERVE/DROP hints |
-| `token-budget-tracker.js` | PostToolUse | Estimates tokens from Read/Bash/Grep/Glob/Agent output |
-| `suggest-compact.js` | PostToolUse | Warns at 200k, surfaces `/compact` suggestion as hook feedback at 300k/400k (non-blocking) |
+| `bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules |
+| `pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
+| `token-budget-tracker.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
+| `suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
 | `task-change-detector.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
 
-All three emit structured entries to the debug log (see above).
+All emit structured entries to the debug log (see above).
 
 ## Files Installed
 
 | Target | Source | Purpose |
 |---|---|---|
-| `~/.claude/scripts/hooks/pre-compact.js` | `hooks/pre-compact.js` | Compaction hint injector |
-| `~/.claude/scripts/hooks/token-budget-tracker.js` | `hooks/token-budget-tracker.js` | Token estimator |
-| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Zone warnings (PostToolUse, non-blocking) |
+| `~/.claude/scripts/hooks/bootstrap.js` | `hooks/bootstrap.js` | SessionStart bootstrapper |
+| `~/.claude/scripts/hooks/pre-compact.js` | `hooks/pre-compact.js` | Compaction hint injector (session-context + shape + history logging) |
+| `~/.claude/scripts/hooks/token-budget-tracker.js` | `hooks/token-budget-tracker.js` | Token estimator + shape observer + regret detector |
+| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Grounded zone warnings with adaptive thresholds |
 | `~/.claude/scripts/hooks/task-change-detector.js` | `hooks/task-change-detector.js` | Task-domain change detector |
-| `~/.claude/scripts/hooks/lib/config.js` (+ `session-intelligence/lib/`) | `lib/config.js` | Unified config loader |
+| `~/.claude/scripts/hooks/session-intelligence/lib/config.js` | `lib/config.js` | Unified config loader + presets |
+| `~/.claude/scripts/hooks/session-intelligence/lib/context-shape.js` | `lib/context-shape.js` | Shape observer: appendShape / analyzeShape / formatCompactInjection |
+| `~/.claude/scripts/hooks/session-intelligence/lib/compact-history.js` | `lib/compact-history.js` | History log + adaptive zones + post-compact regret tracking |
+| `~/.claude/scripts/hooks/session-intelligence/lib/cost-estimation.js` | `lib/cost-estimation.js` | Incremental cost-from-transcript + cost-band classification |
 | `~/.claude/scripts/hooks/session-intelligence/lib/utils.js` | `lib/utils.js` | Minimal shared utils |
 | `~/.claude/scripts/hooks/session-intelligence/lib/intel-debug.js` | `lib/intel-debug.js` | Debug logger |
-| `~/.claude/scripts/statusline-intel.js` | `statusline-intel.js` | Intel status-line renderer |
-| `~/.claude/scripts/statusline-chain.sh` | `statusline-chain.sh` | Chain wrapper (preserves your existing statusLine) |
+| `~/.claude/scripts/statusline-intel.js` | `statusline/statusline-intel.js` | Intel status-line renderer |
+| `~/.claude/scripts/si-statusline-chain.sh` | `statusline/statusline-chain.sh` | Chain wrapper (preserves your existing statusLine) |
 | `~/.claude/commands/si.md` | `commands/si.md` | `/si` slash command (config manager) |
 | `~/.claude/session-intelligence.json` | `templates/session-intelligence.json` | Unified config (shipped on first install only) |
 
@@ -547,15 +712,41 @@ Prefer **`/si set <key> <value>`** over env vars — it's Claude-native, diffed,
 
 ### Customizing Zones
 
-Edit the `getZone()` function in `suggest-compact.js`, `token-budget-tracker.js`, and `statusline-intel.js`:
+Three paths, from preferred to least:
+
+1. **Adaptive (recommended)** — after you've run 5+ `/compact`s they're derived automatically from your pattern. No configuration.
+2. **`/si set statusline.zones.<name> <value>`** — override for the status line:
+   ```
+   /si set statusline.zones.yellow 250000
+   /si set statusline.zones.orange 350000
+   /si set statusline.zones.red 450000
+   ```
+3. **Hardcoded edit** — only if you want to change the fallback defaults used when history is empty. Edit the `getZone()` function in `suggest-compact.js`, `token-budget-tracker.js`, and `statusline-intel.js`:
 
 ```js
-function getZone(tokens) {
-  if (tokens >= 400000) return 'red';    // adjust these
-  if (tokens >= 300000) return 'orange';
-  if (tokens >= 200000) return 'yellow';
+function getZone(tokens, zones) {
+  const z = zones || { yellow: 200000, orange: 300000, red: 400000 };
+  if (tokens >= z.red)    return 'red';
+  if (tokens >= z.orange) return 'orange';
+  if (tokens >= z.yellow) return 'yellow';
   return 'green';
 }
+```
+
+### Inspecting the learning state
+
+```bash
+# View all historical compacts (JSONL, last 200 entries)
+tail ~/.claude/logs/compact-history.jsonl | jq .
+
+# Current session's observed shape
+cat /tmp/claude-ctx-shape-$SESSION_ID.jsonl | jq .
+
+# Live post-compact snapshot (only exists during the 30-call regret window)
+cat /tmp/claude-compact-snapshot-$SESSION_ID.json | jq .
+
+# What would the adaptive zones be right now?
+node -e 'const {adaptiveZones, readHistory} = require("~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/lib/compact-history"); console.log(adaptiveZones(readHistory()))'
 ```
 
 ## Works With
@@ -573,6 +764,12 @@ Based on [Thariq's research](https://x.com/trq212/status/2044548257058328723) on
 - Proactive compaction with hints prevents bad compacts
 - Subagents and rewind are underused context management tools
 - Live visibility (status line) encourages better habits than retrospective review
+
+Extensions this plugin adds beyond the original:
+- **Grounded suggestions** — every zone warning cites observed tool shape (domain shifts, hot/cold dirs, stale tokens, session cost) so Claude has the "why" alongside the "when"
+- **Auto-injection** — user types plain `/compact` and the PreCompact hook injects PRESERVE/DROP bands derived from actual tool usage, so you don't need to remember the hint syntax
+- **Learning loop** — zone thresholds adapt to your compact history; regret detection watches for re-touched dropped dirs and dampens drop eagerness when the plugin has been too aggressive
+- **One colour, one signal** — status line uses dim for context and a single coloured field (tokens zone) for the warning, so the bar has one loud voice and one quiet voice
 
 ## License
 
