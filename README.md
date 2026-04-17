@@ -2,6 +2,8 @@
 
 Prevent context rot and bad compactions in Claude Code sessions. Adds task-aware compaction hints, token budget tracking, a context-shape tracker that auto-generates PRESERVE/DROP hints from your actual tool usage, a learning loop that adapts zone thresholds to your own compact history, a structured debug log, and a colored status-line indicator that appends to whatever statusLine you already have.
 
+> **Why these specific thresholds?** See [docs/context-engineering.md](docs/context-engineering.md) for the mechanics behind context rot, how the shape tracker and adaptive zones work, and why 250k is "start warning" not "broken."
+
 The 1M token context window lets Claude work autonomously for longer, but performance degrades as context grows (~300-400k tokens). This plugin gives Claude — and you — live visibility into where the session is on that curve, and makes every compaction deliberate instead of guessed. When you type `/compact`, the hook auto-injects preserve/drop hints grounded in the directories you've actually been touching — so you don't have to remember the `/compact preserve X, drop Y` syntax.
 
 ## The Problem
