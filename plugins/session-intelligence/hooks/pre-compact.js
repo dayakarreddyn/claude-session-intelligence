@@ -90,8 +90,31 @@ function resolveProjectMemoryDir(cwd) {
   return null;
 }
 
+// Lines that are still template placeholders: either a "key: (…)" pair
+// with only parenthesised hint text, or a bullet that is just parens.
+// An unfilled session-context.md is worse than no guidance because Claude
+// will follow the placeholder literally during compaction.
+function isPlaceholderLine(line) {
+  const t = line.trim();
+  if (!t) return false; // blank lines preserved as whitespace, not stripped
+  if (/^[-*]\s*\([^)]*\)\s*$/.test(t)) return true;           // "- (list files)"
+  if (/^[A-Za-z][A-Za-z0-9_-]*:\s*\([^)]*\)\s*$/.test(t)) return true; // "type: (a | b)"
+  if (/^[A-Z]+:\s*\([^)]*\)\s*$/.test(t)) return true;        // "PRESERVE: (what must...)"
+  return false;
+}
+
+function stripPlaceholderLines(body) {
+  return body
+    .split('\n')
+    .filter((l) => !isPlaceholderLine(l))
+    .join('\n')
+    .trim();
+}
+
 /**
- * Parse session-context.md into sections keyed by ## headers.
+ * Parse session-context.md into sections keyed by ## headers. Template
+ * placeholder lines are stripped so only real user-authored content
+ * reaches the compaction prompt.
  */
 function parseSessionContext(content) {
   const sections = {};
@@ -106,21 +129,17 @@ function parseSessionContext(content) {
     }
   }
   for (const key of Object.keys(sections)) {
-    sections[key] = sections[key].join('\n').trim();
+    sections[key] = stripPlaceholderLines(sections[key].join('\n'));
   }
   return sections;
 }
 
 /**
- * Format structured compaction hints from parsed session context.
+ * Format structured compaction hints from parsed session context. Returns
+ * an empty string when every section is placeholder-only — we'd rather
+ * ship no guidance than misleading guidance.
  */
 function formatCompactionHints(sections) {
-  const lines = [
-    '',
-    'COMPACTION GUIDANCE (from session-context.md):',
-    '\u2501'.repeat(50),
-  ];
-
   const sectionMap = [
     ['Current Task', 'CURRENT TASK:'],
     ['Key Files', 'KEY FILES (must preserve):'],
@@ -129,14 +148,21 @@ function formatCompactionHints(sections) {
     ['Completed Tasks (safe to drop details)', 'SAFE TO DROP (resolved \u2014 keep only one-line summaries):'],
   ];
 
+  const body = [];
   for (const [key, label] of sectionMap) {
-    if (sections[key]) {
-      lines.push('', label, sections[key]);
-    }
+    if (sections[key]) body.push('', label, sections[key]);
   }
+  if (body.length === 0) return '';
 
-  lines.push('', '\u2501'.repeat(50), '');
-  return lines.join('\n');
+  return [
+    '',
+    'COMPACTION GUIDANCE (from session-context.md):',
+    '\u2501'.repeat(50),
+    ...body,
+    '',
+    '\u2501'.repeat(50),
+    '',
+  ].join('\n');
 }
 
 async function main() {
@@ -166,13 +192,20 @@ async function main() {
     if (content && content.trim().length > 0) {
       const sections = parseSessionContext(content);
       const hints = formatCompactionHints(sections);
-      process.stdout.write(hints);
-      log(`[PreCompact] Injected compaction hints from session-context.md`);
-      intelLog('pre-compact', 'info', 'injected hints', {
-        projectDir: path.basename(projectDir),
-        sections: Object.keys(sections),
-        bytes: hints.length,
-      });
+      if (hints) {
+        process.stdout.write(hints);
+        log(`[PreCompact] Injected compaction hints from session-context.md`);
+        intelLog('pre-compact', 'info', 'injected hints', {
+          projectDir: path.basename(projectDir),
+          sections: Object.keys(sections).filter((k) => sections[k]),
+          bytes: hints.length,
+        });
+      } else {
+        log('[PreCompact] session-context.md is placeholder-only \u2014 compacting without hints');
+        intelLog('pre-compact', 'info', 'skipped — placeholder-only', {
+          projectDir: path.basename(projectDir),
+        });
+      }
     } else {
       log('[PreCompact] No session-context.md found \u2014 compacting without hints');
       intelLog('pre-compact', 'warn', 'no session-context.md found', { projectDir: path.basename(projectDir) });
