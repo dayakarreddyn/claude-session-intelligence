@@ -150,6 +150,65 @@ function gitTrackedChangeSet(cwd) {
   return new Set([...out.split('\n'), ...extra.split('\n')].map((s) => s.trim()).filter(Boolean));
 }
 
+/**
+ * Files touched by recent commits. Grounds the "current context" in what
+ * you've actually been working on, not just what session-context.md says.
+ * Bounded by a time window so abandoned-months-ago files don't leak in.
+ */
+function gitRecentlyTouchedFiles(cwd, sinceHours = 24) {
+  const opts = {
+    encoding: 'utf8', timeout: 1500,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  };
+  try {
+    const out = execFileSync('git', [
+      '-C', cwd, 'log', `--since=${sinceHours} hours ago`,
+      '--pretty=format:', '--name-only', 'HEAD',
+    ], opts);
+    return new Set(out.split('\n').map((s) => s.trim()).filter(Boolean));
+  } catch { return new Set(); }
+}
+
+/**
+ * File paths mentioned in the last N transcript turns. Captures in-flight
+ * conversation that hasn't yet made it into session-context.md — the main
+ * gap in the prior heuristic, which went cold as soon as you stopped
+ * re-quoting file names.
+ */
+function transcriptRecentFiles(transcriptPath, turnLimit = 20) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return new Set();
+  const found = new Set();
+  try {
+    const stat = fs.statSync(transcriptPath);
+    const SCAN_BYTES = Math.min(stat.size, 256 * 1024);
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const buf = Buffer.alloc(SCAN_BYTES);
+      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
+      let turns = 0;
+      for (let i = lines.length - 1; i >= 0 && turns < turnLimit; i--) {
+        try {
+          const d = JSON.parse(lines[i]);
+          const content = d && d.message && d.message.content;
+          const text = typeof content === 'string'
+            ? content
+            : Array.isArray(content)
+              ? content.map((c) => c.text || c.input?.file_path || '').join(' ')
+              : '';
+          if (!text) continue;
+          turns++;
+          for (const m of text.matchAll(/@?([A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+)/g)) {
+            const p = m[1].replace(/[,.;:]$/, '');
+            if (/[./]/.test(p)) found.add(p);
+          }
+        } catch { /* partial line */ }
+      }
+    } finally { fs.closeSync(fd); }
+  } catch { /* silent */ }
+  return found;
+}
+
 // ─── Scoring ─────────────────────────────────────────────────────────────────
 
 function rootPrefix(p) {
@@ -278,6 +337,134 @@ function fmtTokens(n) {
   return String(n);
 }
 
+// ─── Semantic tie-breaker (Claude Haiku) ─────────────────────────────────────
+//
+// Heuristics can't tell "refactor the compact hook" from "rewrite the auth
+// layer" when both prompts share almost no vocabulary with session-context
+// but reference the same files. When the layer-1 score lands in the
+// ambiguous band [differentDomainScore, sameDomainScore], we ask Haiku for
+// a boolean verdict. Gated by taskChange.semanticFallback=true so no one
+// pays for it unless they opt in.
+
+function callHaiku(currentContext, newPrompt, cfg) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { verdict: 'unavailable', reason: 'no-api-key' };
+
+  const model = cfg.haikuModel || 'claude-haiku-4-5';
+  const timeoutMs = Number.isFinite(cfg.semanticTimeoutMs) ? cfg.semanticTimeoutMs : 3000;
+
+  const systemPrompt =
+    'You classify whether two messages describe the same task/topic in an ' +
+    'ongoing coding session. Answer with exactly one word: SAME or DIFFERENT. ' +
+    'SAME = continuation/refinement of the current work. DIFFERENT = unrelated ' +
+    'feature, file, or subsystem. No explanation.';
+
+  const userPrompt =
+    `CURRENT CONTEXT:\n${currentContext}\n\n` +
+    `NEW PROMPT:\n${newPrompt}\n\n` +
+    `Are these the same task domain? Reply SAME or DIFFERENT.`;
+
+  const body = JSON.stringify({
+    model,
+    max_tokens: 8,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+
+  return new Promise((resolve) => {
+    const https = require('https');
+    const req = https.request({
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c.toString('utf8'); });
+      res.on('end', () => {
+        try {
+          const d = JSON.parse(raw);
+          if (d.error) return resolve({ verdict: 'unavailable', reason: d.error.message });
+          const text = (d.content && d.content[0] && d.content[0].text || '').trim().toUpperCase();
+          if (text.startsWith('SAME'))      return resolve({ verdict: 'same',      reason: text });
+          if (text.startsWith('DIFFERENT')) return resolve({ verdict: 'different', reason: text });
+          return resolve({ verdict: 'unavailable', reason: `unparsed: ${text.slice(0, 40)}` });
+        } catch (err) {
+          resolve({ verdict: 'unavailable', reason: err.message });
+        }
+      });
+    });
+    req.on('error',   (err) => resolve({ verdict: 'unavailable', reason: err.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ verdict: 'unavailable', reason: 'timeout' }); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// Sync wrapper — main() is sync but Node's https is async. We block on the
+// event loop via Atomics.wait on a shared buffer. For a 3s timeout this is
+// fine; hook is already short-lived.
+function callHaikuSync(currentContext, newPrompt, cfg) {
+  // Simplest portable approach: use a child_process with --input. We already
+  // have the node binary, just re-invoke it with an inline script. Avoids
+  // the event-loop-blocking trick and keeps the code readable.
+  const timeoutMs = Number.isFinite(cfg.semanticTimeoutMs) ? cfg.semanticTimeoutMs : 3000;
+  const payload = JSON.stringify({ currentContext, newPrompt, cfg });
+  const script = `
+    const https = require('https');
+    const { currentContext, newPrompt, cfg } = JSON.parse(process.argv[2]);
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) { process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'no-api-key'})); return; }
+    const model = cfg.haikuModel || 'claude-haiku-4-5';
+    const body = JSON.stringify({
+      model, max_tokens: 8,
+      system: 'You classify whether two messages describe the same task/topic in an ongoing coding session. Answer with exactly one word: SAME or DIFFERENT. SAME = continuation/refinement. DIFFERENT = unrelated feature, file, or subsystem. No explanation.',
+      messages: [{ role: 'user', content: 'CURRENT CONTEXT:\\n' + currentContext + '\\n\\nNEW PROMPT:\\n' + newPrompt + '\\n\\nAre these the same task domain? Reply SAME or DIFFERENT.' }],
+    });
+    const req = https.request({
+      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+      headers: {
+        'Content-Type': 'application/json', 'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: ${timeoutMs},
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c.toString('utf8'); });
+      res.on('end', () => {
+        try {
+          const d = JSON.parse(raw);
+          if (d.error) return process.stdout.write(JSON.stringify({verdict:'unavailable',reason:d.error.message}));
+          const text = (d.content && d.content[0] && d.content[0].text || '').trim().toUpperCase();
+          if (text.startsWith('SAME'))      return process.stdout.write(JSON.stringify({verdict:'same',reason:text}));
+          if (text.startsWith('DIFFERENT')) return process.stdout.write(JSON.stringify({verdict:'different',reason:text}));
+          process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'unparsed:'+text.slice(0,40)}));
+        } catch (err) { process.stdout.write(JSON.stringify({verdict:'unavailable',reason:err.message})); }
+      });
+    });
+    req.on('error',   (err) => process.stdout.write(JSON.stringify({verdict:'unavailable',reason:err.message})));
+    req.on('timeout', () => { req.destroy(); process.stdout.write(JSON.stringify({verdict:'unavailable',reason:'timeout'})); });
+    req.write(body); req.end();
+  `;
+  try {
+    const out = execFileSync(process.execPath, ['-e', script, payload], {
+      encoding: 'utf8',
+      timeout: timeoutMs + 500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: process.env,
+    });
+    return JSON.parse(out.trim());
+  } catch (err) {
+    return { verdict: 'unavailable', reason: err.code || err.message };
+  }
+}
+
 // ─── Dialog ──────────────────────────────────────────────────────────────────
 
 function askUserTaskChange(action, score, tokens, cfg) {
@@ -358,6 +545,19 @@ function main() {
   const promptFiles = extractPromptFiles(prompt);
   const gitSet = gitTrackedChangeSet(cwd);
 
+  // Layer 1: expanded baseline. session-context is what the user wrote down,
+  // but actual current work lives in (a) recently committed files and
+  // (b) files mentioned in the last N transcript turns. Pool all three so
+  // a prompt about today's work scores as "same domain" even when the user
+  // hasn't updated session-context in hours.
+  const recentGit = gitRecentlyTouchedFiles(cwd,
+    Number.isFinite(cfg.recentHours) ? cfg.recentHours : 24);
+  const recentFromTranscript = transcriptRecentFiles(
+    input.transcript_path,
+    Number.isFinite(cfg.transcriptTurns) ? cfg.transcriptTurns : 20
+  );
+  const pooledFiles = new Set([...gitSet, ...recentGit, ...recentFromTranscript]);
+
   // Conversational guard: a short prompt with no file references, no
   // backtick-quoted tokens, and no path-like mentions is follow-up talk
   // ("draft and go on parallel", "yes do that too") — not task drift.
@@ -374,7 +574,7 @@ function main() {
     process.exit(0);
   }
 
-  const overlap = fileOverlap(promptFiles, keyFiles, gitSet);
+  const overlap = fileOverlap(promptFiles, keyFiles, pooledFiles);
   const jac = jaccard(currentTask, prompt);
 
   const combined = combineSignals([
@@ -393,8 +593,35 @@ function main() {
   if (combined.score >= sameThresh) {
     intelLog('task-change', 'debug', 'same domain — silent', {
       score: combined.score, tokenBudget, promptFiles: promptFiles.length,
+      recentGit: recentGit.size, transcriptFiles: recentFromTranscript.size,
     });
     process.exit(0);
+  }
+
+  // Layer 2: Haiku tie-breaker. Only in the ambiguous band and only when the
+  // user has explicitly opted in (and has ANTHROPIC_API_KEY set). A confident
+  // SAME verdict here overrides the heuristic and lets the prompt through.
+  let haikuVerdict = null;
+  const inAmbiguousBand = combined.score > diffThresh && combined.score < sameThresh;
+  if (cfg.semanticFallback === true && inAmbiguousBand && process.env.ANTHROPIC_API_KEY) {
+    const recentFilesList = [...pooledFiles].slice(0, 15).join('\n');
+    const contextBlob = [
+      currentTask && `Current task: ${currentTask}`,
+      keyFiles.length && `Key files:\n${keyFiles.slice(0, 10).join('\n')}`,
+      recentFilesList && `Recently touched:\n${recentFilesList}`,
+    ].filter(Boolean).join('\n\n');
+
+    const result = callHaikuSync(contextBlob, prompt, cfg);
+    haikuVerdict = result.verdict;
+    intelLog('task-change', 'info', 'semantic tie-breaker', {
+      verdict: haikuVerdict, reason: result.reason, score: combined.score,
+    });
+    if (haikuVerdict === 'same') {
+      intelLog('task-change', 'debug', 'semantic override — allowed', {
+        score: combined.score, verdict: haikuVerdict,
+      });
+      process.exit(0);
+    }
   }
 
   const action = combined.score < diffThresh ? 'clear' : 'compact';

@@ -194,6 +194,18 @@ function gitDirtyCount(cwd) {
 }
 
 /**
+ * Last commit subject. Used as the auto-refreshing fallback for the `task`
+ * field so the status line always reflects what was actually shipped when
+ * session-context.md is missing or stale.
+ */
+function gitLastCommitSubject(cwd) {
+  try {
+    return execFileSync('git', ['-C', cwd, 'log', '-1', '--pretty=%s'],
+      { encoding: 'utf8', timeout: 1000 }).trim();
+  } catch { return ''; }
+}
+
+/**
  * Git short diff stat: returns { added, deleted } across all tracked + untracked
  * working-tree changes. Uses --numstat across both tracked diff and untracked files.
  */
@@ -259,35 +271,63 @@ function isPlaceholder(s) {
   return false;
 }
 
-function loadCurrentTask(projectDir, maxLen = 60) {
-  if (!projectDir) return '';
+// Extract the user-authored task string from session-context.md. Returns
+// null when the file is missing, absent, or still placeholder-only — the
+// caller then falls back to the git last-commit subject.
+function readSessionContextTask(projectDir) {
+  if (!projectDir) return null;
   const file = path.join(projectDir, 'session-context.md');
   let content;
-  try { content = fs.readFileSync(file, 'utf8'); } catch { return ''; }
+  let mtimeMs = 0;
+  try {
+    content = fs.readFileSync(file, 'utf8');
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch { return null; }
 
   const match = content.match(/##\s+Current Task\s*([\s\S]*?)(?=\n##\s|$)/);
-  if (!match) return '';
-
+  if (!match) return null;
   const body = match[1].trim();
-  // Grab the full value after "type:" first, then decide if it's a placeholder.
+
   const typeLine = body.match(/^type:\s*(.+)$/m);
   if (typeLine) {
     const raw = typeLine[1].trim();
-    if (isPlaceholder(raw)) return '';
+    if (isPlaceholder(raw)) return null;
     // Split on em-dash or " - " (surrounded by spaces) so hyphens inside
     // values like "bug-fix" stay intact.
     const sep = raw.match(/\s[\u2014-]\s/);
     if (sep) {
       const type = raw.slice(0, sep.index).trim();
       const desc = raw.slice(sep.index + sep[0].length).trim();
-      if (type && desc) return truncate(`${type} \u2014 ${desc}`, maxLen);
-      if (type) return truncate(type, maxLen);
+      if (type && desc) return { text: `${type} \u2014 ${desc}`, mtimeMs };
+      if (type) return { text: type, mtimeMs };
     }
-    return truncate(raw, maxLen);
+    return { text: raw, mtimeMs };
   }
+
   const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
-  if (isPlaceholder(firstLine)) return '';
-  return truncate(firstLine.replace(/^[-*#\s]+/, ''), maxLen);
+  if (isPlaceholder(firstLine)) return null;
+  const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+  return cleaned ? { text: cleaned, mtimeMs } : null;
+}
+
+// The `task` field answers the question "what am I working on?" in order
+// of freshness:
+//   1. session-context.md, if real content AND recent (mtime < staleHours).
+//   2. session-context.md flagged as (stale) when older than that.
+//   3. Last git commit subject — auto-refreshes every commit so the bar
+//      keeps reflecting actual work even when the file is never updated.
+//   4. empty.
+function loadCurrentTask(projectDir, cwd, maxLen = 60, staleHours = 12) {
+  const fromFile = readSessionContextTask(projectDir);
+  if (fromFile && fromFile.text) {
+    const ageMs = Date.now() - fromFile.mtimeMs;
+    const stale = ageMs > staleHours * 60 * 60 * 1000;
+    const marker = stale ? ' (stale)' : '';
+    return { text: truncate(fromFile.text + marker, maxLen), source: stale ? 'file-stale' : 'file' };
+  }
+  const subject = gitLastCommitSubject(cwd);
+  if (subject) return { text: truncate(subject, maxLen), source: 'commit' };
+  return { text: '', source: 'none' };
 }
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
@@ -528,6 +568,11 @@ function buildRenderers(C) {
       else if (/\b(test|spec)\b/.test(t))                      color = C.cyan;
       else if (/\b(refactor|cleanup|simpl)\b/.test(t))         color = C.yellow;
       else if (/\b(doc|readme)\b/.test(t))                     color = C.green;
+      // Fallback sources get dimmed so you can tell at a glance whether
+      // the line is the committed reality (commit subject) or a pinned
+      // note (session-context.md).
+      if (ctx.taskSource === 'commit') color = C.dim;
+      if (ctx.taskSource === 'file-stale') color = C.dim;
       return `${color}${ctx.task}${C.reset}`;
     },
 
@@ -751,15 +796,17 @@ function main() {
   }
 
   const projectDir = resolveProjectDir(cwd);
-  const task = cfg.fields.includes('task')
-    ? loadCurrentTask(projectDir, cfg.maxTaskLength || 60)
-    : '';
+  const staleHours = Number.isFinite(cfg.taskStaleHours) ? cfg.taskStaleHours : 12;
+  const taskInfo = cfg.fields.includes('task')
+    ? loadCurrentTask(projectDir, cwd, cfg.maxTaskLength || 60, staleHours)
+    : { text: '', source: 'none' };
 
   const ctx = {
     cfg,
+    taskSource: taskInfo.source,
     tokens,
     tools: estimate.tools,
-    task,
+    task: taskInfo.text,
     sessionDurationMs,
     costUsd,
     usedTranscript,
