@@ -75,10 +75,20 @@ function deepMerge(base, override) {
 }
 
 function readJson(file) {
+  let raw;
   try {
-    const raw = fs.readFileSync(file, 'utf8');
-    return JSON.parse(raw);
+    raw = fs.readFileSync(file, 'utf8');
   } catch {
+    return null; // missing file — callers fall back to defaults, no warning needed
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    // Corrupt JSON is *not* equivalent to "file missing" — the user's real
+    // config is being silently ignored. Surface it via the debug log (never
+    // stderr, which would clutter the hook output the user actually sees).
+    try { require('./intel-debug').intelLog('config', 'warn', 'config file parse failed', { file, err: err.message }); }
+    catch { /* intel-debug not available yet during early bootstrap */ }
     return null;
   }
 }

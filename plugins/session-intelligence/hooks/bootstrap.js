@@ -40,6 +40,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Debug log surface so silent step failures leave a trail in
+// ~/.claude/logs/session-intel-YYYY-MM-DD.log. Bootstrap never writes to
+// stderr/stdout for failures (would clutter the user's SessionStart output);
+// intelLog is the pressure-valve.
+let intelLog = () => {};
+try { ({ intelLog } = require('../lib/intel-debug')); } catch { /* optional */ }
+
 function homeDir() {
   return process.env.HOME || process.env.USERPROFILE || os.homedir();
 }
@@ -70,7 +77,7 @@ function loadState() {
 
 function saveState(state) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8'); }
-  catch { /* best effort */ }
+  catch (err) { intelLog('bootstrap', 'warn', 'state save failed', { file: STATE_FILE, err: err.message }); }
 }
 
 function notify(msg) {
@@ -215,7 +222,10 @@ function seedSessionContext(cwd, state) {
     state.seededContexts[encoded] = new Date().toISOString();
     notify(`seeded session-context.md → ${target}`);
     return true;
-  } catch { return false; }
+  } catch (err) {
+    intelLog('bootstrap', 'warn', 'seed session-context failed', { target, err: err.message });
+    return false;
+  }
 }
 
 // ─── Step 4: auto-populate Current Task + Key Files from git activity ────────
@@ -288,7 +298,8 @@ function buildAutoFilledTask(cwd) {
 }
 
 function replaceSection(content, heading, newBody) {
-  const re = new RegExp(`(##\\s+${heading}\\s*\\n)([\\s\\S]*?)(?=\\n##\\s|$)`);
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(##\\s+${escaped}\\s*\\n)([\\s\\S]*?)(?=\\n##\\s|$)`);
   const m = content.match(re);
   if (!m) return content; // heading missing, leave alone
   return content.replace(re, `$1${newBody.trimEnd()}\n`);
@@ -337,7 +348,10 @@ function injectClaudeMdRules(cwd, state) {
     state.injectedClaudeMd[encoded] = new Date().toISOString();
     notify(`injected session-intelligence rules → ${target}`);
     return true;
-  } catch { return false; }
+  } catch (err) {
+    intelLog('bootstrap', 'warn', 'CLAUDE.md inject failed', { target, err: err.message });
+    return false;
+  }
 }
 
 function autoFillSessionContext(cwd, state) {
@@ -398,7 +412,10 @@ function autoFillSessionContext(cwd, state) {
     state.autoFilled[encoded] = { sha: headSha, at: new Date().toISOString() };
     notify(`auto-filled session-context.md from HEAD (${shortSha} — ${data.type})`);
     return true;
-  } catch { return false; }
+  } catch (err) {
+    intelLog('bootstrap', 'warn', 'auto-fill write failed', { target, err: err.message });
+    return false;
+  }
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────

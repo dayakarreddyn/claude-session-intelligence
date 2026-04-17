@@ -37,7 +37,10 @@ Examples:
 ### Step 1 — Resolve the file and defaults
 
 1. The config file is **`~/.claude/session-intelligence.json`**. If it does not exist, assume an empty `{}` — the hook loader merges with defaults.
-2. Defaults live in **`~/.claude/scripts/hooks/session-intelligence/lib/config.js`** under `DEFAULTS`. Read that module to know what a reset target looks like.
+2. Defaults live in the plugin's `lib/config.js` under `DEFAULTS`. Resolve the path in this order and read the first that exists:
+   - `${CLAUDE_PLUGIN_ROOT}/lib/config.js`
+   - `~/.claude/plugins/cache/session-intelligence/plugins/session-intelligence/lib/config.js`
+   - `~/.claude/scripts/hooks/session-intelligence/lib/config.js` (legacy install)
 
 ### Step 2 — Dispatch on subcommand
 

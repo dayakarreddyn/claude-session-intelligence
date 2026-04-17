@@ -40,7 +40,6 @@ try {
 }
 
 const {
-  getClaudeDir,
   getSessionsDir,
   getDateTimeString,
   getTimeString,
@@ -48,47 +47,10 @@ const {
   ensureDir,
   appendFile,
   readFile,
-  log
+  log,
+  readStdinJson,
+  resolveProjectDir,
 } = utils;
-
-/**
- * Resolve the Claude project directory for the current working directory.
- * Claude Code stores project data in ~/.claude/projects/<encoded-path>/
- */
-function resolveProjectMemoryDir(cwd) {
-  const claudeDir = getClaudeDir();
-  const projectsDir = path.join(claudeDir, 'projects');
-  if (!fs.existsSync(projectsDir)) return null;
-
-  // Claude encodes cwd paths: /Users/x/project → -Users-x-project
-  const encoded = cwd.replace(/\//g, '-');
-
-  // Direct match first
-  const direct = path.join(projectsDir, encoded);
-  if (fs.existsSync(path.join(direct, 'session-context.md'))) return direct;
-
-  // Check parent paths (for subdirectories of a project)
-  try {
-    const dirs = fs.readdirSync(projectsDir, { withFileTypes: true })
-      .filter(d => d.isDirectory());
-
-    // Sort by length descending for longest (most specific) match first
-    dirs.sort((a, b) => b.name.length - a.name.length);
-
-    for (const d of dirs) {
-      const decodedPath = d.name.replace(/^-/, '/').replace(/-/g, '/');
-      if (cwd.startsWith(decodedPath) || cwd === decodedPath) {
-        const candidate = path.join(projectsDir, d.name);
-        if (fs.existsSync(path.join(candidate, 'session-context.md'))) return candidate;
-      }
-    }
-
-    // Return first dir that exists (even without session-context)
-    if (fs.existsSync(direct)) return direct;
-  } catch { /* ignore */ }
-
-  return null;
-}
 
 // Lines that are still template placeholders: either a "key: (…)" pair
 // with only parenthesised hint text, or a bullet that is just parens.
@@ -181,9 +143,13 @@ async function main() {
     appendFile(sessions[0].path, `\n---\n**[Compaction occurred at ${timeStr}]** - Context was summarized\n`);
   }
 
-  // Inject compaction hints from session-context.md
-  const cwd = process.cwd();
-  const projectDir = resolveProjectMemoryDir(cwd);
+  // Inject compaction hints from session-context.md. Pull cwd from hook stdin
+  // (same contract as every other hook) and fall back to process.cwd() only
+  // when Claude doesn't supply it — avoids resolving the wrong project when
+  // Claude launches the hook from a different directory.
+  const stdinInput = readStdinJson();
+  const cwd = stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir) || process.cwd();
+  const projectDir = resolveProjectDir(cwd);
 
   if (projectDir) {
     const contextFile = path.join(projectDir, 'session-context.md');

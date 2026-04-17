@@ -26,7 +26,9 @@ const path = require('path');
 const {
   getTempDir,
   writeFile,
-  log
+  log,
+  readStdinJson,
+  readTranscriptTokens,
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
 
@@ -34,45 +36,6 @@ const { intelLog } = require('../lib/intel-debug');
 function loadSiConfig() {
   try { return require('../lib/config').loadConfig(); }
   catch { return { compact: { threshold: 50, autoblock: true, prompt: true, promptTimeout: 30 } }; }
-}
-
-function readStdinJson() {
-  try {
-    const raw = fs.readFileSync(0, 'utf8');
-    return raw.trim() ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-
-/**
- * Read authoritative context-size from the latest assistant-message usage
- * block in the transcript JSONL. Returns 0 if the file is missing, empty, or
- * has no usage block yet. Scans only the tail so large transcripts stay fast.
- * Mirrors the status-line's logic so both surfaces see the same number.
- */
-function readTranscriptTokens(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
-  try {
-    const stat = fs.statSync(transcriptPath);
-    const SCAN_BYTES = Math.min(stat.size, 512 * 1024);
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const buf = Buffer.alloc(SCAN_BYTES);
-      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
-      const lines = buf.toString('utf8').split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const d = JSON.parse(lines[i]);
-          const u = d && d.message && d.message.usage;
-          if (u) {
-            return (u.input_tokens || 0)
-                 + (u.cache_creation_input_tokens || 0)
-                 + (u.cache_read_input_tokens || 0);
-          }
-        } catch { /* partial line on boundary */ }
-      }
-    } finally { fs.closeSync(fd); }
-  } catch { /* silent */ }
-  return 0;
 }
 
 async function main() {

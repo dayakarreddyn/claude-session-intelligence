@@ -37,6 +37,8 @@ const {
   getTempDir,
   writeFile,
   log,
+  resolveProjectDir,
+  readTranscriptTokens,
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
 
@@ -53,24 +55,6 @@ function readStdinSync() {
 
 function parseInput(raw) {
   try { return raw.trim() ? JSON.parse(raw) : {}; } catch { return {}; }
-}
-
-function resolveProjectDir(cwd) {
-  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const projectsDir = path.join(home, '.claude', 'projects');
-  if (!fs.existsSync(projectsDir)) return null;
-  const encoded = cwd.replace(/\//g, '-');
-  const direct = path.join(projectsDir, encoded);
-  if (fs.existsSync(direct)) return direct;
-  try {
-    const children = fs.readdirSync(projectsDir, { withFileTypes: true });
-    for (const d of children) {
-      if (!d.isDirectory()) continue;
-      const decoded = '/' + d.name.replace(/^-/, '').replace(/-/g, '/');
-      if (cwd.startsWith(decoded)) return path.join(projectsDir, d.name);
-    }
-  } catch { /* ignore */ }
-  return null;
 }
 
 function readSessionContext(projectDir) {
@@ -295,36 +279,6 @@ function readTokenBudget(sessionId) {
   } catch { return 0; }
 }
 
-/**
- * Prefer authoritative transcript-based count over the tracker estimate.
- * Same helper as suggest-compact.js so both hooks see identical numbers.
- */
-function readTranscriptTokens(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
-  try {
-    const stat = fs.statSync(transcriptPath);
-    const SCAN_BYTES = Math.min(stat.size, 512 * 1024);
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const buf = Buffer.alloc(SCAN_BYTES);
-      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
-      const lines = buf.toString('utf8').split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const d = JSON.parse(lines[i]);
-          const u = d && d.message && d.message.usage;
-          if (u) {
-            return (u.input_tokens || 0)
-                 + (u.cache_creation_input_tokens || 0)
-                 + (u.cache_read_input_tokens || 0);
-          }
-        } catch { /* partial line */ }
-      }
-    } finally { fs.closeSync(fd); }
-  } catch { /* silent */ }
-  return 0;
-}
-
 function resolveTokenBudget(input, sessionId) {
   const fromTranscript = readTranscriptTokens(input && input.transcript_path);
   if (fromTranscript > 0) return fromTranscript;
@@ -346,74 +300,10 @@ function fmtTokens(n) {
 // a boolean verdict. Gated by taskChange.semanticFallback=true so no one
 // pays for it unless they opt in.
 
-function callHaiku(currentContext, newPrompt, cfg) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return { verdict: 'unavailable', reason: 'no-api-key' };
-
-  const model = cfg.haikuModel || 'claude-haiku-4-5';
-  const timeoutMs = Number.isFinite(cfg.semanticTimeoutMs) ? cfg.semanticTimeoutMs : 3000;
-
-  const systemPrompt =
-    'You classify whether two messages describe the same task/topic in an ' +
-    'ongoing coding session. Answer with exactly one word: SAME or DIFFERENT. ' +
-    'SAME = continuation/refinement of the current work. DIFFERENT = unrelated ' +
-    'feature, file, or subsystem. No explanation.';
-
-  const userPrompt =
-    `CURRENT CONTEXT:\n${currentContext}\n\n` +
-    `NEW PROMPT:\n${newPrompt}\n\n` +
-    `Are these the same task domain? Reply SAME or DIFFERENT.`;
-
-  const body = JSON.stringify({
-    model,
-    max_tokens: 8,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-
-  return new Promise((resolve) => {
-    const https = require('https');
-    const req = https.request({
-      hostname: 'api.anthropic.com',
-      path: '/v1/messages',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'Content-Length': Buffer.byteLength(body),
-      },
-      timeout: timeoutMs,
-    }, (res) => {
-      let raw = '';
-      res.on('data', (c) => { raw += c.toString('utf8'); });
-      res.on('end', () => {
-        try {
-          const d = JSON.parse(raw);
-          if (d.error) return resolve({ verdict: 'unavailable', reason: d.error.message });
-          const text = (d.content && d.content[0] && d.content[0].text || '').trim().toUpperCase();
-          if (text.startsWith('SAME'))      return resolve({ verdict: 'same',      reason: text });
-          if (text.startsWith('DIFFERENT')) return resolve({ verdict: 'different', reason: text });
-          return resolve({ verdict: 'unavailable', reason: `unparsed: ${text.slice(0, 40)}` });
-        } catch (err) {
-          resolve({ verdict: 'unavailable', reason: err.message });
-        }
-      });
-    });
-    req.on('error',   (err) => resolve({ verdict: 'unavailable', reason: err.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ verdict: 'unavailable', reason: 'timeout' }); });
-    req.write(body);
-    req.end();
-  });
-}
-
-// Sync wrapper — main() is sync but Node's https is async. We block on the
-// event loop via Atomics.wait on a shared buffer. For a 3s timeout this is
-// fine; hook is already short-lived.
+// main() runs synchronously, so we call Haiku from a short-lived child node
+// process instead of using Node's async https directly. Avoids any event-loop
+// blocking trickery and keeps this hook's call site straightforward.
 function callHaikuSync(currentContext, newPrompt, cfg) {
-  // Simplest portable approach: use a child_process with --input. We already
-  // have the node binary, just re-invoke it with an inline script. Avoids
-  // the event-loop-blocking trick and keeps the code readable.
   const timeoutMs = Number.isFinite(cfg.semanticTimeoutMs) ? cfg.semanticTimeoutMs : 3000;
   const payload = JSON.stringify({ currentContext, newPrompt, cfg });
   const script = `
