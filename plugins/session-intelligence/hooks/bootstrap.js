@@ -2,7 +2,7 @@
 /**
  * Session Intelligence — SessionStart bootstrap.
  *
- * Runs once per session. Idempotent. Does three things:
+ * Runs once per session. Idempotent. Does four things:
  *
  *   1. Seeds ~/.claude/session-intelligence.json from the shipped template
  *      (only if the file is missing — never overwrites user edits).
@@ -16,6 +16,18 @@
  *   3. Seeds templates/session-context.md into the active project's
  *      ~/.claude/projects/<encoded>/session-context.md if that project has
  *      no session-context.md yet. Claude updates it as real work happens.
+ *
+ *   4. Auto-populates Current Task + Key Files in that session-context.md
+ *      from the last commit (subject, branch, touched files) when the
+ *      sections are still placeholder-only. Tracks the HEAD SHA in state
+ *      so we don't rewrite the same content every session. Hands-off the
+ *      moment a human writes real content — we never touch real data.
+ *
+ *   5. Injects a managed "session discipline" block into the project's
+ *      CLAUDE.md between BEGIN/END markers so Claude in that repo knows
+ *      to read/update session-context.md at task boundaries. Content
+ *      between the markers is fully managed by this hook (safe to refresh
+ *      on upgrades); anything outside the markers is left untouched.
  *
  * Silent on success. Only logs on first-install or on error.
  *
@@ -40,6 +52,9 @@ const SETTINGS = path.join(CLAUDE_DIR, 'settings.json');
 const CHAIN_SH = path.join(PLUGIN_ROOT, 'statusline', 'statusline-chain.sh');
 const CONFIG_TEMPLATE = path.join(PLUGIN_ROOT, 'templates', 'session-intelligence.json');
 const SESSION_CTX_TEMPLATE = path.join(PLUGIN_ROOT, 'templates', 'session-context.md');
+const CLAUDE_MD_RULES_TEMPLATE = path.join(PLUGIN_ROOT, 'templates', 'claude-md-rules.md');
+const CLAUDE_MD_MARKER_START = '<!-- BEGIN session-intelligence:rules -->';
+const CLAUDE_MD_MARKER_END = '<!-- END session-intelligence:rules -->';
 
 // ─── State helpers ───────────────────────────────────────────────────────────
 
@@ -170,6 +185,161 @@ function seedSessionContext(cwd, state) {
   } catch { return false; }
 }
 
+// ─── Step 4: auto-populate Current Task + Key Files from git activity ────────
+//
+// If the Current Task block is still placeholder-only, fill it from the last
+// commit and the files it touched. This runs every SessionStart but is a
+// no-op as soon as the user (or Claude) writes real content — we only
+// overwrite placeholder text, never user data.
+
+function isPlaceholderSection(body) {
+  const lines = body.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return true;
+  return lines.every((l) =>
+    /^[A-Za-z][A-Za-z0-9_-]*:\s*\([^)]*\)\s*$/.test(l) ||
+    /^[-*]\s*\([^)]*\)\s*$/.test(l) ||
+    /^[A-Z]+:\s*\([^)]*\)\s*$/.test(l)
+  );
+}
+
+function runGit(cwd, args) {
+  try {
+    const { execFileSync } = require('child_process');
+    return execFileSync('git', ['-C', cwd, ...args], {
+      encoding: 'utf8', timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch { return ''; }
+}
+
+function guessTaskType(subject) {
+  const m = subject.match(/^(feat|feature|fix|bugfix|refactor|docs?|test|chore|perf|ci|deploy|release|ship)\b/i);
+  if (!m) return 'feature';
+  const k = m[1].toLowerCase();
+  if (k === 'bugfix') return 'bug-fix';
+  if (k === 'fix') return 'bug-fix';
+  if (k === 'feature') return 'feature';
+  if (k === 'docs' || k === 'doc') return 'docs';
+  if (k === 'release' || k === 'ship') return 'deploy';
+  return k;
+}
+
+function parseIssueFromBranch(branch) {
+  if (!branch) return 'none';
+  const m = branch.match(/#?(\d{2,6})\b/);
+  return m ? `#${m[1]}` : 'none';
+}
+
+function buildAutoFilledTask(cwd) {
+  const subject = runGit(cwd, ['log', '-1', '--pretty=%s']);
+  if (!subject) return null;
+  const branch = runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const files = runGit(cwd, ['log', '-1', '--pretty=format:', '--name-only'])
+    .split('\n').map((s) => s.trim()).filter(Boolean);
+  const type = guessTaskType(subject);
+  const issue = parseIssueFromBranch(branch);
+  return { subject, type, issue, files, branch };
+}
+
+function replaceSection(content, heading, newBody) {
+  const re = new RegExp(`(##\\s+${heading}\\s*\\n)([\\s\\S]*?)(?=\\n##\\s|$)`);
+  const m = content.match(re);
+  if (!m) return content; // heading missing, leave alone
+  return content.replace(re, `$1${newBody.trimEnd()}\n`);
+}
+
+// ─── Step 5: inject managed block into project CLAUDE.md ─────────────────────
+//
+// Tells Claude in each repo that a session-context.md exists, to consult it at
+// task boundaries, and to update it as work evolves. Content inside the markers
+// is overwritten on every upgrade; anything outside is user-owned and never
+// touched. If CLAUDE.md doesn't exist, we create it and drop the block at the
+// top. If it exists and already has our markers, we refresh between them.
+
+function injectClaudeMdRules(cwd, state) {
+  if (!cwd || !fs.existsSync(CLAUDE_MD_RULES_TEMPLATE)) return false;
+
+  let rules;
+  try { rules = fs.readFileSync(CLAUDE_MD_RULES_TEMPLATE, 'utf8').trim(); }
+  catch { return false; }
+
+  const target = path.join(cwd, 'CLAUDE.md');
+  const managed = `${CLAUDE_MD_MARKER_START}\n${rules}\n${CLAUDE_MD_MARKER_END}`;
+
+  let existing = '';
+  try { existing = fs.readFileSync(target, 'utf8'); } catch { /* missing */ }
+
+  let next;
+  if (!existing) {
+    next = managed + '\n';
+  } else if (existing.includes(CLAUDE_MD_MARKER_START) && existing.includes(CLAUDE_MD_MARKER_END)) {
+    const re = new RegExp(
+      `${CLAUDE_MD_MARKER_START.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}[\\s\\S]*?${CLAUDE_MD_MARKER_END.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')}`
+    );
+    next = existing.replace(re, managed);
+  } else {
+    // First-time injection — prepend so it's visible, keep a blank line gap.
+    next = managed + '\n\n' + existing;
+  }
+
+  if (next === existing) return false;
+
+  try {
+    fs.writeFileSync(target, next, 'utf8');
+    const encoded = cwd.replace(/\//g, '-');
+    state.injectedClaudeMd = state.injectedClaudeMd || {};
+    state.injectedClaudeMd[encoded] = new Date().toISOString();
+    notify(`injected session-intelligence rules → ${target}`);
+    return true;
+  } catch { return false; }
+}
+
+function autoFillSessionContext(cwd, state) {
+  if (!cwd) return false;
+  const encoded = cwd.replace(/\//g, '-');
+  const projectDir = path.join(CLAUDE_DIR, 'projects', encoded);
+  const target = path.join(projectDir, 'session-context.md');
+  if (!fs.existsSync(target)) return false;
+
+  let content;
+  try { content = fs.readFileSync(target, 'utf8'); } catch { return false; }
+
+  const taskMatch = content.match(/##\s+Current Task\s*\n([\s\S]*?)(?=\n##\s|$)/);
+  if (!taskMatch) return false;
+  if (!isPlaceholderSection(taskMatch[1])) return false; // user content — leave it
+
+  const data = buildAutoFilledTask(cwd);
+  if (!data) return false; // no commits yet — leave placeholders
+
+  // Skip if we already auto-filled for this exact commit (avoids rewriting the
+  // same content every session start).
+  const headSha = runGit(cwd, ['rev-parse', 'HEAD']);
+  const lastAutoFill = state.autoFilled && state.autoFilled[encoded];
+  if (lastAutoFill && lastAutoFill.sha === headSha) return false;
+
+  const taskBody =
+    `type: ${data.type} \u2014 ${data.subject}\n` +
+    `description: derived from last commit on \`${data.branch || 'HEAD'}\`\n` +
+    `issue: ${data.issue}\n`;
+  let next = replaceSection(content, 'Current Task', taskBody);
+
+  // Also seed Key Files if still placeholder-only.
+  const keyMatch = next.match(/##\s+Key Files\s*\n([\s\S]*?)(?=\n##\s|$)/);
+  if (keyMatch && isPlaceholderSection(keyMatch[1]) && data.files.length) {
+    const keyBody = data.files.slice(0, 10).map((f) => `- ${f}`).join('\n') + '\n';
+    next = replaceSection(next, 'Key Files', keyBody);
+  }
+
+  if (next === content) return false;
+  try {
+    fs.writeFileSync(target, next, 'utf8');
+    state.autoFilled = state.autoFilled || {};
+    state.autoFilled[encoded] = { sha: headSha, at: new Date().toISOString() };
+    notify(`auto-filled session-context.md from HEAD (${headSha.slice(0, 7)} — ${data.type})`);
+    return true;
+  } catch { return false; }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function readStdinJsonOrEmpty() {
@@ -187,8 +357,10 @@ function main() {
   const didSeedConfig = seedConfig(state);
   const didWire = wireStatusline(state);
   const didSeedCtx = seedSessionContext(cwd, state);
+  const didAutoFill = autoFillSessionContext(cwd, state);
+  const didInject = injectClaudeMdRules(cwd, state);
 
-  if (didSeedConfig || didWire || didSeedCtx) {
+  if (didSeedConfig || didWire || didSeedCtx || didAutoFill || didInject) {
     saveState(state);
   }
 

@@ -58,7 +58,13 @@ From inside Claude Code:
 /plugin install session-intelligence
 ```
 
-Then restart Claude Code. A `SessionStart` bootstrap hook seeds `~/.claude/session-intelligence.json` and wires the status-line chain automatically on first session, preserving whatever statusLine you already had.
+Then restart Claude Code. A `SessionStart` bootstrap hook runs automatically and does five things, idempotently, every session:
+
+1. Seeds `~/.claude/session-intelligence.json` on first install.
+2. Wires the status-line chain into `settings.json`, preserving any existing statusLine.
+3. Seeds `session-context.md` into `~/.claude/projects/<encoded>/` for the active project when one doesn't exist yet.
+4. Auto-fills the `## Current Task` and `## Key Files` sections of that file from the last commit (`type`, subject, branch, touched files) while they're still placeholder-only. Tracks HEAD SHA so we don't rewrite unchanged content. Steps back the moment you or Claude writes real content.
+5. Injects a managed session-discipline block into the project's `CLAUDE.md` between `<!-- BEGIN session-intelligence:rules -->` and `<!-- END session-intelligence:rules -->` markers. Content inside the markers refreshes on upgrades; anything outside is user-owned and never touched. If `CLAUDE.md` doesn't exist, it gets created with just the managed block.
 
 ### B. Bash installer (legacy)
 
