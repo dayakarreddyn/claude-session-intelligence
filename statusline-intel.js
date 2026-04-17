@@ -23,50 +23,52 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
+// Unified config lives in ~/.claude/session-intelligence.json. lib/config.js
+// merges it with defaults, legacy ~/.claude/statusline-intel.json, and env
+// overrides. We only need the statusline slice here.
+//
+// Two install paths exist: repo-local tests (lib next to script) and user
+// install (lib under scripts/hooks/session-intelligence/). Try both.
 
-const DEFAULT_CONFIG = {
-  fields: ['emoji', 'model', 'project', 'tokens', 'tools', 'task'],
-  tokenSource: 'auto',              // 'auto' | 'transcript' | 'estimate'
-  zones: { yellow: 200000, orange: 300000, red: 400000 },
-  maxTaskLength: 60,
-  separator: ' · ',
-  colors: true,
-  serviceHealth: [],                // [{ name, url, ttlSec?, timeoutMs? }]
-};
+function loadSharedConfig() {
+  const candidates = [
+    path.join(__dirname, 'lib', 'config.js'),
+    path.join(__dirname, 'hooks', 'session-intelligence', 'lib', 'config.js'),
+    path.join(__dirname, 'session-intelligence', 'lib', 'config.js'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return require(p);
+    } catch { /* try next */ }
+  }
+  return null;
+}
 
 function loadConfig() {
+  const shared = loadSharedConfig();
+  if (shared) {
+    const full = shared.loadConfig();
+    return full.statusline || full;
+  }
+  // Stand-alone fallback: read legacy file only, no env overrides.
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const configPath = path.join(home, '.claude', 'statusline-intel.json');
-
-  let cfg = { ...DEFAULT_CONFIG };
+  const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
+  const defaults = {
+    fields: ['emoji', 'model', 'project', 'tokens', 'tools', 'task'],
+    tokenSource: 'auto',
+    zones: { yellow: 200000, orange: 300000, red: 400000 },
+    maxTaskLength: 60,
+    separator: ' · ',
+    colors: true,
+    serviceHealth: [],
+  };
   try {
-    if (fs.existsSync(configPath)) {
-      const user = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      cfg = { ...cfg, ...user, zones: { ...cfg.zones, ...(user.zones || {}) } };
+    if (fs.existsSync(legacyPath)) {
+      const user = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+      return { ...defaults, ...user, zones: { ...defaults.zones, ...(user.zones || {}) } };
     }
-  } catch { /* invalid JSON — ignore, use defaults */ }
-
-  // Env overrides — useful for one-off testing / mode switching.
-  if (process.env.CLAUDE_STATUSLINE_FIELDS) {
-    cfg.fields = process.env.CLAUDE_STATUSLINE_FIELDS
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  if (process.env.CLAUDE_STATUSLINE_TOKEN_SOURCE) {
-    cfg.tokenSource = process.env.CLAUDE_STATUSLINE_TOKEN_SOURCE;
-  }
-  if (process.env.CLAUDE_STATUSLINE_SEP_INLINE) {
-    cfg.separator = process.env.CLAUDE_STATUSLINE_SEP_INLINE;
-  }
-  if (process.env.NO_COLOR === '1' || process.env.CLAUDE_STATUSLINE_NO_COLOR === '1') {
-    cfg.colors = false;
-  }
-  if (process.env.CLAUDE_STATUSLINE_COMPACT === '1') {
-    cfg.fields = cfg.fields.filter((f) => f !== 'task');
-  }
-
-  return cfg;
+  } catch { /* ignore */ }
+  return defaults;
 }
 
 // ─── Colors ──────────────────────────────────────────────────────────────────

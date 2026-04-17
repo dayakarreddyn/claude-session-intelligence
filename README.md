@@ -286,6 +286,40 @@ Probes run async (detached `curl`), results cached in `/tmp/claude-health-<name>
 
 Open `~/.claude/scripts/statusline-chain.sh` and edit the `PREV_STATUSLINE=…` line — anything between the quotes gets run on each redraw. Or re-point `~/.claude/settings.json` → `statusLine.command` directly at whatever you want.
 
+## Unified Config + `/si` command
+
+All configuration lives in **`~/.claude/session-intelligence.json`** — one file for every hook and the status line. You don't have to edit it by hand: the `/si` slash command lets Claude do it for you, with a diff preview and a confirmation before writing.
+
+### Shape
+
+```json
+{
+  "statusline": { "fields": [...], "zones": {...}, "prices": {...}, ... },
+  "compact":     { "threshold": 50, "autoblock": true, "prompt": true, "promptTimeout": 30 },
+  "taskChange":  { "enabled": true, "minTokens": 100000, "sameDomainScore": 0.5,
+                   "differentDomainScore": 0.2, "prompt": true, "promptTimeout": 20 },
+  "debug":       { "enabled": false, "quiet": false }
+}
+```
+
+Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins ← legacy `statusline-intel.json` ← `session-intelligence.json` ← env vars**. Env vars still win so CI and one-off overrides keep working.
+
+### `/si` inside Claude Code
+
+```text
+/si show                            # print the effective config
+/si get compact.promptTimeout       # read a single dotted key
+/si set compact.autoblock false     # stage + diff + confirm + write
+/si set taskChange.minTokens 150000
+/si set statusline.zones.orange 350000
+/si reset taskChange                # restore one section to defaults
+/si reset *                         # restore everything
+/si explain taskChange.minTokens    # describe what a key does
+/si migrate                         # fold legacy statusline-intel.json in
+```
+
+Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
+
 ## Auto-Compact with Prompt
 
 `suggest-compact.js` is a `PreToolUse` hook that watches token budget on every `Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob` call. When context **escalates** into a higher-severity zone, it interrupts the tool call and asks the user what to do:
@@ -323,6 +357,46 @@ Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit 
 - Dialog timeout in seconds: `export CLAUDE_COMPACT_PROMPT_TIMEOUT=60`
 
 Linux/Windows users currently hit the exit-2 fallback directly (no native dialog). Easy to extend `askUserCompact()` in `suggest-compact.js` with `zenity` / PowerShell prompts.
+
+## Task Change Detector
+
+When you submit a prompt, `task-change-detector.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, asks whether you want to `/compact`, `/clear`, or keep going before it processes the prompt.
+
+### Signals combined into a 0..1 same-domain score
+
+| # | Signal | What it compares | Weight |
+|---|---|---|---|
+| 1 | **File overlap** | paths mentioned in the new prompt vs. `## Key Files` in `session-context.md` | 2 |
+| 2 | **Git locality** | paths mentioned in the new prompt vs. files the working tree has touched | *(folded into 1)* |
+| 3 | **Root prefix** | top-level folder match (e.g. `src/auth/*` vs `src/billing/*`) | *(folded into 1)* |
+| 4 | **Keyword Jaccard** | stopword-filtered Jaccard of current task description vs. new prompt | 1 |
+
+Absent signals are neutral — a prompt that mentions no paths is judged on keywords alone. If every signal is missing, the hook stays silent rather than prompting on no evidence.
+
+### Decision
+
+| Same-domain score | Tokens ≥ `minTokens` | Action |
+|---|---|---|
+| ≥ `sameDomainScore` (default 0.5) | any | silent |
+| between both thresholds | yes | recommend **/compact** (preserve current task) |
+| < `differentDomainScore` (default 0.2) | yes | recommend **/clear** (fresh start is cheaper) |
+| any | no | silent (below `minTokens` — cheap either way) |
+
+The dialog offers three buttons: `[Continue]`, `[Compact]`, `[Clear]`. **Continue** proceeds. **Compact/Clear/timeout** block the prompt with exit 2 + an instruction for Claude to relay. One-shot per (session, prompt-hash) — retrying the same prompt won't re-prompt.
+
+### Tuning
+
+Everything is in `taskChange.*`:
+
+```text
+/si set taskChange.enabled false                # turn off entirely
+/si set taskChange.minTokens 150000             # only kick in above 150k
+/si set taskChange.sameDomainScore 0.6          # stricter "same domain"
+/si set taskChange.differentDomainScore 0.15    # looser "different domain"
+/si set taskChange.promptTimeout 30
+```
+
+Make sure `session-context.md` has a real `## Current Task` and `## Key Files` section — that's what the detector compares against. No baseline = silent.
 
 ## Debug Log
 
@@ -381,6 +455,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 | `pre-compact.js` | PreCompact | Reads session-context.md, injects PRESERVE/DROP hints |
 | `token-budget-tracker.js` | PostToolUse | Estimates tokens from Read/Bash/Grep/Glob/Agent output |
 | `suggest-compact.js` | PreToolUse (Bash/Read/Edit/Write/Grep/Glob) | Warns at 200k, **auto-blocks + prompts the user** at 300k/400k (native macOS dialog, graceful fallback to exit-2 block) |
+| `task-change-detector.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
 
 All three emit structured entries to the debug log (see above).
 
@@ -390,29 +465,38 @@ All three emit structured entries to the debug log (see above).
 |---|---|---|
 | `~/.claude/scripts/hooks/pre-compact.js` | `hooks/pre-compact.js` | Compaction hint injector |
 | `~/.claude/scripts/hooks/token-budget-tracker.js` | `hooks/token-budget-tracker.js` | Token estimator |
-| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Zone warnings |
+| `~/.claude/scripts/hooks/suggest-compact.js` | `hooks/suggest-compact.js` | Zone warnings + auto-block |
+| `~/.claude/scripts/hooks/task-change-detector.js` | `hooks/task-change-detector.js` | Task-domain change detector |
+| `~/.claude/scripts/hooks/lib/config.js` (+ `session-intelligence/lib/`) | `lib/config.js` | Unified config loader |
 | `~/.claude/scripts/hooks/session-intelligence/lib/utils.js` | `lib/utils.js` | Minimal shared utils |
 | `~/.claude/scripts/hooks/session-intelligence/lib/intel-debug.js` | `lib/intel-debug.js` | Debug logger |
 | `~/.claude/scripts/statusline-intel.js` | `statusline-intel.js` | Intel status-line renderer |
 | `~/.claude/scripts/statusline-chain.sh` | `statusline-chain.sh` | Chain wrapper (preserves your existing statusLine) |
+| `~/.claude/commands/si.md` | `commands/si.md` | `/si` slash command (config manager) |
+| `~/.claude/session-intelligence.json` | `templates/session-intelligence.json` | Unified config (shipped on first install only) |
 
 ## Configuration
 
+### Config file
+
+Prefer **`/si set <key> <value>`** over env vars — it's Claude-native, diffed, and persistent. Env vars remain as an override for scripting/CI.
+
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COMPACT_THRESHOLD` | `50` | Tool calls before first compact suggestion |
-| `CLAUDE_COMPACT_AUTOBLOCK` | on | Set to `0` to disable the orange/red auto-block entirely (falls back to passive warnings) |
-| `CLAUDE_COMPACT_PROMPT` | on (macOS) | Set to `0` to skip the native yes/no dialog and go straight to exit-2 block |
-| `CLAUDE_COMPACT_PROMPT_TIMEOUT` | `30` | Seconds before the dialog auto-times-out and falls through to exit-2 block |
-| `CLAUDE_INTEL_DEBUG` | off | Enable debug-level log entries |
-| `CLAUDE_INTEL_QUIET` | off | Suppress all log entries except errors |
-| `CLAUDE_STATUSLINE_NO_PREV` | off | Suppress the previous statusLine command |
-| `CLAUDE_STATUSLINE_NO_INTEL` | off | Suppress the intel line |
-| `CLAUDE_STATUSLINE_COMPACT` | off | Hide the task summary from the intel line |
-| `CLAUDE_STATUSLINE_SEP` | `\n` | Separator between prev statusLine and intel |
-| `CLAUDE_STATUSLINE_NO_COLOR` | off | Strip ANSI from the intel line |
+| Variable | Config equivalent | Description |
+|----------|---|---|
+| `COMPACT_THRESHOLD` | `compact.threshold` | Tool calls before first compact suggestion |
+| `CLAUDE_COMPACT_AUTOBLOCK` | `compact.autoblock` | `0` disables the orange/red auto-block |
+| `CLAUDE_COMPACT_PROMPT` | `compact.prompt` | `0` skips the native GUI dialog |
+| `CLAUDE_COMPACT_PROMPT_TIMEOUT` | `compact.promptTimeout` | Dialog timeout (seconds) |
+| `CLAUDE_TASK_CHANGE` | `taskChange.enabled` | `0` disables task-change detection entirely |
+| `CLAUDE_INTEL_DEBUG` | `debug.enabled` | Enable debug-level log entries |
+| `CLAUDE_INTEL_QUIET` | `debug.quiet` | Suppress all log entries except errors |
+| `CLAUDE_STATUSLINE_NO_PREV` | — | (Chain) Suppress the previous statusLine command |
+| `CLAUDE_STATUSLINE_NO_INTEL` | — | (Chain) Suppress the intel line |
+| `CLAUDE_STATUSLINE_COMPACT` | — | Hide the task summary from the intel line |
+| `CLAUDE_STATUSLINE_SEP` | — | Separator between prev statusLine and intel (default: newline) |
+| `CLAUDE_STATUSLINE_NO_COLOR` | `statusline.colors` | `1` strips ANSI |
 
 ### Customizing Zones
 

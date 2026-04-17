@@ -12,7 +12,9 @@ HOOKS_DIR="${CLAUDE_DIR}/scripts/hooks"
 LIB_DIR="${HOOKS_DIR}/session-intelligence/lib"
 SCRIPTS_DIR="${CLAUDE_DIR}/scripts"
 LOGS_DIR="${CLAUDE_DIR}/logs"
+COMMANDS_DIR="${CLAUDE_DIR}/commands"
 SETTINGS="${CLAUDE_DIR}/settings.json"
+UNIFIED_CONFIG="${CLAUDE_DIR}/session-intelligence.json"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -42,9 +44,9 @@ echo ""
 
 # ─── 1. Install hooks + shared lib ──────────────────
 
-mkdir -p "$HOOKS_DIR" "$LIB_DIR" "$SCRIPTS_DIR" "$LOGS_DIR"
+mkdir -p "$HOOKS_DIR" "$LIB_DIR" "$SCRIPTS_DIR" "$LOGS_DIR" "$COMMANDS_DIR"
 
-for hook in pre-compact.js suggest-compact.js token-budget-tracker.js; do
+for hook in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
   if [ -f "${HOOKS_DIR}/${hook}" ]; then
     if grep -q "Session Intelligence" "${HOOKS_DIR}/${hook}" 2>/dev/null; then
       info "  ${hook} already installed, updating..."
@@ -55,22 +57,46 @@ for hook in pre-compact.js suggest-compact.js token-budget-tracker.js; do
   fi
 done
 
-cp "${SCRIPT_DIR}/hooks/pre-compact.js"          "${HOOKS_DIR}/pre-compact.js"
-cp "${SCRIPT_DIR}/hooks/suggest-compact.js"       "${HOOKS_DIR}/suggest-compact.js"
+cp "${SCRIPT_DIR}/hooks/pre-compact.js"            "${HOOKS_DIR}/pre-compact.js"
+cp "${SCRIPT_DIR}/hooks/suggest-compact.js"        "${HOOKS_DIR}/suggest-compact.js"
 cp "${SCRIPT_DIR}/hooks/token-budget-tracker.js"   "${HOOKS_DIR}/token-budget-tracker.js"
-cp "${SCRIPT_DIR}/lib/utils.js"                   "${LIB_DIR}/utils.js"
-cp "${SCRIPT_DIR}/lib/intel-debug.js"             "${LIB_DIR}/intel-debug.js"
+cp "${SCRIPT_DIR}/hooks/task-change-detector.js"   "${HOOKS_DIR}/task-change-detector.js"
+cp "${SCRIPT_DIR}/lib/utils.js"                    "${LIB_DIR}/utils.js"
+cp "${SCRIPT_DIR}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
+cp "${SCRIPT_DIR}/lib/config.js"                   "${LIB_DIR}/config.js"
 
-# Install an example statusline config if one doesn't exist yet. Users can
-# edit ~/.claude/statusline-intel.json to pick fields, zones, colors, etc.
+# Hooks load lib/config via ../lib — mirror that layout so relative requires
+# resolve the same whether the hook is run from the repo or from ~/.claude.
+HOOK_LIB_SHIM="${HOOKS_DIR}/../lib"
+mkdir -p "${HOOK_LIB_SHIM}"
+cp "${SCRIPT_DIR}/lib/utils.js"       "${HOOK_LIB_SHIM}/utils.js"
+cp "${SCRIPT_DIR}/lib/intel-debug.js" "${HOOK_LIB_SHIM}/intel-debug.js"
+cp "${SCRIPT_DIR}/lib/config.js"      "${HOOK_LIB_SHIM}/config.js"
+
+# Install unified config if one doesn't exist yet.
+if [ ! -f "$UNIFIED_CONFIG" ] && [ -f "${SCRIPT_DIR}/templates/session-intelligence.json" ]; then
+  cp "${SCRIPT_DIR}/templates/session-intelligence.json" "$UNIFIED_CONFIG"
+  ok "Installed default unified config: ${UNIFIED_CONFIG}"
+else
+  info "Unified config already exists at ${UNIFIED_CONFIG} — leaving as-is"
+fi
+
+# Legacy example for users who prefer the flat format; safe to ignore now.
 if [ ! -f "${CLAUDE_DIR}/statusline-intel.json" ] && [ -f "${SCRIPT_DIR}/statusline-intel.json.example" ]; then
   cp "${SCRIPT_DIR}/statusline-intel.json.example" "${CLAUDE_DIR}/statusline-intel.json"
-  ok "Installed default config: ~/.claude/statusline-intel.json"
+  info "Also wrote legacy ~/.claude/statusline-intel.json (kept for backward compat)"
+fi
+
+# /si slash command
+if [ -f "${SCRIPT_DIR}/commands/si.md" ]; then
+  cp "${SCRIPT_DIR}/commands/si.md" "${COMMANDS_DIR}/si.md"
+  ok "Installed /si slash command → ${COMMANDS_DIR}/si.md"
 fi
 
 chmod +x "${HOOKS_DIR}/pre-compact.js"
 chmod +x "${HOOKS_DIR}/suggest-compact.js"
 chmod +x "${HOOKS_DIR}/token-budget-tracker.js"
+chmod +x "${HOOKS_DIR}/task-change-detector.js"
 
 ok "Hooks + lib installed to ${HOOKS_DIR}/"
 
@@ -119,13 +145,26 @@ const suggestIdx = settings.hooks.PreToolUse.findIndex(h =>
   h.id === 'pre:edit-write:suggest-compact' || h.id === 'si:suggest-compact'
 );
 const suggestEntry = {
-  matcher: 'Edit|Write',
+  matcher: 'Bash|Read|Edit|Write|Grep|Glob',
   hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/suggest-compact.js\"' }],
-  description: 'Session Intelligence: token-aware compaction suggestions',
+  description: 'Session Intelligence: token-aware compaction suggestions + auto-block',
   id: 'si:suggest-compact'
 };
 if (suggestIdx >= 0) settings.hooks.PreToolUse[suggestIdx] = suggestEntry;
 else settings.hooks.PreToolUse.push(suggestEntry);
+
+if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
+const taskIdx = settings.hooks.UserPromptSubmit.findIndex(h =>
+  h.id === 'si:task-change-detector'
+);
+const taskEntry = {
+  matcher: '*',
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/task-change-detector.js\"' }],
+  description: 'Session Intelligence: detect task-domain changes at prompt submit',
+  id: 'si:task-change-detector'
+};
+if (taskIdx >= 0) settings.hooks.UserPromptSubmit[taskIdx] = taskEntry;
+else settings.hooks.UserPromptSubmit.push(taskEntry);
 
 fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
 console.log('OK');
@@ -208,7 +247,7 @@ echo ""
 info "Validating installation..."
 
 PASS=true
-for f in pre-compact.js suggest-compact.js token-budget-tracker.js; do
+for f in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
   if node -c "${HOOKS_DIR}/${f}" 2>/dev/null; then
     ok "  ${f} — syntax OK"
   else
@@ -216,6 +255,13 @@ for f in pre-compact.js suggest-compact.js token-budget-tracker.js; do
     PASS=false
   fi
 done
+
+if node -c "${LIB_DIR}/config.js" 2>/dev/null; then
+  ok "  lib/config.js — syntax OK"
+else
+  err "  lib/config.js — syntax ERROR"
+  PASS=false
+fi
 
 if node -c "${SCRIPTS_DIR}/statusline-intel.js" 2>/dev/null; then
   ok "  statusline-intel.js — syntax OK"

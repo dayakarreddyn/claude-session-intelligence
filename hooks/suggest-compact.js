@@ -30,14 +30,20 @@ const {
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
 
+// Load unified config; env overrides already baked in by loadConfig().
+function loadSiConfig() {
+  try { return require('../lib/config').loadConfig(); }
+  catch { return { compact: { threshold: 50, autoblock: true, prompt: true, promptTimeout: 30 } }; }
+}
+
 async function main() {
+  const cfg = loadSiConfig().compact || {};
   const sessionId = (process.env.CLAUDE_SESSION_ID || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
   const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
   intelLog('suggest-compact', 'debug', 'hook fired', { sessionId });
-  const rawThreshold = parseInt(process.env.COMPACT_THRESHOLD || '50', 10);
-  const threshold = Number.isFinite(rawThreshold) && rawThreshold > 0 && rawThreshold <= 10000
-    ? rawThreshold
+  const threshold = Number.isFinite(cfg.threshold) && cfg.threshold > 0 && cfg.threshold <= 10000
+    ? cfg.threshold
     : 50;
 
   // Tool counting is now owned by token-budget-tracker.js (PostToolUse with
@@ -93,8 +99,8 @@ async function main() {
   // Auto-enforce: on escalation into orange/red, block the current tool call
   // with a clear instruction for the user to run /compact. One-shot per
   // zone-rank increase. When tokens drop (post-compact), state re-sets so the
-  // next escalation fires again. Opt-out with CLAUDE_COMPACT_AUTOBLOCK=0.
-  if (tokenBudget > 0 && process.env.CLAUDE_COMPACT_AUTOBLOCK !== '0') {
+  // next escalation fires again. Disable via config: compact.autoblock=false.
+  if (tokenBudget > 0 && cfg.autoblock !== false) {
     const stateFile = path.join(getTempDir(), `claude-compact-state-${sessionId}`);
     const rank = { green: 0, yellow: 1, orange: 2, red: 3 };
     let lastZone = 'green';
@@ -109,7 +115,7 @@ async function main() {
       try { writeFile(stateFile, zone); } catch { /* best effort */ }
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
-      const answer = askUserCompact(zone, tokenBudget);
+      const answer = askUserCompact(zone, tokenBudget, cfg);
       intelLog('suggest-compact', 'info', `zone escalation prompt`, { zone, answer, tokenBudget });
 
       if (answer === 'skip') {
@@ -156,8 +162,8 @@ function getZone(tokens) {
  * Currently implemented for macOS (osascript). Other platforms return
  * 'unavailable' and callers fall back to the stderr-block behaviour.
  */
-function askUserCompact(zone, tokens) {
-  if (process.env.CLAUDE_COMPACT_PROMPT === '0') return 'unavailable';
+function askUserCompact(zone, tokens, cfg = {}) {
+  if (cfg.prompt === false) return 'unavailable';
   if (process.platform !== 'darwin') return 'unavailable';
 
   const { execFileSync } = require('child_process');
@@ -167,7 +173,8 @@ function askUserCompact(zone, tokens) {
   const body = `Context at ~${formatTokens(tokens)} tokens — ${zoneLabel}.\n\n` +
     `Run /compact now to preserve context before continuing?`;
   const icon = zone === 'red' ? 'stop' : 'caution';
-  const timeoutSec = parseInt(process.env.CLAUDE_COMPACT_PROMPT_TIMEOUT || '30', 10);
+  const timeoutSec = Number.isFinite(cfg.promptTimeout) && cfg.promptTimeout > 0
+    ? cfg.promptTimeout : 30;
 
   const script =
     `display dialog ${JSON.stringify(body)} ` +

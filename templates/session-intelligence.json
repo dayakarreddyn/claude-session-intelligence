@@ -1,0 +1,39 @@
+{
+  "statusline": {
+    "fields": [
+      "emoji", "model", "project", "branch", "issue", "diffstat", "tokens",
+      "newline",
+      "emoji2", "tools", "session", "cost", "compactAge", "deploy", "task"
+    ],
+    "tokenSource": "auto",
+    "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
+    "maxTaskLength": 70,
+    "separator": " · ",
+    "colors": true,
+    "serviceHealth": [],
+    "prices": {
+      "input": 15,
+      "cache_creation": 18.75,
+      "cache_read": 1.5,
+      "output": 75
+    }
+  },
+  "compact": {
+    "threshold": 50,
+    "autoblock": true,
+    "prompt": true,
+    "promptTimeout": 30
+  },
+  "taskChange": {
+    "enabled": true,
+    "minTokens": 100000,
+    "sameDomainScore": 0.5,
+    "differentDomainScore": 0.2,
+    "prompt": true,
+    "promptTimeout": 20
+  },
+  "debug": {
+    "enabled": false,
+    "quiet": false
+  }
+}
