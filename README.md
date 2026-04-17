@@ -195,7 +195,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it). Color by freshness: green `<5m`, cyan `<60m`, dim thereafter |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (from stdin or env) |
 | `health` | `[●●○]` | Colored dot per service URL configured in `serviceHealth` — curl probe cached 30s |
-| `task` | `feat — statusline v2` | `type:` line extracted from `session-context.md`, truncated to `maxTaskLength` |
+| `task` | `feat — statusline v2` | Shows what you're working on, in order of freshness: (1) the `type:` line from `session-context.md` when it's real content and the file's mtime is under `taskStaleHours` (default 12h); (2) the same line suffixed ` (stale)` in dim when older; (3) the last commit subject (`git log -1 --pretty=%s`) in dim when (1)/(2) aren't available. Colored by keyword (bug → red, deploy → magenta, feat → blue, test → cyan, refactor → yellow, doc → green) |
 | `newline` | *(pseudo-field)* | Forces a line break at this point so long bars wrap into 2+ lines |
 
 ### Intelligent emoji priority
@@ -307,10 +307,17 @@ All configuration lives in **`~/.claude/session-intelligence.json`** — one fil
 
 ```json
 {
-  "statusline": { "fields": [...], "zones": {...}, "prices": {...}, ... },
-  "compact":     { "threshold": 50, "autoblock": true, "prompt": true, "promptTimeout": 30 },
-  "taskChange":  { "enabled": true, "minTokens": 100000, "sameDomainScore": 0.5,
-                   "differentDomainScore": 0.2, "prompt": true, "promptTimeout": 20 },
+  "statusline": { "fields": [...], "zones": {...}, "prices": {...},
+                  "taskStaleHours": 12, ... },
+  "compact":     { "threshold": 50, "autoblock": true, "prompt": true,
+                   "promptTimeout": 30 },
+  "taskChange":  { "enabled": true, "minTokens": 100000,
+                   "sameDomainScore": 0.5, "differentDomainScore": 0.2,
+                   "prompt": true, "promptTimeout": 20,
+                   "conversationalMaxLen": 120,
+                   "recentHours": 24, "transcriptTurns": 20,
+                   "semanticFallback": false, "semanticTimeoutMs": 3000,
+                   "haikuModel": "claude-haiku-4-5" },
   "debug":       { "enabled": false, "quiet": false }
 }
 ```
@@ -376,16 +383,28 @@ Linux/Windows users currently hit the exit-2 fallback directly (no native dialog
 
 When you submit a prompt, `task-change-detector.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, asks whether you want to `/compact`, `/clear`, or keep going before it processes the prompt.
 
-### Signals combined into a 0..1 same-domain score
+### Layer 1 — heuristic signals (always on)
+
+Combined into a 0..1 same-domain score:
 
 | # | Signal | What it compares | Weight |
 |---|---|---|---|
-| 1 | **File overlap** | paths mentioned in the new prompt vs. `## Key Files` in `session-context.md` | 2 |
-| 2 | **Git locality** | paths mentioned in the new prompt vs. files the working tree has touched | *(folded into 1)* |
-| 3 | **Root prefix** | top-level folder match (e.g. `src/auth/*` vs `src/billing/*`) | *(folded into 1)* |
-| 4 | **Keyword Jaccard** | stopword-filtered Jaccard of current task description vs. new prompt | 1 |
+| 1 | **File overlap** | paths mentioned in the new prompt vs. a pooled baseline of `## Key Files`, dirty / untracked files, files touched by commits in the last `taskChange.recentHours` (default 24), and path-like mentions from the last `taskChange.transcriptTurns` transcript turns (default 20) | 2 |
+| 2 | **Root prefix** | top-level folder match (e.g. `src/auth/*` vs `src/billing/*`) | *(folded into 1)* |
+| 3 | **Keyword Jaccard** | stopword-filtered Jaccard of current task description vs. new prompt | 1 |
+
+The pooled baseline is the critical fix — historically this hook only knew what you'd typed into `session-context.md`. Now "current work" also means files you've actually edited/committed recently and files you've talked about in the session, so follow-ups score as same-domain even when the markdown is out of date.
 
 Absent signals are neutral — a prompt that mentions no paths is judged on keywords alone. If every signal is missing, the hook stays silent rather than prompting on no evidence.
+
+### Layer 2 — Claude Haiku tie-breaker (opt-in)
+
+When the heuristic score falls in the ambiguous band (`differentDomainScore < score < sameDomainScore`) and `taskChange.semanticFallback=true`, the hook calls Claude Haiku with a short `SAME / DIFFERENT` prompt using your `ANTHROPIC_API_KEY`. A confident `SAME` verdict overrides the heuristic and lets the prompt through.
+
+- Bounded 3s timeout (`taskChange.semanticTimeoutMs`), falls through to the heuristic decision on failure/timeout
+- Model configurable via `taskChange.haikuModel` (default `claude-haiku-4-5`)
+- Only fires in the ambiguous band, not on every prompt — typical cost ≈ $0.0002 per disputed submission
+- Requires `ANTHROPIC_API_KEY` to be exported in your shell
 
 ### Decision
 
@@ -411,10 +430,15 @@ Everything is in `taskChange.*`:
 /si set taskChange.promptTimeout 30
 /si set taskChange.conversationalMaxLen 120     # treat short prompts without
                                                 # file refs as conversation
+/si set taskChange.recentHours 24               # pool commits from last N hours
+/si set taskChange.transcriptTurns 20           # pool file refs from last N turns
+/si set taskChange.semanticFallback true        # enable Haiku tie-breaker
+/si set taskChange.semanticTimeoutMs 3000       # Haiku call timeout
+/si set taskChange.haikuModel claude-haiku-4-5  # override tie-breaker model
 /si set compact.prompt false                    # suggest-compact inline-only
 ```
 
-Make sure `session-context.md` has a real `## Current Task` and `## Key Files` section — that's what the detector compares against. No baseline (or placeholder-only template) = silent. Short conversational prompts (under `conversationalMaxLen` chars with no `@path` or backtick code references) also stay silent — they're follow-up talk, not task drift.
+You don't *need* to fill `session-context.md` for the detector to work — the pooled baseline (recent commits + transcript file mentions + dirty tree) is usually enough. Filling it helps the pre-compact hint injection more than it helps the detector. No baseline at all (placeholder-only template + no recent git activity + no transcript file refs) = silent. Short conversational prompts (under `conversationalMaxLen` chars with no `@path` or backtick code references) also stay silent — they're follow-up talk, not task drift.
 
 ## Debug Log
 
