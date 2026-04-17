@@ -24,6 +24,10 @@ const {
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
 const { rootDirOf, appendShape } = require('../lib/context-shape');
+// Post-compact regret monitoring is optional — degrade silently when the
+// module is not on disk yet (fresh install not synced).
+let compactHistory = null;
+try { compactHistory = require('../lib/compact-history'); } catch { /* optional */ }
 
 const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;
@@ -129,6 +133,25 @@ async function main() {
         file: filePath ? String(filePath) : null,
         event,
       });
+    }
+
+    // Post-compact regret monitoring: if there's a live snapshot (written by
+    // pre-compact within the last 30 calls or 30 min), check whether this
+    // tool call is touching a rootDir we told the model was SAFE TO DROP.
+    // A hit means the compact was too aggressive; multiple hits dampen
+    // future drop suggestions via the adaptiveZones() regret-rate path.
+    if (root && compactHistory) {
+      try {
+        const { regretHit, windowClosed } =
+          compactHistory.checkPostCompactRegret(sessionId, root);
+        if (regretHit) {
+          intelLog('token-budget', 'info', 'post-compact regret hit',
+            { root, windowClosed });
+        }
+      } catch (err) {
+        intelLog('token-budget', 'debug', 'regret check failed',
+          { err: err && err.message });
+      }
     }
   } catch (err) {
     intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });

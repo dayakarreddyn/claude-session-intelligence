@@ -40,6 +40,10 @@ const {
 } = require('../lib/utils');
 const { intelLog } = require('../lib/intel-debug');
 const { readShape, analyzeShape, draftMessage } = require('../lib/context-shape');
+let compactHistory = null;
+try { compactHistory = require('../lib/compact-history'); } catch { /* optional */ }
+let costEst = null;
+try { costEst = require('../lib/cost-estimation'); } catch { /* optional */ }
 
 // Load unified config; env overrides already baked in by loadConfig().
 function loadSiConfig() {
@@ -96,8 +100,31 @@ async function main() {
   intelLog('suggest-compact', 'debug', 'token budget resolved',
     { tokenBudget, tokenSource });
 
-  const zone = getZone(tokenBudget);
+  // Zones: prefer adaptive thresholds derived from the user's own compact
+  // history when ≥5 samples are available. Otherwise fall back to the
+  // static 200/300/400k defaults. adaptiveZones() is bounded ±30% from the
+  // defaults so a noisy history can't silence the warnings entirely.
+  const staticZones = { yellow: 200000, orange: 300000, red: 400000 };
+  let zonesCfg = staticZones;
+  try {
+    if (compactHistory) {
+      zonesCfg = compactHistory.adaptiveZones(compactHistory.readHistory(), staticZones);
+    }
+  } catch { /* keep static */ }
+
+  const zone = getZone(tokenBudget, zonesCfg);
   const budgetStr = tokenBudget > 0 ? ` (~${formatTokens(tokenBudget)} tokens, ${zone} zone)` : '';
+
+  // Session cost — surfaced in the escalation message and used by the model
+  // when deciding whether the suggestion is worth acting on. Pulled from
+  // transcript usage; 0 when transcript isn't available.
+  let sessionCost = 0;
+  try {
+    if (costEst && transcriptPath) {
+      sessionCost = costEst.totalCostFromTranscript(
+        transcriptPath, sessionId, costEst.DEFAULT_PRICES);
+    }
+  } catch { /* best effort */ }
 
   // Tool-call based suggestions (original logic)
   if (count === threshold) {
@@ -111,7 +138,7 @@ async function main() {
   // Token-budget based suggestions (new — only fires at zone transitions)
   // We check both current and what the zone was ~5k tokens ago to avoid spam
   if (tokenBudget > 0) {
-    const prevZone = getZone(tokenBudget - 5000);
+    const prevZone = getZone(tokenBudget - 5000, zonesCfg);
 
     if (zone === 'yellow' && prevZone === 'green') {
       log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks.`);
@@ -157,18 +184,27 @@ async function main() {
       const diagnosis = draftMessage(shape);
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
+      const costStr = (costEst && sessionCost > 0) ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
       const lines = [
-        `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens.`,
+        `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens${costStr}.`,
       ];
       if (diagnosis) lines.push(`Observed: ${diagnosis}.`);
       lines.push(
         `Run \`/compact\` — preserve/drop hints will be auto-injected from observed tool usage. ` +
         `Free-text hint after /compact still works.`
       );
+      if (zonesCfg.adaptive) {
+        lines.push(
+          `(Zones adapted to your history: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
+        );
+      }
       lines.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
       process.stderr.write(`${lines.join(' ')}\n`);
-      intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`,
-        { tokenBudget, count, lastZone, shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null });
+      intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, {
+        tokenBudget, count, lastZone, sessionCost,
+        zonesAdaptive: !!zonesCfg.adaptive,
+        shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
+      });
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
     }
 
@@ -181,10 +217,11 @@ async function main() {
   process.exit(0);
 }
 
-function getZone(tokens) {
-  if (tokens >= 400000) return 'red';
-  if (tokens >= 300000) return 'orange';
-  if (tokens >= 200000) return 'yellow';
+function getZone(tokens, zones) {
+  const z = zones || { yellow: 200000, orange: 300000, red: 400000 };
+  if (tokens >= z.red)    return 'red';
+  if (tokens >= z.orange) return 'orange';
+  if (tokens >= z.yellow) return 'yellow';
   return 'green';
 }
 

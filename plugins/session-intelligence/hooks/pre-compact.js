@@ -61,6 +61,23 @@ catch {
   catch { try { ctxShape = require(path.join(__dirname, '..', 'lib', 'context-shape')); } catch { /* not available */ } }
 }
 
+// Compact history + per-session snapshot — enables adaptive zones and
+// post-compact regret detection.
+let compactHistory = null;
+try { compactHistory = require('../lib/compact-history'); }
+catch {
+  try { compactHistory = require('./session-intelligence/lib/compact-history'); }
+  catch { try { compactHistory = require(path.join(__dirname, '..', 'lib', 'compact-history')); } catch { /* not available */ } }
+}
+
+// Cost estimation — transcript-derived session cost, used for telemetry only.
+let costEst = null;
+try { costEst = require('../lib/cost-estimation'); }
+catch {
+  try { costEst = require('./session-intelligence/lib/cost-estimation'); }
+  catch { try { costEst = require(path.join(__dirname, '..', 'lib', 'cost-estimation')); } catch { /* not available */ } }
+}
+
 // Lines that are still template placeholders: either a "key: (…)" pair
 // with only parenthesised hint text, or a bullet that is just parens.
 // An unfilled session-context.md is worse than no guidance because Claude
@@ -223,6 +240,59 @@ async function main() {
   if (shapeInjection) {
     process.stdout.write(shapeInjection);
     log('[PreCompact] Injected observed context-shape hints');
+  }
+
+  // Learning-loop logging: record this compaction event so future sessions
+  // can adapt zones + dampen drop suggestions based on observed behaviour.
+  // Also write a per-session snapshot so token-budget-tracker can watch for
+  // regret (touching a dropped dir shortly after compact).
+  if (compactHistory && ctxShape) {
+    try {
+      const entries = ctxShape.readShape(sessionId);
+      const analysis = ctxShape.analyzeShape(entries);
+
+      // tokens-at-compact = last observed cumulative budget, fallback to 0.
+      // cost-at-compact  = same, best-effort from transcript.
+      const tokens = entries.length ? (entries[entries.length - 1].tok || 0) : 0;
+      const transcriptPath = stdinInput.transcript_path;
+      const cost = costEst
+        ? costEst.totalCostFromTranscript(transcriptPath, sessionId, costEst.DEFAULT_PRICES)
+        : 0;
+
+      const droppedDirs = analysis ? analysis.cold.map((c) => c.root) : [];
+      const hotDirs     = analysis ? analysis.hot.map((h) => h.root) : [];
+
+      const historyEntry = {
+        t: Date.now(),
+        sid: sessionId,
+        cwd,
+        tokens,
+        cost: Number(cost.toFixed(4)),
+        hotDirs,
+        droppedDirs,
+        hadShift: !!(analysis && analysis.shift),
+        regretCount: 0, // upgraded later when the snapshot window closes
+      };
+      compactHistory.appendHistory(historyEntry);
+
+      // Snapshot drives post-compact regret monitoring for up to 30 calls
+      // or 30 min — whichever first. token-budget-tracker.js consumes it.
+      compactHistory.writeSnapshot(sessionId, {
+        t: historyEntry.t,
+        tokens,
+        cost: historyEntry.cost,
+        hotDirs,
+        droppedDirs,
+        callsSince: 0,
+        regretHits: [],
+      });
+
+      intelLog('pre-compact', 'info', 'history + snapshot written', {
+        tokens, cost: historyEntry.cost, dropped: droppedDirs.length, hot: hotDirs.length,
+      });
+    } catch (err) {
+      intelLog('pre-compact', 'warn', 'history/snapshot failed', { err: err && err.message });
+    }
   }
 
   process.exit(0);
