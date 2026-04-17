@@ -28,7 +28,17 @@ const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;
 
 async function main() {
-  const sessionId = (process.env.CLAUDE_SESSION_ID || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  // Read stdin FIRST so we can pick up session_id from the hook payload.
+  // Claude Code passes the session id on stdin; env is a fallback only.
+  let inputData = '';
+  try { inputData = fs.readFileSync(0, 'utf8'); } catch { /* no stdin */ }
+  let parsedInput = null;
+  try { parsedInput = inputData.trim() ? JSON.parse(inputData) : null; } catch { /* ignore */ }
+
+  const rawSid = (parsedInput && (parsedInput.session_id || parsedInput.sessionId))
+    || process.env.CLAUDE_SESSION_ID
+    || 'default';
+  const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
   const countFile  = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
   intelLog('token-budget', 'debug', 'hook fired', { sessionId, budgetFile });
@@ -54,29 +64,17 @@ async function main() {
     }
   } catch { /* supplementary — never fail the hook */ }
 
-  // Read stdin for tool output data
-  let inputData = '';
-  try {
-    inputData = fs.readFileSync(0, 'utf8');
-  } catch {
-    // No stdin available
-  }
-
-  // Estimate tokens from this tool call
+  // Estimate tokens from this tool call (stdin was already read above).
   let callTokens = TOOL_OVERHEAD_TOKENS;
-  try {
-    const parsed = JSON.parse(inputData);
-    // Tool output/result content
-    const output = parsed.tool_output || parsed.output || parsed.result || '';
+  if (parsedInput) {
+    const output = parsedInput.tool_output || parsedInput.output || parsedInput.result || '';
     const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
     callTokens += Math.ceil(outputStr.length / CHARS_PER_TOKEN);
 
-    // Tool input content (if present)
-    const input = parsed.tool_input || parsed.input || '';
-    const inputStr = typeof input === 'string' ? input : JSON.stringify(input);
+    const toolIn = parsedInput.tool_input || parsedInput.input || '';
+    const inputStr = typeof toolIn === 'string' ? toolIn : JSON.stringify(toolIn);
     callTokens += Math.ceil(inputStr.length / CHARS_PER_TOKEN);
-  } catch {
-    // Couldn't parse — just count the raw input
+  } else if (inputData) {
     callTokens += Math.ceil(inputData.length / CHARS_PER_TOKEN);
   }
 

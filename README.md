@@ -47,6 +47,21 @@ Without session intelligence:
 
 ## Install
 
+Two supported paths. **Plugin install is the recommended default** — zero shell scripts, zero manual settings edits.
+
+### A. Native plugin (recommended)
+
+From inside Claude Code:
+
+```text
+/plugin marketplace add dayakarreddyn/claude-session-intelligence
+/plugin install session-intelligence
+```
+
+Then restart Claude Code. A `SessionStart` bootstrap hook seeds `~/.claude/session-intelligence.json` and wires the status-line chain automatically on first session, preserving whatever statusLine you already had.
+
+### B. Bash installer (legacy)
+
 ```bash
 git clone https://github.com/dayakarreddyn/claude-session-intelligence.git
 cd claude-session-intelligence
@@ -54,18 +69,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Then restart Claude Code. That's it.
+The install script copies files from `plugins/session-intelligence/` into `~/.claude/scripts/`, registers hooks in `~/.claude/settings.json`, and chains the intel status line after any existing statusLine you had. Restart Claude Code after install.
 
-The install script:
-1. Copies 3 hook files to `~/.claude/scripts/hooks/`
-2. Copies the debug lib to `~/.claude/scripts/hooks/session-intelligence/lib/`
-3. Copies `statusline-intel.js` + `statusline-chain.sh` to `~/.claude/scripts/`
-4. **Detects your existing statusLine** (ccstatusline, custom, etc.) and configures the chain wrapper to preserve it — our intel line appends as a new line at the bottom, never replacing yours
-5. Registers all hooks in `~/.claude/settings.json` (non-destructive merge, existing hooks kept)
-6. Creates `session-context.md` template in your current project
-7. Creates `~/.claude/logs/` for debug output
-8. Backs up any existing hooks before replacing
-9. Validates everything
+### What lands on your system
+
+- Hooks → `~/.claude/scripts/hooks/` (plugin path: `${CLAUDE_PLUGIN_ROOT}/hooks/`)
+- `/si` slash command → `~/.claude/commands/si.md`
+- Unified config → `~/.claude/session-intelligence.json` (only if missing — never clobbered)
+- Statusline → `~/.claude/scripts/statusline-{intel.js,chain.sh}` wired into `settings.json`
+- Debug logs → `~/.claude/logs/session-intel-YYYY-MM-DD.log`
 
 ### Requirements
 - Claude Code CLI installed (`~/.claude/` directory exists)

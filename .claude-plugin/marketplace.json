@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "session-intelligence",
+  "version": "1.0.0",
+  "description": "Task-aware compaction, token budget visibility, and auto-block for Claude Code",
+  "owner": {
+    "name": "dayakarreddyn"
+  },
+  "plugins": [
+    {
+      "name": "session-intelligence",
+      "source": "./plugins/session-intelligence",
+      "description": "Task-aware compaction + status line + /si config command for long Claude Code sessions",
+      "version": "1.0.0",
+      "category": "productivity",
+      "keywords": ["compaction", "context", "statusline", "token-budget", "productivity"]
+    }
+  ]
+}

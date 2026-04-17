@@ -673,10 +673,21 @@ function main() {
     if (start) sessionDurationMs = Date.now() - start;
   }
 
-  // Cost from transcript usage — sum across every assistant turn (cumulative).
+  // Cost — prefer Claude Code's authoritative number when it passes one on
+  // stdin (input.cost.total_cost_usd), else fall back to a transcript-based
+  // estimate using the user's configured prices. The authoritative number
+  // reflects what Anthropic actually billed; the estimate is only correct if
+  // the configured price list matches the current model's public pricing.
   let costUsd = 0;
   if (cfg.fields.includes('cost')) {
-    costUsd = totalCostFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
+    const officialCost = input.cost && typeof input.cost === 'object'
+      ? Number(input.cost.total_cost_usd)
+      : Number(input.total_cost_usd);
+    if (Number.isFinite(officialCost) && officialCost > 0) {
+      costUsd = officialCost;
+    } else {
+      costUsd = totalCostFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
+    }
   }
 
   const projectDir = resolveProjectDir(cwd);

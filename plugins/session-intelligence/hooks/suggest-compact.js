@@ -36,9 +36,20 @@ function loadSiConfig() {
   catch { return { compact: { threshold: 50, autoblock: true, prompt: true, promptTimeout: 30 } }; }
 }
 
+function readStdinJson() {
+  try {
+    const raw = fs.readFileSync(0, 'utf8');
+    return raw.trim() ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 async function main() {
   const cfg = loadSiConfig().compact || {};
-  const sessionId = (process.env.CLAUDE_SESSION_ID || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  const stdinInput = readStdinJson();
+  const rawSid = (stdinInput && (stdinInput.session_id || stdinInput.sessionId))
+    || process.env.CLAUDE_SESSION_ID
+    || 'default';
+  const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
   const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
   intelLog('suggest-compact', 'debug', 'hook fired', { sessionId });

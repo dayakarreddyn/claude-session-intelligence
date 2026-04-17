@@ -7,6 +7,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_SRC="${SCRIPT_DIR}/plugins/session-intelligence"
 CLAUDE_DIR="${HOME}/.claude"
 HOOKS_DIR="${CLAUDE_DIR}/scripts/hooks"
 LIB_DIR="${HOOKS_DIR}/session-intelligence/lib"
@@ -15,6 +16,11 @@ LOGS_DIR="${CLAUDE_DIR}/logs"
 COMMANDS_DIR="${CLAUDE_DIR}/commands"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 UNIFIED_CONFIG="${CLAUDE_DIR}/session-intelligence.json"
+
+if [ ! -d "$PLUGIN_SRC" ]; then
+  echo "[SI] expected plugin source at $PLUGIN_SRC — repo layout may be out of date" >&2
+  exit 1
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -57,39 +63,39 @@ for hook in pre-compact.js suggest-compact.js token-budget-tracker.js task-chang
   fi
 done
 
-cp "${SCRIPT_DIR}/hooks/pre-compact.js"            "${HOOKS_DIR}/pre-compact.js"
-cp "${SCRIPT_DIR}/hooks/suggest-compact.js"        "${HOOKS_DIR}/suggest-compact.js"
-cp "${SCRIPT_DIR}/hooks/token-budget-tracker.js"   "${HOOKS_DIR}/token-budget-tracker.js"
-cp "${SCRIPT_DIR}/hooks/task-change-detector.js"   "${HOOKS_DIR}/task-change-detector.js"
-cp "${SCRIPT_DIR}/lib/utils.js"                    "${LIB_DIR}/utils.js"
-cp "${SCRIPT_DIR}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
-cp "${SCRIPT_DIR}/lib/config.js"                   "${LIB_DIR}/config.js"
+cp "${PLUGIN_SRC}/hooks/pre-compact.js"            "${HOOKS_DIR}/pre-compact.js"
+cp "${PLUGIN_SRC}/hooks/suggest-compact.js"        "${HOOKS_DIR}/suggest-compact.js"
+cp "${PLUGIN_SRC}/hooks/token-budget-tracker.js"   "${HOOKS_DIR}/token-budget-tracker.js"
+cp "${PLUGIN_SRC}/hooks/task-change-detector.js"   "${HOOKS_DIR}/task-change-detector.js"
+cp "${PLUGIN_SRC}/lib/utils.js"                    "${LIB_DIR}/utils.js"
+cp "${PLUGIN_SRC}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
+cp "${PLUGIN_SRC}/lib/config.js"                   "${LIB_DIR}/config.js"
 
 # Hooks load lib/config via ../lib — mirror that layout so relative requires
 # resolve the same whether the hook is run from the repo or from ~/.claude.
 HOOK_LIB_SHIM="${HOOKS_DIR}/../lib"
 mkdir -p "${HOOK_LIB_SHIM}"
-cp "${SCRIPT_DIR}/lib/utils.js"       "${HOOK_LIB_SHIM}/utils.js"
-cp "${SCRIPT_DIR}/lib/intel-debug.js" "${HOOK_LIB_SHIM}/intel-debug.js"
-cp "${SCRIPT_DIR}/lib/config.js"      "${HOOK_LIB_SHIM}/config.js"
+cp "${PLUGIN_SRC}/lib/utils.js"       "${HOOK_LIB_SHIM}/utils.js"
+cp "${PLUGIN_SRC}/lib/intel-debug.js" "${HOOK_LIB_SHIM}/intel-debug.js"
+cp "${PLUGIN_SRC}/lib/config.js"      "${HOOK_LIB_SHIM}/config.js"
 
 # Install unified config if one doesn't exist yet.
-if [ ! -f "$UNIFIED_CONFIG" ] && [ -f "${SCRIPT_DIR}/templates/session-intelligence.json" ]; then
-  cp "${SCRIPT_DIR}/templates/session-intelligence.json" "$UNIFIED_CONFIG"
+if [ ! -f "$UNIFIED_CONFIG" ] && [ -f "${PLUGIN_SRC}/templates/session-intelligence.json" ]; then
+  cp "${PLUGIN_SRC}/templates/session-intelligence.json" "$UNIFIED_CONFIG"
   ok "Installed default unified config: ${UNIFIED_CONFIG}"
 else
   info "Unified config already exists at ${UNIFIED_CONFIG} — leaving as-is"
 fi
 
 # Legacy example for users who prefer the flat format; safe to ignore now.
-if [ ! -f "${CLAUDE_DIR}/statusline-intel.json" ] && [ -f "${SCRIPT_DIR}/statusline-intel.json.example" ]; then
-  cp "${SCRIPT_DIR}/statusline-intel.json.example" "${CLAUDE_DIR}/statusline-intel.json"
+if [ ! -f "${CLAUDE_DIR}/statusline-intel.json" ] && [ -f "${PLUGIN_SRC}/statusline/statusline-intel.json.example" ]; then
+  cp "${PLUGIN_SRC}/statusline/statusline-intel.json.example" "${CLAUDE_DIR}/statusline-intel.json"
   info "Also wrote legacy ~/.claude/statusline-intel.json (kept for backward compat)"
 fi
 
 # /si slash command
-if [ -f "${SCRIPT_DIR}/commands/si.md" ]; then
-  cp "${SCRIPT_DIR}/commands/si.md" "${COMMANDS_DIR}/si.md"
+if [ -f "${PLUGIN_SRC}/commands/si.md" ]; then
+  cp "${PLUGIN_SRC}/commands/si.md" "${COMMANDS_DIR}/si.md"
   ok "Installed /si slash command → ${COMMANDS_DIR}/si.md"
 fi
 
@@ -191,14 +197,14 @@ if echo "$PREV_CMD" | grep -q "statusline-chain.sh"; then
   PREV_CMD="$(grep '^PREV_STATUSLINE=' "${SCRIPTS_DIR}/statusline-chain.sh" 2>/dev/null | head -1 | sed "s/^PREV_STATUSLINE=['\"]\(.*\)['\"]$/\1/")"
 fi
 
-cp "${SCRIPT_DIR}/statusline-intel.js" "${SCRIPTS_DIR}/statusline-intel.js"
+cp "${PLUGIN_SRC}/statusline/statusline-intel.js" "${SCRIPTS_DIR}/statusline-intel.js"
 chmod +x "${SCRIPTS_DIR}/statusline-intel.js"
 
 # Substitute __PREV_STATUSLINE__ with the detected command (or leave blank).
 # Using a Perl one-liner to avoid sed escape pain.
 PERL_ESCAPED="$(printf '%s' "$PREV_CMD" | perl -pe "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
 perl -pe "BEGIN { \$p = q{${PERL_ESCAPED}}; } s/__PREV_STATUSLINE__/\$p/g" \
-  "${SCRIPT_DIR}/statusline-chain.sh" > "${SCRIPTS_DIR}/statusline-chain.sh"
+  "${PLUGIN_SRC}/statusline/statusline-chain.sh" > "${SCRIPTS_DIR}/statusline-chain.sh"
 chmod +x "${SCRIPTS_DIR}/statusline-chain.sh"
 
 if [ -n "$PREV_CMD" ]; then
@@ -228,7 +234,7 @@ if git rev-parse --show-toplevel &>/dev/null; then
 
   if [ -d "$PROJECT_DIR" ]; then
     if [ ! -f "${PROJECT_DIR}/session-context.md" ]; then
-      cp "${SCRIPT_DIR}/templates/session-context.md" "${PROJECT_DIR}/session-context.md"
+      cp "${PLUGIN_SRC}/templates/session-context.md" "${PROJECT_DIR}/session-context.md"
       ok "Created session-context.md in ${PROJECT_DIR}/"
     else
       info "session-context.md already exists in ${PROJECT_DIR}/"
