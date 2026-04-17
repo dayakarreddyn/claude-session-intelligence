@@ -151,7 +151,11 @@ DROP: login debugging traces, CSS exploration, E2E raw output
 
 ### 3. What Happens on Compact
 
-When `/compact` fires (manually or auto), the pre-compact hook reads session-context.md and injects:
+When `/compact` fires (manually or auto), the pre-compact hook injects up to three blocks into the summary context:
+
+1. **COMPACTION GUIDANCE** — parsed from `session-context.md` (user-curated signal)
+2. **OBSERVED CONTEXT SHAPE** — generated from the shape tracker's tool-call log (grounded signal)
+3. **MEMORY OFFLOAD CHECKPOINT** — a directive telling Claude to preserve rich detail in auto-memory before the summary collapses it
 
 ```
 COMPACTION GUIDANCE (from session-context.md):
@@ -172,9 +176,22 @@ SAFE TO DROP (resolved — keep only one-line summaries):
 - Login page reload fix (resolved)
 - CSS thumbnail fix (deployed)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MEMORY OFFLOAD CHECKPOINT (pre-compact):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Compact will compress this session. Before detail is lost, write auto-memory
+under /Users/you/.claude/projects/<encoded>/memory/ following the frontmatter +
+MEMORY.md index convention already defined in your system prompt. Two files
+suggested — skip either if there's nothing new to record:
+
+  1. project_session_YYYY_MM_DD.md (type: project) — decisions, files touched,
+     follow-ups, any non-obvious context that took >3 attempts to discover
+  2. reference_<pattern>.md — ONLY if a reusable recipe/layout/rule was
+     discovered this session
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Claude uses these hints to make better compaction decisions.
+The memory-offload block works with Claude Code's built-in auto-memory system (`~/.claude/projects/<encoded>/memory/` + `MEMORY.md` index) to preserve detail the compressed summary will lose. Disable with `compact.memoryOffload: false` or `CLAUDE_COMPACT_MEMORY_OFFLOAD=0`.
 
 ## Status Line
 
@@ -401,15 +418,18 @@ When the budget first crosses orange on a tool call:
 ```
 [StrategicCompact] ORANGE ZONE — context rot risk. Context at ~260k tokens, $1.43 spent.
 Observed: shifted src/auth → src/billing · ~82k stale in tests/browser · hot: src/billing.
+Offload to auto-memory FIRST: write under /Users/you/.claude/projects/<encoded>/memory/
+(project_session_*.md / reference_*.md + MEMORY.md index), THEN /compact.
 Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage.
 Free-text hint after /compact still works.
 (Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
 Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```
 
-Four layers in the message:
+Five layers in the message:
 - **Header** — zone + tokens + cost so Claude knows the stakes in dollars, not just tokens
 - **Diagnosis** — what the shape tracker observed: domain shifts, stale bands, hot dirs
+- **Memory offload** — nudges Claude to dump rich detail to auto-memory *before* compact collapses it, while context is still live. Concrete path included so there's no ambiguity about where to write
 - **Action** — plain `/compact` suffices; hints auto-inject via the PreCompact hook
 - **Adaptive footnote** — only appears when zones learned from your history
 
@@ -426,6 +446,7 @@ Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit 
 ### Tunables
 
 - Silence suggestions entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0` (the env var keeps its old name for backwards compat — it no longer blocks anything)
+- Silence the memory-offload nudge + pre-compact directive: `/si set compact.memoryOffload false` or `export CLAUDE_COMPACT_MEMORY_OFFLOAD=0`
 - First advisory after N tool calls: `/si set compact.threshold 75`
 
 ## Context Shape Tracker

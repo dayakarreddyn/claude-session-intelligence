@@ -335,6 +335,20 @@ The compacting model reads this verbatim as part of its instructions. "Keep only
 
 The injection is **regenerated fresh at compact time** from the live shape log, not stored as a file. If you ran `/compact` 20 minutes ago, added 30 Edit calls to `src/cache/`, and ran `/compact` again, the second injection reflects those 30 new calls. No stale handoff files lying around.
 
+### 5.5 Memory offload checkpoint
+
+Compaction is **lossy by design** — the summary preserves gist, not detail. Non-obvious context (a debugging trail that took five attempts to unravel, a decision with subtle trade-offs, a reusable recipe discovered mid-session) tends to get flattened or dropped entirely. This is exactly the class of information the user's Claude Code auto-memory system was built for: persistent files at `~/.claude/projects/<encoded>/memory/` keyed by type (user / feedback / project / reference) with a `MEMORY.md` index.
+
+Left to itself, Claude doesn't always think to write memory before `/compact`. You can explicitly ask it to, and it will — but the user has to remember, and the moment to ask is always "right before /compact," which means right when attention is on the compact, not on the write. The plugin plugs both holes:
+
+1. **Pre-compact injection** adds a MEMORY OFFLOAD CHECKPOINT block alongside the COMPACTION GUIDANCE + OBSERVED CONTEXT SHAPE blocks. The block names the concrete memory dir (resolved from the session's project), suggests `project_session_YYYY_MM_DD.md` for this-session detail and optional `reference_<pattern>.md` for reusable recipes, and reminds to update `MEMORY.md`. Claude sees this in the compact context and writes memory as part of — or immediately after — summarisation, *before* detail is gone.
+
+2. **Zone-crossover nudge** fires earlier, at orange/red in `si-suggest-compact`. Its stderr feedback (PostToolUse exit 2) instructs "offload to auto-memory FIRST, THEN /compact" with the same concrete path. Because this runs while context is still live, Claude has a full turn to write rich memory before the user actually issues `/compact`.
+
+Both surfaces are gated by one config key (`compact.memoryOffload`, or `CLAUDE_COMPACT_MEMORY_OFFLOAD=0`), so users who have their own offload discipline can disable cleanly. The design choice is deliberate: SI is opinionated about *when* to nudge (at the right moment — zone crossover for rich context, pre-compact for last-chance preservation) but agnostic about *what* to preserve (Claude decides what's worth recording, guided by the auto-memory frontmatter convention).
+
+This is the "cache miss preceding information loss" problem solved at the workflow layer rather than the model layer.
+
 ---
 
 ## Part 6 — Adaptive zone thresholds
@@ -539,8 +553,8 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 |---|---|---|
 | `si-bootstrap.js` | SessionStart | Seed session-context.md from git; wire statusline chain; inject CLAUDE.md rules |
 | `si-token-budget.js` | PostToolUse | Sum tool I/O → `tokenBudget`; append shape entry; post-compact regret check |
-| `si-suggest-compact.js` | PostToolUse | Adaptive zones; grounded diagnosis; zone-crossover stderr message |
-| `si-pre-compact.js` | PreCompact | Inject session-context.md + observed shape; log history entry; write post-compact snapshot |
+| `si-suggest-compact.js` | PostToolUse | Adaptive zones; grounded diagnosis; zone-crossover stderr message; memory-offload nudge at orange/red |
+| `si-pre-compact.js` | PreCompact | Inject session-context.md + observed shape + memory-offload checkpoint; log history entry; write post-compact snapshot |
 | `si-task-change.js` | UserPromptSubmit | Heuristic same-domain score + Haiku tie-breaker on domain shift |
 
 ### 10.2 Libraries
