@@ -53,14 +53,32 @@ echo ""
 mkdir -p "$HOOKS_DIR" "$LIB_DIR" "$SCRIPTS_DIR" "$LOGS_DIR" "$COMMANDS_DIR"
 
 # Migrate any pre-rename (unprefixed) SI hooks left behind by older installs.
-# We only remove files we authored — match on the "Session Intelligence"
-# banner so we don't trample a same-named file from another source.
-for legacy in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js; do
-  if [ -f "${HOOKS_DIR}/${legacy}" ] && grep -q "Session Intelligence" "${HOOKS_DIR}/${legacy}" 2>/dev/null; then
+# We only touch files we authored — the marker regex lists three fingerprints
+# because the banner text drifted over time ("Session Intelligence" on the
+# newer ones, "Strategic Compact Suggester" / "Token Budget Tracker" on the
+# older per-hook-titled ones). bootstrap.js + status-report.js are listed
+# here too: earlier installer versions shipped them unprefixed and forgot to
+# rename them when we moved to the si- prefix, leaving live orphans on disk.
+SI_MARKER_RE='Session Intelligence|Strategic Compact Suggester|Token Budget Tracker'
+for legacy in pre-compact.js suggest-compact.js token-budget-tracker.js task-change-detector.js bootstrap.js status-report.js; do
+  if [ -f "${HOOKS_DIR}/${legacy}" ] && grep -qE "$SI_MARKER_RE" "${HOOKS_DIR}/${legacy}" 2>/dev/null; then
     mv "${HOOKS_DIR}/${legacy}" "${HOOKS_DIR}/${legacy}.bak-pre-si-rename"
     warn "  Migrated ${legacy} → ${legacy}.bak-pre-si-rename (renamed with si- prefix)"
   fi
 done
+
+# GC stale .bak files older than 7 days. Each install creates a fresh .bak;
+# without GC these accumulate forever. 7 days is long enough to roll back a
+# bad install, short enough that noise doesn't build up across weeks.
+gc_count=0
+while IFS= read -r stale; do
+  [ -z "$stale" ] && continue
+  rm -f "$stale"
+  gc_count=$((gc_count + 1))
+done < <(find "$HOOKS_DIR" -maxdepth 1 -type f \( -name '*.bak' -o -name '*.bak-*' \) -mtime +7 2>/dev/null)
+if [ "$gc_count" -gt 0 ]; then
+  info "  GC'd ${gc_count} backup file(s) older than 7 days"
+fi
 
 # New install path (all hooks carry the si- prefix for discoverability in
 # shared hook directories).
