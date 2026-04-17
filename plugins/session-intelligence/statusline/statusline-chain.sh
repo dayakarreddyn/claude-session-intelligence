@@ -37,9 +37,16 @@ input="$(cat)"
 prev=""
 intel=""
 
+# Placeholder-sentinel check must NOT literally contain __PREV_STATUSLINE__
+# as a double-quoted value — the installer's substitution would rewrite it
+# along with the assignment above, turning this guard into
+# `[ "$PREV_STATUSLINE" != "<the real command>" ]`, which skips the real
+# command (ccstatusline, etc.) every time. Assemble the sentinel from pieces
+# at runtime so the installer's search/replace can't touch it.
+PLACEHOLDER_SENTINEL='__PREV'"_STATUSLINE__"
 if [ -z "${CLAUDE_STATUSLINE_NO_PREV:-}" ] \
    && [ -n "$PREV_STATUSLINE" ] \
-   && [ "$PREV_STATUSLINE" != "__PREV_STATUSLINE__" ]; then
+   && [ "$PREV_STATUSLINE" != "$PLACEHOLDER_SENTINEL" ]; then
   prev="$(printf '%s' "$input" | bash -c "$PREV_STATUSLINE" 2>/dev/null)"
 fi
 
