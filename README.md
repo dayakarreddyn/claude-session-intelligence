@@ -191,8 +191,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `session` | `3h42m` | Duration since the first transcript timestamp |
 | `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open at once |
 | `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (cached by size+mtime for speed; prices configurable) |
-| `compactAge` | `compact:2h13mago` | Time since last `/compact` event (mtime of the pre-compact log) |
-| `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it) |
+| `compactAge` | `compact:2h13m ago` | Time since last `/compact` event (mtime of the pre-compact log). Color escalates: dim `<30m`, yellow `30–120m`, orange `≥2h` |
+| `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (any CI/script can write it). Color by freshness: green `<5m`, cyan `<60m`, dim thereafter |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (from stdin or env) |
 | `health` | `[●●○]` | Colored dot per service URL configured in `serviceHealth` — curl probe cached 30s |
 | `task` | `feat — statusline v2` | `type:` line extracted from `session-context.md`, truncated to `maxTaskLength` |
@@ -407,10 +407,14 @@ Everything is in `taskChange.*`:
 /si set taskChange.minTokens 150000             # only kick in above 150k
 /si set taskChange.sameDomainScore 0.6          # stricter "same domain"
 /si set taskChange.differentDomainScore 0.15    # looser "different domain"
+/si set taskChange.prompt false                 # inline-only (no mac popup)
 /si set taskChange.promptTimeout 30
+/si set taskChange.conversationalMaxLen 120     # treat short prompts without
+                                                # file refs as conversation
+/si set compact.prompt false                    # suggest-compact inline-only
 ```
 
-Make sure `session-context.md` has a real `## Current Task` and `## Key Files` section — that's what the detector compares against. No baseline = silent.
+Make sure `session-context.md` has a real `## Current Task` and `## Key Files` section — that's what the detector compares against. No baseline (or placeholder-only template) = silent. Short conversational prompts (under `conversationalMaxLen` chars with no `@path` or backtick code references) also stay silent — they're follow-up talk, not task drift.
 
 ## Debug Log
 

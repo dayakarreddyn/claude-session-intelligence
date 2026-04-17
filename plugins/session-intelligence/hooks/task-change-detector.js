@@ -80,9 +80,20 @@ function readSessionContext(projectDir) {
   } catch { return ''; }
 }
 
+// Lines like "type: (bug-fix | feature | test | ...)" or
+// "description: (what you're working on)" are still the template's
+// placeholder text. Treat them as empty so an unfilled session-context.md
+// doesn't act as a real baseline — otherwise every prompt scores 0.00
+// against the template and gets blocked as "different domain".
+function stripPlaceholders(text) {
+  return text.replace(/^\s*[A-Za-z][A-Za-z0-9_-]*:\s*\([^)]*\)\s*$/gm, '')
+             .replace(/^\s*\([^)]*\)\s*$/gm, '');
+}
+
 function extractCurrentTaskText(sessionContext) {
   const m = sessionContext.match(/##\s+Current Task\s*([\s\S]*?)(?=\n##\s|$)/);
-  return m ? m[1].trim() : '';
+  if (!m) return '';
+  return stripPlaceholders(m[1]).trim();
 }
 
 function extractKeyFiles(sessionContext) {
@@ -92,6 +103,8 @@ function extractKeyFiles(sessionContext) {
   for (const line of m[1].split('\n')) {
     const t = line.trim().replace(/^[-*\s]+/, '');
     if (!t) continue;
+    // Skip template placeholders like "(list the files currently in play)".
+    if (/^\([^)]*\)$/.test(t)) continue;
     // First whitespace-delimited token that looks like a path.
     const pathMatch = t.match(/[^\s`'"]+[./][^\s`'"]+/);
     if (pathMatch) files.push(pathMatch[0].replace(/[,.;]$/, ''));
@@ -344,6 +357,22 @@ function main() {
 
   const promptFiles = extractPromptFiles(prompt);
   const gitSet = gitTrackedChangeSet(cwd);
+
+  // Conversational guard: a short prompt with no file references, no
+  // backtick-quoted tokens, and no path-like mentions is follow-up talk
+  // ("draft and go on parallel", "yes do that too") — not task drift.
+  // Jaccard against a populated session-context will always read as 0.00
+  // for these, so the hook would block every casual reply. Require either
+  // file evidence or a meaningful prompt length (>=120 chars) before we
+  // bother scoring.
+  const convoMaxLen = Number.isFinite(cfg.conversationalMaxLen)
+    ? cfg.conversationalMaxLen : 120;
+  if (!promptFiles.length && prompt.trim().length < convoMaxLen) {
+    intelLog('task-change', 'debug', 'conversational prompt — silent', {
+      length: prompt.trim().length, convoMaxLen,
+    });
+    process.exit(0);
+  }
 
   const overlap = fileOverlap(promptFiles, keyFiles, gitSet);
   const jac = jaccard(currentTask, prompt);
