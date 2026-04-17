@@ -383,21 +383,43 @@ function guessTaskType(subject) {
   return k;
 }
 
-function parseIssueFromBranch(branch) {
-  if (!branch) return 'none';
-  const m = branch.match(/#?(\d{2,6})\b/);
+function parseIssueFromRef(ref) {
+  if (!ref) return 'none';
+  const m = ref.match(/#?(\d{2,6})\b/);
   return m ? `#${m[1]}` : 'none';
+}
+
+// Resolve a human-readable label for HEAD. Plain `--abbrev-ref HEAD` returns
+// the literal string "HEAD" when detached, which is both ugly in
+// session-context.md ("derived from last commit on `HEAD`") and hides any
+// issue number that might live in a tag name. Priority:
+//   1. branch name (normal case)
+//   2. exact-match tag   → "tag v1.2.3"
+//   3. any describe       → "detached @ v1.2.3-5-g0abc123"
+//   4. short SHA          → "detached @ 0abc123"
+function resolveRef(cwd) {
+  const branch = runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (branch && branch !== 'HEAD') return branch;
+
+  const exactTag = runGit(cwd, ['describe', '--tags', '--exact-match', 'HEAD']);
+  if (exactTag) return `tag ${exactTag}`;
+
+  const descr = runGit(cwd, ['describe', '--tags', '--always']);
+  if (descr) return `detached @ ${descr}`;
+
+  const shortSha = runGit(cwd, ['rev-parse', '--short=7', 'HEAD']);
+  return shortSha ? `detached @ ${shortSha}` : '';
 }
 
 function buildAutoFilledTask(cwd) {
   const subject = runGit(cwd, ['log', '-1', '--pretty=%s']);
   if (!subject) return null;
-  const branch = runGit(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const ref = resolveRef(cwd);
   const files = runGit(cwd, ['log', '-1', '--pretty=format:', '--name-only'])
     .split('\n').map((s) => s.trim()).filter(Boolean);
   const type = guessTaskType(subject);
-  const issue = parseIssueFromBranch(branch);
-  return { subject, type, issue, files, branch };
+  const issue = parseIssueFromRef(ref);
+  return { subject, type, issue, files, branch: ref };
 }
 
 function replaceSection(content, heading, newBody) {
