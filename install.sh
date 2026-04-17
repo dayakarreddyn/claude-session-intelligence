@@ -134,6 +134,31 @@ const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
 
 if (!settings.hooks) settings.hooks = {};
 
+// Strip any entries that point at the legacy (pre si- rename) hook files so
+// re-running this script on an older install doesn't leave duplicates that
+// fire hooks we no longer ship. We skip ECC's run-with-flags wrapper — that
+// wrapper resolves paths inside the ECC plugin root, not our HOOKS_DIR.
+const LEGACY_PATHS = [
+  '/scripts/hooks/pre-compact.js',
+  '/scripts/hooks/suggest-compact.js',
+  '/scripts/hooks/token-budget-tracker.js',
+  '/scripts/hooks/task-change-detector.js',
+  '/scripts/hooks/bootstrap.js',
+  '/scripts/hooks/status-report.js',
+];
+function pointsAtLegacy(cmd) {
+  if (typeof cmd !== 'string') return false;
+  if (cmd.includes('run-with-flags')) return false;
+  return LEGACY_PATHS.some(p => cmd.includes(p) && !cmd.includes('/si-'));
+}
+for (const event of Object.keys(settings.hooks)) {
+  if (!Array.isArray(settings.hooks[event])) continue;
+  settings.hooks[event] = settings.hooks[event].filter(entry => {
+    const hooks = entry.hooks || [];
+    return !hooks.some(h => pointsAtLegacy(h.command));
+  });
+}
+
 if (!settings.hooks.PreCompact) settings.hooks.PreCompact = [];
 const preCompactIdx = settings.hooks.PreCompact.findIndex(h =>
   h.id === 'pre:compact' || h.id === 'si:pre-compact'
@@ -204,13 +229,16 @@ console.log('OK');
 # nothing, we still install the wrapper — it'll show only the intel line.
 PREV_CMD="$(node -e "
 const fs = require('fs');
+let out = '';
 try {
   const s = JSON.parse(fs.readFileSync('${SETTINGS}', 'utf8'));
   const sl = s.statusLine;
-  if (!sl) return process.stdout.write('');
-  if (typeof sl.command === 'string') return process.stdout.write(sl.command);
-  if (typeof sl === 'string') return process.stdout.write(sl);
+  if (sl) {
+    if (typeof sl.command === 'string') out = sl.command;
+    else if (typeof sl === 'string') out = sl;
+  }
 } catch {}
+process.stdout.write(out);
 " 2>/dev/null)"
 
 # Don't chain our own wrapper back into itself if re-running install.
