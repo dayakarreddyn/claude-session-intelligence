@@ -633,7 +633,7 @@ loop on user turn:
 
 4. **Adaptive zones need ≥5 compacts to activate.** First sessions use static defaults. Onboarding users experience the plugin's "pre-learning" behaviour as their default and may never realize it got better.
 
-5. **Regret detection treats all re-touches equally.** Touching a dropped dir to clean up a leftover is different from re-reading it because you lost the context. No way to distinguish.
+5. ~~**Regret detection treats all re-touches equally.**~~ *Resolved.* `checkPostCompactRegret` now weights hits by operation type: `Read` = 1.0 (genuine "I lost context"), `Grep`/`Glob` = 0.7, `Edit`/`Write` = 0.3 (natural follow-up work), `Bash` with a git/gh prefix = 0.1 (cleanup), other `Bash` = 0.5. The per-compact `regretCount` stamped onto the history log is now the weighted sum. The dampening threshold (`regretRate ≥ 1`) stays — "one Read-worth of regret per compact" remains the same bar.
 
 6. ~~**Cross-project history blurs.**~~ *Resolved in `75d72ba` (Ship-now tier).* `adaptiveZones()` now buckets history by `cwd`. When a repo has ≥5 same-cwd compacts, its thresholds derive from its own percentiles; otherwise it falls back to the global distribution. The suggest-compact line labels the scope (`this repo` vs `your history`). Opt-in `learn.announce` surfaces a one-line summary when zones first engage or shift by ≥10k tokens.
 

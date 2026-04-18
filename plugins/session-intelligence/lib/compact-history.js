@@ -41,6 +41,36 @@ const ADAPTIVE_BOUND = 0.3; // ±30% from static defaults
 const REGRET_WINDOW_CALLS = 30;
 const REGRET_WINDOW_MS = 30 * 60 * 1000; // 30 min
 
+// Per-operation regret weights. Touching a dropped rootDir with a Read is a
+// genuine "I lost context, going back for it" signal — weight 1.0. An Edit
+// or Write is natural follow-up work after a compact (implementing the
+// summarised plan) — weight 0.3. A Bash `git add`/`git commit` inside a
+// dropped dir is cleanup — weight 0.1. Weights are read at check time, so
+// adjusting them doesn't require a history rewrite.
+const REGRET_WEIGHTS = {
+  Read: 1.0,
+  Grep: 0.7,
+  Glob: 0.7,
+  Edit: 0.3,
+  Write: 0.3,
+  NotebookEdit: 0.3,
+  Bash: 0.5,
+  default: 0.5,
+};
+const BASH_CLEANUP_PREFIXES = /^\s*git\s+(add|commit|push|status|diff|log)\b|^\s*gh\s+pr\b/;
+
+function regretWeightFor(toolName, toolInput) {
+  if (toolName === 'Bash') {
+    const cmd = (toolInput && toolInput.command) || '';
+    if (typeof cmd === 'string' && BASH_CLEANUP_PREFIXES.test(cmd)) return 0.1;
+    return REGRET_WEIGHTS.Bash;
+  }
+  if (toolName && Object.prototype.hasOwnProperty.call(REGRET_WEIGHTS, toolName)) {
+    return REGRET_WEIGHTS[toolName];
+  }
+  return REGRET_WEIGHTS.default;
+}
+
 // ── History ──────────────────────────────────────────────────────────────
 
 function ensureLogDir() {
@@ -250,14 +280,18 @@ function clearSnapshot(sessionId) {
 
 /**
  * Called from token-budget-tracker after each PostToolUse. Returns
- * `{ regretHit, windowClosed }` so the caller can log appropriately. A
- * regret hit is when the tool call touched a rootDir that was in the
+ * `{ regretHit, windowClosed, weight }` so the caller can log appropriately.
+ * A regret hit is when the tool call touched a rootDir that was in the
  * snapshot's dropped set. The window closes after N calls OR N minutes
  * since the compact — whichever first.
+ *
+ * `opts.toolName` and `opts.toolInput` let us weight the hit by operation
+ * type: a Read on a dropped dir is full regret (1.0); an Edit is partial
+ * (0.3, natural follow-up); a `git add` inside it is cleanup (0.1).
  */
-function checkPostCompactRegret(sessionId, rootDir) {
+function checkPostCompactRegret(sessionId, rootDir, opts) {
   const snap = readSnapshot(sessionId);
-  if (!snap) return { regretHit: false, windowClosed: true, snapshot: null };
+  if (!snap) return { regretHit: false, windowClosed: true, snapshot: null, weight: 0 };
 
   const now = Date.now();
   const age = now - (snap.t || 0);
@@ -265,15 +299,21 @@ function checkPostCompactRegret(sessionId, rootDir) {
 
   const windowClosed = calls > REGRET_WINDOW_CALLS || age > REGRET_WINDOW_MS;
   let regretHit = false;
+  let weight = 0;
 
   if (rootDir && Array.isArray(snap.droppedDirs) && snap.droppedDirs.includes(rootDir)) {
-    regretHit = true;
-    snap.regretHits = (snap.regretHits || []).concat([{ t: now, root: rootDir }]);
+    const toolName = opts && opts.toolName;
+    const toolInput = opts && opts.toolInput;
+    weight = regretWeightFor(toolName, toolInput);
+    if (weight > 0) {
+      regretHit = true;
+      snap.regretHits = (snap.regretHits || []).concat([
+        { t: now, root: rootDir, tool: toolName || null, weight },
+      ]);
+    }
   }
 
   if (windowClosed) {
-    // Upgrade the corresponding history entry with final regret count,
-    // then clear the snapshot so it doesn't linger.
     upgradeHistoryRegret(snap);
     clearSnapshot(sessionId);
   } else {
@@ -281,7 +321,7 @@ function checkPostCompactRegret(sessionId, rootDir) {
     writeSnapshot(sessionId, snap);
   }
 
-  return { regretHit, windowClosed, snapshot: snap };
+  return { regretHit, windowClosed, snapshot: snap, weight };
 }
 
 /**
@@ -292,16 +332,24 @@ function checkPostCompactRegret(sessionId, rootDir) {
  */
 function upgradeHistoryRegret(snap) {
   if (!snap || !Number.isFinite(snap.t)) return;
-  const regretCount = (snap.regretHits || []).length;
-  if (regretCount === 0) return; // nothing to upgrade
+  const hits = snap.regretHits || [];
+  if (hits.length === 0) return; // nothing to upgrade
+  // regretCount is now a weighted sum. Older entries stored integer counts
+  // — adaptiveZones() treats both uniformly because it only checks Number
+  // .isFinite and compares to the 1.0 threshold, which is the same "one
+  // Read-worth of regret per compact" bar in either scheme.
+  const weightedCount = hits.reduce(
+    (sum, h) => sum + (Number.isFinite(h.weight) ? h.weight : 1),
+    0,
+  );
   try {
     const lines = fs.readFileSync(HISTORY_FILE, 'utf8').split('\n').filter(Boolean);
     const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
-    // Walk backwards looking for the matching compact-time entry.
     for (let i = parsed.length - 1; i >= 0; i--) {
       if (parsed[i] && parsed[i].t === snap.t) {
-        parsed[i].regretCount = regretCount;
-        parsed[i].regretDirs = (snap.regretHits || []).map((h) => h.root);
+        parsed[i].regretCount = Number(weightedCount.toFixed(2));
+        parsed[i].regretHits = hits.length;
+        parsed[i].regretDirs = hits.map((h) => h.root);
         fs.writeFileSync(
           HISTORY_FILE,
           parsed.filter(Boolean).map((o) => JSON.stringify(o)).join('\n') + '\n',
@@ -324,11 +372,13 @@ module.exports = {
   readSnapshot,
   clearSnapshot,
   checkPostCompactRegret,
+  regretWeightFor,
   _thresholds: {
     MIN_SAMPLES_FOR_ADAPTIVE,
     ADAPTIVE_BOUND,
     REGRET_WINDOW_CALLS,
     REGRET_WINDOW_MS,
     ANNOUNCE_MIN_DELTA,
+    REGRET_WEIGHTS,
   },
 };

@@ -178,11 +178,14 @@ async function main() {
     // future drop suggestions via the adaptiveZones() regret-rate path.
     if (root && compactHistory) {
       try {
-        const { regretHit, windowClosed } =
-          compactHistory.checkPostCompactRegret(sessionId, root);
+        const { regretHit, windowClosed, weight } =
+          compactHistory.checkPostCompactRegret(sessionId, root, {
+            toolName,
+            toolInput,
+          });
         if (regretHit) {
           intelLog('token-budget', 'info', 'post-compact regret hit',
-            { root, windowClosed });
+            { root, tool: toolName, weight, windowClosed });
         }
       } catch (err) {
         intelLog('token-budget', 'debug', 'regret check failed',
