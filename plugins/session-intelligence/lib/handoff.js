@@ -80,39 +80,55 @@ function readSessionContext(projectDir) {
 }
 
 /**
- * Scan recent memory files for unresolved follow-ups / next priorities.
+ * Scan recent memory files + session-context.md for unresolved follow-ups
+ * / next priorities.
  *
  * Sources, in order:
  *   1. `memory/MEMORY.md` index (top-level pointers)
  *   2. the most recently modified `memory/project_session_*.md`
+ *   3. `session-context.md` in the project dir — for repos that track
+ *      next-up work there instead of in memory files
  *
- * In each we look for section headers that conventionally hold open work:
- * `## Follow-ups`, `## Open threads`, `## Next steps`, `## Pending`. Items
- * marked as resolved — `~~strikethrough~~`, lines starting with `✅` or
- * `DONE:` — are filtered out so we only surface what's still outstanding.
+ * In each we look for section headers that conventionally hold open work
+ * across a variety of naming conventions used in the wild. Items marked as
+ * resolved — `~~strikethrough~~`, lines starting with `✅` or `DONE:` —
+ * are filtered out so we only surface what's still outstanding.
  *
  * Returns up to 5 items, each trimmed to one line.
  */
 function readNextPriorities(projectDir) {
   if (!projectDir) return [];
-  const memoryDir = path.join(projectDir, 'memory');
-  if (!fs.existsSync(memoryDir)) return [];
 
   const candidates = [];
-  const indexPath = path.join(memoryDir, 'MEMORY.md');
-  if (fs.existsSync(indexPath)) candidates.push(indexPath);
+  const memoryDir = path.join(projectDir, 'memory');
+  if (fs.existsSync(memoryDir)) {
+    const indexPath = path.join(memoryDir, 'MEMORY.md');
+    if (fs.existsSync(indexPath)) candidates.push(indexPath);
 
-  try {
-    const projectFiles = fs.readdirSync(memoryDir)
-      .filter((f) => f.startsWith('project_session_') && f.endsWith('.md'))
-      .map((f) => ({ f, stat: fs.statSync(path.join(memoryDir, f)) }))
-      .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-    if (projectFiles[0]) candidates.push(path.join(memoryDir, projectFiles[0].f));
-  } catch { /* ignore */ }
+    try {
+      const projectFiles = fs.readdirSync(memoryDir)
+        .filter((f) => f.startsWith('project_session_') && f.endsWith('.md'))
+        .map((f) => ({ f, stat: fs.statSync(path.join(memoryDir, f)) }))
+        .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+      if (projectFiles[0]) candidates.push(path.join(memoryDir, projectFiles[0].f));
+    } catch { /* ignore */ }
+  }
+
+  // session-context.md is often where operators track "Next-up" items
+  // mid-session — scan it even when memory/ is empty or uses different
+  // conventions. Its age gate lives elsewhere (currentTaskFresh); for
+  // priorities, outstanding work is outstanding whether the file is 1h
+  // or 3d old.
+  const sessionCtxFile = path.join(projectDir, 'session-context.md');
+  if (fs.existsSync(sessionCtxFile)) candidates.push(sessionCtxFile);
 
   const items = [];
   const seen = new Set();
-  const sectionRe = /^##\s+(Follow-ups|Open threads|Next steps|Pending|Follow-ups\s*\/\s*open threads)/i;
+  // Match any `## <header>` line whose header STARTS with a known
+  // priority-intent word. Ignores trailing annotations like "filed" or
+  // "(from project_next_session_priorities)" so site-specific variants
+  // still get picked up.
+  const sectionRe = /^##\s+(Follow-ups|Follow-up|Open threads|Open questions|Next steps|Next session|Next-up|Next up|Next priorities|Next priority|Pending|Upcoming|TODO|To-do|Todo)\b/i;
   // Resolved if: whole body is strikethrough, line contains a check mark,
   // or body starts with DONE:. The strikethrough pattern allows a prefix
   // annotation ("~~done~~ notes" still counts as resolved; leftover text

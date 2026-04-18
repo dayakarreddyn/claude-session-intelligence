@@ -263,3 +263,51 @@ test('readAndRenderHandoff preserves a .corrupt.* snapshot on parse failure', ()
       'snapshot preserves raw on-disk bytes');
   } finally { cleanup(dir); }
 });
+
+// ─── readNextPriorities header variants ──────────────────────────────────
+//
+// Real-world session-context.md / MEMORY.md files use a wide range of
+// header conventions: `## Next Session`, `## Next-up`, `## Follow-ups`,
+// `## TODO`, etc. The scanner must recognize them all or projects that
+// don't happen to use `## Follow-ups` get an empty priorities block and
+// fail the handoff "strong signal" gate on every compact.
+test('readNextPriorities recognizes Next Session / Next-up / TODO headers', () => {
+  const dir = tmpProject();
+  const memoryDir = path.join(dir, 'memory');
+  fs.mkdirSync(memoryDir);
+  try {
+    fs.writeFileSync(path.join(memoryDir, 'MEMORY.md'), [
+      '## Next Session',
+      '- **Resume #202** — admin UI code done.',
+      '- **PR #209** needs review/merge.',
+      '',
+      '## Source of Truth',
+      '- unrelated',
+    ].join('\n'));
+
+    const priorities = handoff._internal.readNextPriorities(dir);
+    assert.ok(priorities.length >= 2, `expected ≥2 priorities, got ${priorities.length}`);
+    assert.match(priorities[0], /Resume #202/);
+    assert.match(priorities[1], /PR #209/);
+  } finally { cleanup(dir); }
+});
+
+test('readNextPriorities scans session-context.md when memory is empty', () => {
+  const dir = tmpProject();
+  try {
+    fs.writeFileSync(path.join(dir, 'session-context.md'), [
+      '## Current Task',
+      'stale work',
+      '',
+      '## Next-up (from project_next_session_priorities)',
+      '1. **#143** Terms and Privacy pages',
+      '2. **#105** Usability testing',
+    ].join('\n'));
+
+    const priorities = handoff._internal.readNextPriorities(dir);
+    assert.ok(priorities.length >= 2,
+      `session-context.md Next-up section should yield priorities (got ${priorities.length})`);
+    assert.match(priorities[0], /#143/);
+    assert.match(priorities[1], /#105/);
+  } finally { cleanup(dir); }
+});
