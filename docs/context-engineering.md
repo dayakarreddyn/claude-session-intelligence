@@ -625,7 +625,7 @@ loop on user turn:
 
 ### 11.1 Known limitations
 
-1. **Shape tracker can't see model "thinking" tokens.** Reasoning tokens before a tool call aren't observed. A session where Claude thinks heavily but calls few tools will look small in the shape log even though its context is large. The `tokens` field (from transcript usage) catches this; the *shape* does not.
+1. ~~**Shape tracker can't see model "thinking" tokens.**~~ *Partially resolved — see `lib/thinking.js`.* The shape log itself is still tool-call driven, but a tail-scan residual estimator (`output_tokens − visible_text_tokens` on turns with `thinking` blocks) now backs an opt-in `thinking` statusline field. The shape tracker remains unaware of thinking tokens; the user-facing signal is no longer a blind spot.
 
 2. ~~**rootDir granularity is fixed at two segments.**~~ *Resolved in `75d72ba` (Ship-now tier).* `shape.rootDirDepth` is now a config knob clamped to `[1..5]`, default `2`. Deep monorepos can raise it (`/si set shape.rootDirDepth 3` → `packages/core/src`) without touching the analyzer. Env override: `CLAUDE_SHAPE_ROOT_DIR_DEPTH`.
 

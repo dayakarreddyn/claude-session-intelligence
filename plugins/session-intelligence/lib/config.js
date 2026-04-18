@@ -46,6 +46,10 @@ const DEFAULTS = {
     colors: true,
     serviceHealth: [],
     prices: { input: 15, cache_creation: 18.75, cache_read: 1.5, output: 75 },
+    // Minimum recent-thinking tokens to render the `thinking` field. Below
+    // this it is noise; above it is a genuine signal that current context
+    // is carrying extended-thinking bytes. 0 disables the threshold.
+    thinkingMinDisplay: 5000,
   },
   compact: {
     threshold: 50,              // tool calls before first advisory

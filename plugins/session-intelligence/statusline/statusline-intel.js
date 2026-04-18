@@ -30,17 +30,42 @@ const { execFileSync } = require('child_process');
 // Two install paths exist: repo-local tests (lib next to script) and user
 // install (lib under scripts/hooks/session-intelligence/). Try both.
 
-function loadSharedConfig() {
+// The statusline script can sit in three different layouts on disk:
+//   1. Repo:     plugins/session-intelligence/statusline/ with ../lib siblings
+//   2. Cache:    cache/.../1.0.0/statusline/ with ../lib siblings
+//   3. Legacy:   ~/.claude/scripts/ with hooks/session-intelligence/lib/ nested
+// The candidate order below walks each layout in turn. The repo/cache path
+// (`../lib`) went overlooked for a while, which meant env-var field
+// overrides silently no-op'd — now covered.
+function resolveLibDir() {
   const candidates = [
-    path.join(__dirname, 'lib', 'config.js'),
-    path.join(__dirname, 'hooks', 'session-intelligence', 'lib', 'config.js'),
-    path.join(__dirname, 'session-intelligence', 'lib', 'config.js'),
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'lib'),
+    path.join(__dirname, 'hooks', 'session-intelligence', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
   ];
-  for (const p of candidates) {
+  for (const dir of candidates) {
     try {
-      if (fs.existsSync(p)) return require(p);
+      if (fs.existsSync(path.join(dir, 'config.js'))) return dir;
     } catch { /* try next */ }
   }
+  return null;
+}
+
+function loadSharedConfig() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  try { return require(path.join(dir, 'config.js')); }
+  catch { return null; }
+}
+
+function loadThinkingLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'thinking.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
   return null;
 }
 
@@ -584,6 +609,21 @@ function buildRenderers(C) {
       return `${C.dim}${fmtDuration(ctx.sessionDurationMs)}${C.reset}`;
     },
 
+    /**
+     * Recent thinking-token estimate. Renders only when the tail-window
+     * estimate crosses `statusline.thinkingMinDisplay` so an idle bar stays
+     * quiet. Dim — thinking is context for the tokens field, not its own
+     * zone alert.
+     */
+    thinking: (_input, ctx) => {
+      const recent = ctx.thinking && ctx.thinking.recent;
+      if (!recent) return '';
+      const minDisplay = Number.isFinite(ctx.cfg.thinkingMinDisplay)
+        ? ctx.cfg.thinkingMinDisplay : 5000;
+      if (recent < minDisplay) return '';
+      return `${C.dim}think:${fmtTokens(recent)}${C.reset}`;
+    },
+
     task: (_input, ctx) => {
       if (!ctx.task) return '';
       // Line 2 stays dim/grey so the status bar has one loud voice (tokens +
@@ -871,6 +911,18 @@ function main() {
     ? loadCurrentTask(projectDir, cwd, cfg.maxTaskLength || 40, staleHours)
     : { text: '', source: 'none' };
 
+  // Thinking-token estimate — tail-scanned residual from the transcript.
+  // Skipped entirely when the field isn't configured, so the extra 512 KB
+  // read only runs for users who've opted into the `thinking` field.
+  let thinking = { total: 0, turns: 0, recent: 0, lastTurnAgo: null };
+  if (cfg.fields.includes('thinking')) {
+    const lib = loadThinkingLib();
+    if (lib && typeof lib.estimateThinkingTokens === 'function') {
+      try { thinking = lib.estimateThinkingTokens(transcriptPath) || thinking; }
+      catch { /* degrade silently */ }
+    }
+  }
+
   const ctx = {
     cfg,
     taskSource: taskInfo.source,
@@ -881,6 +933,7 @@ function main() {
     costUsd,
     usedTranscript,
     usage,
+    thinking,
   };
 
   const renderers = buildRenderers(C);
