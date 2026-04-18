@@ -370,11 +370,12 @@ Every `/compact` appends an entry to `~/.claude/logs/compact-history.jsonl`:
 
 ```json
 {"t":1714000000,"sid":"abc","cwd":"/proj","tokens":265000,"cost":2.14,
- "hotDirs":["src/auth"],"droppedDirs":["tests/browser","scripts/old"],
+ "hotDirs":["src/auth"],"warmDirs":["src/billing"],
+ "droppedDirs":["tests/browser","scripts/old"],
  "hadShift":true,"regretCount":0}
 ```
 
-Cross-session, cross-project, per-user. Bounded at 200 entries / 256 KB with automatic rotation.
+Cross-session, cross-project, per-user. Bounded at 200 entries / 256 KB with automatic rotation. Extra fields (`softRegretCount`, `positiveWeight`, `continuationQuality`, `regretDirs`, …) get stamped onto the entry after the 30-call post-compact window closes — see [§7.3](#73-the-monitoring-window).
 
 ### 6.3 The derivation
 
@@ -432,29 +433,35 @@ At the moment of `/compact`, `si-pre-compact.js` writes a per-session snapshot:
   "tokens": 265000,
   "cost": 2.14,
   "hotDirs": ["src/auth"],
+  "warmDirs": ["src/billing"],
   "droppedDirs": ["tests/browser", "scripts/old"],
   "callsSince": 0,
-  "regretHits": []
+  "regretHits": [],
+  "softRegretHits": [],
+  "positiveHits": []
 }
 ```
 
 File: `/tmp/claude-compact-snapshot-<sid>.json`.
 
-The snapshot is the source of truth for "what did we tell the model to drop?" for the next monitoring window.
+The snapshot is the source of truth for "what did we tell the model to drop, keep, or leave in the middle?" for the next monitoring window. All three bands are captured because a single touch gets classified against all of them.
 
 ### 7.3 The monitoring window
 
-For the next **30 tool calls** or **30 minutes** (whichever comes first), every `PostToolUse` hook fire calls `checkPostCompactRegret()`:
+For the next **30 tool calls** or **30 minutes** (whichever comes first), every `PostToolUse` hook fire calls `checkPostCompactRegret()`. Each call classifies the tool's rootDir against the snapshot in priority order (DROP > HOT > WARM):
 
-1. Extract the rootDir of the current tool call's file_path
-2. Check: is this rootDir in `snapshot.droppedDirs`?
-3. If yes → regret hit. Append to `snapshot.regretHits`.
-4. If `callsSince > 30` or `(now - snapshot.t) > 30min` → window closed.
+1. `droppedDirs` → **hard regret**. Weighted by op (Read=1.0, Edit=0.3, cleanup=0.1). Appended to `regretHits`.
+2. `hotDirs` → **positive**. Same weight scheme. Appended to `positiveHits`. Evidence the compact freed attention for the right things.
+3. `warmDirs` (and not HOT, not DROP) → **soft regret**. Same op weight × 0.5 dampening. Appended to `softRegretHits`. Weaker signal than hard regret — the dir was mid-recency at compact time, so it might have aged COLD or stayed HOT if we hadn't intervened. Exists because users compacting early (median ~60k tokens) rarely age dirs to COLD, so hard regret alone undercounts; soft regret is the wider signal we can still act on.
+4. Neither → neutral. Doesn't pollute the ratio.
+5. If `callsSince > 30` or `(now − snapshot.t) > 30min` → window closed.
 
 When the window closes:
 
-1. Stamp the final `regretCount` into the corresponding `compact-history.jsonl` entry (via `t` match)
-2. Delete the snapshot file
+1. Stamp weighted sums into the corresponding `compact-history.jsonl` entry (via `t` match): `regretCount`, `softRegretCount`, `positiveWeight`, `continuationQuality` = `(positive − regret) / (positive + regret)` ∈ `[-1, 1]`.
+2. Delete the snapshot file.
+
+Soft regret is currently **instrumentation-only** — stamped to history but not yet fed into `adaptiveZones()`. The Q1 design call was to accumulate data first before deciding how much weight to give it; hard regret remains the only band feeding dampening until the soft-regret signal is validated against enough cross-project samples.
 
 ### 7.4 The dampening
 
@@ -509,11 +516,12 @@ else                    → band = 'normal'
 
 ### 8.3 Current use
 
-The cost-band signal is computed and logged, but the plugin doesn't yet use it to *modulate* thresholds. It surfaces as telemetry in the suggest-compact message:
+Two paths are live:
 
-> Context at ~260k tokens, $1.43 spent.
+- **Per-turn banding** surfaces as telemetry in the suggest-compact message: `Context at ~260k tokens, $1.43 spent.`
+- **Session cost tightening**: when the running session cost exceeds the user's own **p75** across recent compacts (≥5 cost-carrying entries required), `adaptiveZones()` tightens the orange threshold by 12% and stamps `costTightened: true` on the returned zones. The suggest-compact stderr then calls it out: `(Orange tightened 12%: session cost $X exceeds your historical p75 — expensive sessions warrant earlier warnings.)` The direction is opposite to regret-rate dampening (tightens vs pushes out) and both can apply to the same session — an expensive-and-regret-heavy session tightens then loosens, producing roughly neutral thresholds, which is the correct behaviour.
 
-Future: shift the orange threshold inward when band=`expensive` (compact earlier to cap burn rate) and outward when band=`cheap` (more tolerant of long contexts since they're not costing much). Deferred pending enough history data to validate the heuristic.
+Deferred: per-turn band also modulating thresholds (compact earlier when this turn's cache_ratio is low). The session-cost heuristic has historical grounding; per-turn banding needs more data before it's trustworthy.
 
 ---
 

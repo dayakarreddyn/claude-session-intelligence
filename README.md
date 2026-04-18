@@ -571,13 +571,17 @@ When `si-pre-compact.js` writes PRESERVE/DROP bands, it also snapshots them to `
 
 ```json
 {"t":1714000000,"tokens":265000,"cost":2.14,
- "hotDirs":["src/auth"],"droppedDirs":["tests/browser"],
- "callsSince":0,"regretHits":[]}
+ "hotDirs":["src/auth"],"warmDirs":["src/billing"],"droppedDirs":["tests/browser"],
+ "callsSince":0,"regretHits":[],"softRegretHits":[],"positiveHits":[]}
 ```
 
-For the next **30 tool calls** or **30 minutes** (whichever first), `si-token-budget.js` checks every file path against `droppedDirs`. A match = "regret hit": you told the model to drop that context, but then you (or Claude) reached back for it. Hits accrue into the snapshot; when the window closes, the count gets stamped back into the original history entry as `regretCount`.
+For the next **30 tool calls** or **30 minutes** (whichever first), `si-token-budget.js` checks every file path against three bands:
 
-The **regret rate across your last 10 compacts** feeds back into `adaptiveZones()` — if ≥1 regret per compact on average, orange pushes **out** by 10% (be more conservative, the user apparently needs that context).
+- **hard regret** — touch a `droppedDirs` entry. You told the model to drop that context, but reached back for it. Weighted by op type (Read=1.0, Edit=0.3, cleanup=0.1).
+- **soft regret** — touch a `warmDirs` entry (mid-recency, not current focus, not dropped). Weaker signal, dampened 0.5× so a handful of soft hits are needed to rival one hard hit. Instrumentation-only right now: stamped to history as `softRegretCount` but not yet fed into zone adjustment. Exists because users compacting early (median ~60k) rarely age dirs to COLD, so hard regret alone undercounts.
+- **positive** — touch a `hotDirs` entry. "Compact freed attention for the stuff we flagged as important." Feeds `continuationQuality` = `(positive − regret) / (positive + regret)`, range [-1, 1], stamped on window close.
+
+When the window closes, weighted sums get stamped back onto the original history entry. The **regret rate across your last 10 compacts** feeds `adaptiveZones()` — ≥1 hard regret per compact on average pushes orange **out** by 10% (be more conservative, the user apparently needs that context).
 
 ### What you get from it
 
