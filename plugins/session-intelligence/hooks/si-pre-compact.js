@@ -317,6 +317,7 @@ async function main() {
 
       const droppedDirs = analysis ? analysis.cold.map((c) => c.root) : [];
       const hotDirs     = analysis ? analysis.hot.map((h) => h.root) : [];
+      const warmDirs    = analysis ? analysis.warm.map((w) => w.root) : [];
 
       const historyEntry = {
         t: Date.now(),
@@ -325,6 +326,7 @@ async function main() {
         tokens,
         cost: Number(cost.toFixed(4)),
         hotDirs,
+        warmDirs,
         droppedDirs,
         hadShift: !!(analysis && analysis.shift),
         regretCount: 0, // upgraded later when the snapshot window closes
@@ -333,14 +335,20 @@ async function main() {
 
       // Snapshot drives post-compact regret monitoring for up to 30 calls
       // or 30 min — whichever first. si-token-budget.js consumes it.
+      // warmDirs enables soft-regret detection: users compacting early
+      // (median 60k) rarely age dirs to COLD, so hard regret never fires.
+      // WARM-not-HOT touches post-compact are the wider signal we can act on.
       compactHistory.writeSnapshot(sessionId, {
         t: historyEntry.t,
         tokens,
         cost: historyEntry.cost,
         hotDirs,
+        warmDirs,
         droppedDirs,
         callsSince: 0,
         regretHits: [],
+        softRegretHits: [],
+        positiveHits: [],
       });
 
       intelLog('pre-compact', 'info', 'history + snapshot written', {

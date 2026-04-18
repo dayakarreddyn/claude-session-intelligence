@@ -189,13 +189,19 @@ async function main() {
     // future drop suggestions via the adaptiveZones() regret-rate path.
     if (root && compactHistory) {
       try {
-        const { regretHit, windowClosed, weight } =
+        const { regretHit, softRegretHit, windowClosed, weight } =
           compactHistory.checkPostCompactRegret(sessionId, root, {
             toolName,
             toolInput,
           });
         if (regretHit) {
           intelLog('token-budget', 'info', 'post-compact regret hit',
+            { root, tool: toolName, weight, windowClosed });
+        } else if (softRegretHit) {
+          // Q1 unblocker: WARM-not-HOT hits. Log at info so the signal is
+          // visible in intel logs without needing debug mode, but keep the
+          // wording distinct from hard regret so grep filters can separate.
+          intelLog('token-budget', 'info', 'post-compact soft-regret hit',
             { root, tool: toolName, weight, windowClosed });
         }
       } catch (err) {

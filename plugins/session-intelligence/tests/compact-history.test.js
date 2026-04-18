@@ -192,3 +192,123 @@ test('upgradeHistoryRegret skips when no hits on either side', () => {
   const stamped = raw.find((e) => e.t === t);
   assert.equal(stamped.continuationQuality, undefined);
 });
+
+// ── Soft regret (Q1 unblocker): WARM-not-HOT post-compact touches ────────
+
+test('checkPostCompactRegret records softRegret on WARM-only dirs', () => {
+  resetHistory();
+  const sid = 'test-soft-' + Date.now();
+  compactHistory.writeSnapshot(sid, {
+    t: Date.now(),
+    tokens: 250000,
+    cost: 100,
+    hotDirs: ['src/auth'],
+    warmDirs: ['src/billing'],
+    droppedDirs: ['tests/legacy'],
+    callsSince: 0,
+    regretHits: [],
+    softRegretHits: [],
+    positiveHits: [],
+  });
+
+  const result = compactHistory.checkPostCompactRegret(sid, 'src/billing', {
+    toolName: 'Read',
+    toolInput: { file_path: '/foo' },
+  });
+  assert.equal(result.softRegretHit, true, 'WARM touch should fire soft regret');
+  assert.equal(result.regretHit, false);
+  assert.equal(result.positiveHit, false);
+  // Read weight 1.0 × SOFT_REGRET_DAMPEN 0.5 = 0.5
+  assert.equal(result.weight, 0.5);
+});
+
+test('HOT takes priority over WARM classification', () => {
+  resetHistory();
+  const sid = 'test-priority-' + Date.now();
+  // Same dir listed in both buckets (defensive — shouldn't happen from
+  // analyzeShape but upstream callers could do it). HOT wins.
+  compactHistory.writeSnapshot(sid, {
+    t: Date.now(),
+    tokens: 250000,
+    cost: 100,
+    hotDirs: ['src/auth'],
+    warmDirs: ['src/auth'],
+    droppedDirs: [],
+    callsSince: 0,
+    regretHits: [],
+    softRegretHits: [],
+    positiveHits: [],
+  });
+  const result = compactHistory.checkPostCompactRegret(sid, 'src/auth', {
+    toolName: 'Read', toolInput: {},
+  });
+  assert.equal(result.positiveHit, true);
+  assert.equal(result.softRegretHit, false);
+});
+
+test('upgradeHistoryRegret stamps softRegretCount on window close', () => {
+  resetHistory();
+  const t = Date.now();
+  compactHistory.appendHistory(fakeEntry({
+    t, tokens: 250000, cost: 100,
+    hotDirs: ['src/auth'], warmDirs: ['src/billing'], droppedDirs: [],
+  }));
+  const sid = 'test-soft-stamp-' + t;
+  compactHistory.writeSnapshot(sid, {
+    t,
+    tokens: 250000,
+    cost: 100,
+    hotDirs: ['src/auth'],
+    warmDirs: ['src/billing'],
+    droppedDirs: [],
+    callsSince: 30, // one more call closes the window
+    softRegretHits: [
+      { t: t + 1000, root: 'src/billing', tool: 'Read', weight: 0.5 },
+      { t: t + 2000, root: 'src/billing', tool: 'Edit', weight: 0.15 },
+    ],
+    regretHits: [],
+    positiveHits: [],
+  });
+  // Window-closing neutral call.
+  const result = compactHistory.checkPostCompactRegret(sid, 'other/path', {
+    toolName: 'Read', toolInput: {},
+  });
+  assert.equal(result.windowClosed, true);
+
+  const raw = fs.readFileSync(compactHistory.HISTORY_FILE, 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const stamped = raw.find((e) => e.t === t);
+  assert.ok(stamped, 'history entry should be found');
+  assert.equal(stamped.softRegretCount, 0.65);
+  assert.equal(stamped.softRegretHits, 2);
+  assert.deepEqual(stamped.softRegretDirs, ['src/billing', 'src/billing']);
+  // Soft regret should NOT pollute continuationQuality (parked for later).
+  assert.equal(stamped.continuationQuality, undefined);
+});
+
+test('soft regret only stamps when there were soft hits', () => {
+  resetHistory();
+  const t = Date.now();
+  compactHistory.appendHistory(fakeEntry({
+    t, hotDirs: ['src/auth'], warmDirs: [], droppedDirs: [],
+  }));
+  const sid = 'test-soft-absent-' + t;
+  compactHistory.writeSnapshot(sid, {
+    t,
+    tokens: 250000,
+    cost: 100,
+    hotDirs: ['src/auth'],
+    warmDirs: [],
+    droppedDirs: [],
+    callsSince: 30,
+    positiveHits: [{ t: t + 1, root: 'src/auth', tool: 'Read', weight: 1.0 }],
+    regretHits: [],
+    softRegretHits: [],
+  });
+  compactHistory.checkPostCompactRegret(sid, 'other/path', { toolName: 'Read', toolInput: {} });
+  const raw = fs.readFileSync(compactHistory.HISTORY_FILE, 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const stamped = raw.find((e) => e.t === t);
+  assert.equal(stamped.softRegretCount, undefined, 'no soft regret field when no soft hits');
+  assert.equal(stamped.continuationQuality, 1); // positive-only → +1
+});

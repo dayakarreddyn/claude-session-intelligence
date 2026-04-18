@@ -41,6 +41,13 @@ const ADAPTIVE_BOUND = 0.3; // ±30% from static defaults
 const REGRET_WINDOW_CALLS = 30;
 const REGRET_WINDOW_MS = 30 * 60 * 1000; // 30 min
 
+// Soft regret (WARM-not-HOT dir touches post-compact) is a weaker signal than
+// hard regret (DROP dir touches) — the user may have legitimately moved on
+// from the warm dir or may have legitimately needed it again. Dampen the
+// per-op weight so one soft regret ≪ one hard regret and a handful of soft
+// regrets are needed before the signal rivals a single hard regret.
+const SOFT_REGRET_DAMPEN = 0.5;
+
 // Per-operation regret weights. Touching a dropped rootDir with a Read is a
 // genuine "I lost context, going back for it" signal — weight 1.0. An Edit
 // or Write is natural follow-up work after a compact (implementing the
@@ -301,24 +308,32 @@ function clearSnapshot(sessionId) {
 
 /**
  * Called from token-budget-tracker after each PostToolUse. Returns
- * `{ regretHit, positiveHit, windowClosed, weight }` so the caller can log
- * appropriately. Two classifications run against the same snapshot:
+ * `{ regretHit, softRegretHit, positiveHit, windowClosed, weight }` so the
+ * caller can log appropriately. Three classifications run against the same
+ * snapshot, in priority order (DROP > HOT > WARM):
  *
  *   - regret: tool call touched a rootDir the pre-compact analysis marked
  *     as DROP. Weight by operation type (Read=1.0, Edit=0.3, cleanup=0.1).
  *   - positive: tool call touched a rootDir marked HOT. Counts as "compact
  *     freed attention for the stuff we flagged as important" — the Q5
  *     good-compact signal. Same op-type weights as regret.
+ *   - softRegret: tool call touched a WARM rootDir (mid-recency, NOT in
+ *     hotDirs and NOT in droppedDirs). Weaker signal than hard regret —
+ *     the user compacted before WARM dirs aged to COLD, so we can't know
+ *     whether we would have dropped them. Dampened by SOFT_REGRET_DAMPEN.
+ *     Fixes the Q1 "nothing to regret" blocker: droppedDirs is empty on
+ *     most sessions because users compact at median ~60k tokens before
+ *     dirs age COLD, so hard regret never fires.
  *
  * The window closes after N calls OR N minutes since the compact. On
- * close, `upgradeHistoryRegret` stamps both regretCount and
+ * close, `upgradeHistoryRegret` stamps regretCount, softRegretCount, and
  * continuationQuality back onto the history entry.
  */
 function checkPostCompactRegret(sessionId, rootDir, opts) {
   const snap = readSnapshot(sessionId);
   if (!snap) {
     return {
-      regretHit: false, positiveHit: false,
+      regretHit: false, softRegretHit: false, positiveHit: false,
       windowClosed: true, snapshot: null, weight: 0,
     };
   }
@@ -329,6 +344,7 @@ function checkPostCompactRegret(sessionId, rootDir, opts) {
 
   const windowClosed = calls > REGRET_WINDOW_CALLS || age > REGRET_WINDOW_MS;
   let regretHit = false;
+  let softRegretHit = false;
   let positiveHit = false;
   let weight = 0;
 
@@ -353,6 +369,18 @@ function checkPostCompactRegret(sessionId, rootDir, opts) {
         { t: now, root: rootDir, tool: toolName || null, weight },
       ]);
     }
+  } else if (rootDir && Array.isArray(snap.warmDirs) && snap.warmDirs.includes(rootDir)) {
+    // Soft regret: WARM-only touch. Dampened because WARM is a classification
+    // we made without knowing where the dir was headed — it might have aged
+    // COLD (hard regret) or stayed HOT (positive) if the user hadn't compacted.
+    const raw = regretWeightFor(toolName, toolInput);
+    weight = raw * SOFT_REGRET_DAMPEN;
+    if (weight > 0) {
+      softRegretHit = true;
+      snap.softRegretHits = (snap.softRegretHits || []).concat([
+        { t: now, root: rootDir, tool: toolName || null, weight },
+      ]);
+    }
   }
 
   if (windowClosed) {
@@ -363,7 +391,7 @@ function checkPostCompactRegret(sessionId, rootDir, opts) {
     writeSnapshot(sessionId, snap);
   }
 
-  return { regretHit, positiveHit, windowClosed, snapshot: snap, weight };
+  return { regretHit, softRegretHit, positiveHit, windowClosed, snapshot: snap, weight };
 }
 
 /**
@@ -380,7 +408,10 @@ function upgradeHistoryRegret(snap) {
   if (!snap || !Number.isFinite(snap.t)) return;
   const regrets = snap.regretHits || [];
   const positives = snap.positiveHits || [];
-  if (regrets.length === 0 && positives.length === 0) return; // nothing to stamp
+  const softRegrets = snap.softRegretHits || [];
+  if (regrets.length === 0 && positives.length === 0 && softRegrets.length === 0) {
+    return; // nothing to stamp
+  }
   // regretCount is a weighted sum. Older entries stored integer counts
   // — adaptiveZones() treats both uniformly because it only checks
   // Number.isFinite and compares to the 1.0 threshold, which is the same
@@ -389,6 +420,11 @@ function upgradeHistoryRegret(snap) {
     (sum, h) => sum + (Number.isFinite(h.weight) ? h.weight : 1), 0);
   const regretWeight = sumWeights(regrets);
   const positiveWeight = sumWeights(positives);
+  const softRegretWeight = sumWeights(softRegrets);
+  // Soft regret intentionally does NOT feed continuationQuality yet.
+  // The Q1 follow-up is to accumulate data first; wire soft regret into
+  // adaptiveZones/continuationQuality in a later pass once we can see
+  // whether the signal is high-enough quality to act on.
   const denom = positiveWeight + regretWeight;
   const continuationQuality = denom > 0
     ? Number(((positiveWeight - regretWeight) / denom).toFixed(2))
@@ -403,6 +439,11 @@ function upgradeHistoryRegret(snap) {
         parsed[i].regretDirs = regrets.map((h) => h.root);
         parsed[i].positiveHits = positives.length;
         parsed[i].positiveWeight = Number(positiveWeight.toFixed(2));
+        if (softRegrets.length > 0) {
+          parsed[i].softRegretCount = Number(softRegretWeight.toFixed(2));
+          parsed[i].softRegretHits = softRegrets.length;
+          parsed[i].softRegretDirs = softRegrets.map((h) => h.root);
+        }
         if (continuationQuality !== null) {
           parsed[i].continuationQuality = continuationQuality;
         }
@@ -436,5 +477,6 @@ module.exports = {
     REGRET_WINDOW_MS,
     ANNOUNCE_MIN_DELTA,
     REGRET_WEIGHTS,
+    SOFT_REGRET_DAMPEN,
   },
 };
