@@ -211,8 +211,18 @@ function writeHandoff(opts) {
     droppedDirs,
   };
 
+  // Atomic write: stream to a pid/ts-suffixed temp file first, then
+  // rename into place. renameSync is atomic on POSIX within a filesystem,
+  // so a concurrent reader sees either the previous file or the complete
+  // new one — never `{ ` or `{\n` truncated mid-write. Addresses observed
+  // "handoff parse failed at position 2" warnings in the dogfood log
+  // where a reader hit a partially-flushed file.
+  const finalPath = handoffPath(projectDir);
+  const tmpPath = `${finalPath}.tmp.${process.pid}.${Date.now()}`;
+  const payload = JSON.stringify(handoff, null, 2) + '\n';
   try {
-    fs.writeFileSync(handoffPath(projectDir), JSON.stringify(handoff, null, 2) + '\n');
+    fs.writeFileSync(tmpPath, payload);
+    fs.renameSync(tmpPath, finalPath);
     return true;
   } catch (err) {
     // Distinguishable from the intentional "no strong signal" skip: the
@@ -220,10 +230,12 @@ function writeHandoff(opts) {
     // trail so a disk-full / permissions / bad-path regression is
     // diagnosable after the fact.
     intelLog('handoff', 'warn', 'writeHandoff failed', {
-      path: handoffPath(projectDir),
+      path: finalPath,
       code: err && err.code,
       err: err && err.message,
     });
+    // Best-effort cleanup of the orphaned tmp file. Missing is fine.
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     return false;
   }
 }
@@ -256,11 +268,34 @@ function readAndRenderHandoff(projectDir) {
     return '';
   }
 
-  let handoff;
-  try { handoff = JSON.parse(fs.readFileSync(owned, 'utf8')); }
+  let raw;
+  try { raw = fs.readFileSync(owned, 'utf8'); }
   catch (err) {
-    intelLog('handoff', 'warn', 'handoff parse failed', { code: err && err.code, err: err && err.message });
+    intelLog('handoff', 'warn', 'handoff read failed', { code: err && err.code, err: err && err.message });
     try { fs.unlinkSync(owned); } catch { /* ignore */ }
+    return '';
+  }
+
+  let handoff;
+  try { handoff = JSON.parse(raw); }
+  catch (err) {
+    // Preserve forensic snapshot — rename to .corrupt.<ts> so we can see
+    // what was on disk. Log byte count + a short preview so the warning
+    // surfaces the most useful triage info without quoting potentially
+    // large payloads. Caller still treats this as "no handoff" and moves on.
+    const preview = raw.length > 80 ? raw.slice(0, 80) + '...' : raw;
+    intelLog('handoff', 'warn', 'handoff parse failed', {
+      code: err && err.code,
+      err: err && err.message,
+      bytes: raw.length,
+      preview,
+    });
+    try {
+      const forensic = `${handoffPath(projectDir)}.corrupt.${Date.now()}`;
+      fs.renameSync(owned, forensic);
+    } catch {
+      try { fs.unlinkSync(owned); } catch { /* ignore */ }
+    }
     return '';
   }
 

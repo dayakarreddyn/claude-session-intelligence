@@ -202,3 +202,41 @@ test('gitPorcelain truncation sentinel appears when result exceeds 20', () => {
   });
   assert.match(block, /and 35 more \(truncated\)/);
 });
+
+// ─── atomic write + forensic preservation ───────────────────────────────
+
+test('writeHandoff leaves no orphan .tmp files in projectDir on success', () => {
+  const dir = tmpProject();
+  try {
+    fs.writeFileSync(path.join(dir, 'session-context.md'), [
+      '## Current Task',
+      'type: feature',
+      'description: exercise atomic write path',
+    ].join('\n'));
+    const wrote = handoff.writeHandoff({
+      projectDir: dir,
+      cwd: dir,
+      sessionId: 'test-session',
+    });
+    assert.equal(wrote, true);
+    const leftovers = fs.readdirSync(dir).filter((n) => n.includes('.tmp.'));
+    assert.equal(leftovers.length, 0, `unexpected tmp orphans: ${leftovers.join(', ')}`);
+  } finally { cleanup(dir); }
+});
+
+test('readAndRenderHandoff preserves a .corrupt.* snapshot on parse failure', () => {
+  const dir = tmpProject();
+  try {
+    fs.writeFileSync(path.join(dir, '.si-handoff.json'), '{ ');
+    const origErr = process.stderr.write;
+    process.stderr.write = () => true;
+    try {
+      const out = handoff.readAndRenderHandoff(dir);
+      assert.equal(out, '');
+    } finally { process.stderr.write = origErr; }
+    const snapshots = fs.readdirSync(dir).filter((n) => n.startsWith('.si-handoff.json.corrupt.'));
+    assert.equal(snapshots.length, 1, 'exactly one forensic snapshot is kept');
+    assert.equal(fs.readFileSync(path.join(dir, snapshots[0]), 'utf8'), '{ ',
+      'snapshot preserves raw on-disk bytes');
+  } finally { cleanup(dir); }
+});
