@@ -629,7 +629,7 @@ loop on user turn:
 
 2. ~~**rootDir granularity is fixed at two segments.**~~ *Resolved in `75d72ba` (Ship-now tier).* `shape.rootDirDepth` is now a config knob clamped to `[1..5]`, default `2`. Deep monorepos can raise it (`/si set shape.rootDirDepth 3` → `packages/core/src`) without touching the analyzer. Env override: `CLAUDE_SHAPE_ROOT_DIR_DEPTH`.
 
-3. **Phase event detection is Bash-only.** A user who commits via their IDE or via `gh` (e.g. `gh repo commit`) won't produce a commit event in the log. The plugin under-detects phase boundaries for those workflows.
+3. ~~**Phase event detection is Bash-only.**~~ *Partially resolved — see `lib/phase-events.js`.* Detection still runs against `Bash` tool calls, but now inspects `tool_output` as well as `tool_input.command`. Any invocation whose output matches standard git/gh summary lines (`[branch sha] summary`, `To github.com:...`, PR URLs) records an event — covering `git cz`, shell aliases, custom commit scripts, and wrappers that ultimately call git. The command-verb list also grew: `git tag`, `git merge` (excluding `--no-commit`), `git rebase --continue`, and `gh pr close/review --approve`. IDE-initiated commits that never cross the Bash tool remain unobserved.
 
 4. **Adaptive zones need ≥5 compacts to activate.** First sessions use static defaults. Onboarding users experience the plugin's "pre-learning" behaviour as their default and may never realize it got better.
 

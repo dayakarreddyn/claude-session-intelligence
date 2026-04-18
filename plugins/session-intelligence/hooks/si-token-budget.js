@@ -39,6 +39,12 @@ const {
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const { rootDirOf, appendShape } = require(path.join(SI_LIB, 'context-shape'));
+// Phase-event detection is optional — fall back to the legacy inline regex
+// if the module is not on disk yet (mixed-version install, e.g. during a
+// plugin upgrade).
+let detectPhaseEvent = null;
+try { detectPhaseEvent = require(path.join(SI_LIB, 'phase-events')).detectPhaseEvent; }
+catch { /* optional */ }
 // Post-compact regret monitoring is optional — degrade silently when the
 // module is not on disk yet (fresh install not synced).
 let compactHistory = null;
@@ -141,8 +147,13 @@ async function main() {
       ? cfg.shape.rootDirDepth : 2;
     const root = rootDirOf(filePath, depth);
     const cmd = toolInput.command || '';
+    const toolOutput = (parsedInput && (parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
     let event = null;
-    if (toolName === 'Bash' && typeof cmd === 'string') {
+    if (detectPhaseEvent) {
+      event = detectPhaseEvent(toolName, toolInput, toolOutput);
+    } else if (toolName === 'Bash' && typeof cmd === 'string') {
+      // Legacy fallback — pre-phase-events.js regex. Kept so mixed-version
+      // installs still record the common cases.
       if (/^\s*git\s+commit\b/.test(cmd))                        event = 'commit';
       else if (/^\s*git\s+push\b/.test(cmd))                     event = 'push';
       else if (/^\s*gh\s+pr\s+(create|merge)\b/.test(cmd))       event = 'pr';
