@@ -559,6 +559,10 @@ function main() {
 }
 
 try { main(); } catch (err) {
-  intelLog('task-change', 'error', 'hook crashed', { err: err.message });
-  process.exit(0); // never break the user's flow on a bug here
+  // Deliberately exit(0) here (not 1 like other hooks) because this is a
+  // UserPromptSubmit hook — a non-zero exit would risk blocking the user's
+  // prompt on an SI bug. Log stack so crashes are still diagnosable when
+  // they happen.
+  intelLog('task-change', 'error', 'hook crashed', { err: err.message, stack: err.stack });
+  process.exit(0);
 }

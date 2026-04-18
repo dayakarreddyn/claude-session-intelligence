@@ -59,49 +59,11 @@ try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { 
 let costEst = null;
 try { costEst = require(path.join(SI_LIB, 'cost-estimation')); } catch { /* not available */ }
 
-// Lines that are still template placeholders: either a "key: (…)" pair
-// with only parenthesised hint text, or a bullet that is just parens.
-// An unfilled session-context.md is worse than no guidance because Claude
-// will follow the placeholder literally during compaction.
-function isPlaceholderLine(line) {
-  const t = line.trim();
-  if (!t) return false; // blank lines preserved as whitespace, not stripped
-  if (/^[-*]\s*\([^)]*\)\s*$/.test(t)) return true;           // "- (list files)"
-  if (/^[A-Za-z][A-Za-z0-9_-]*:\s*\([^)]*\)\s*$/.test(t)) return true; // "type: (a | b)"
-  if (/^[A-Z]+:\s*\([^)]*\)\s*$/.test(t)) return true;        // "PRESERVE: (what must...)"
-  return false;
-}
-
-function stripPlaceholderLines(body) {
-  return body
-    .split('\n')
-    .filter((l) => !isPlaceholderLine(l))
-    .join('\n')
-    .trim();
-}
-
-/**
- * Parse session-context.md into sections keyed by ## headers. Template
- * placeholder lines are stripped so only real user-authored content
- * reaches the compaction prompt.
- */
-function parseSessionContext(content) {
-  const sections = {};
-  let currentSection = null;
-  for (const line of content.split('\n')) {
-    const headerMatch = line.match(/^##\s+(.+)/);
-    if (headerMatch) {
-      currentSection = headerMatch[1].trim();
-      sections[currentSection] = [];
-    } else if (currentSection) {
-      sections[currentSection].push(line);
-    }
-  }
-  for (const key of Object.keys(sections)) {
-    sections[key] = stripPlaceholderLines(sections[key].join('\n'));
-  }
-  return sections;
-}
+// Section parsing + placeholder stripping live in lib/session-context.js
+// (shared with lib/handoff.js). Local copies previously drifted between
+// the two files — extract-once keeps compact-hint output and handoff
+// replay working from the same parse rules.
+const parseSessionContext = require(path.join(SI_LIB, 'session-context')).parseSessionContext;
 
 /**
  * Format structured compaction hints from parsed session context. Returns
@@ -127,31 +89,11 @@ function buildMemoryOffloadBlock(projectDir, sessionId) {
 
   return [
     '',
-    'MEMORY OFFLOAD CHECKPOINT (pre-compact):',
-    '\u2501'.repeat(50),
-    'Compact will compress this session. Before detail is lost, write auto-memory',
-    `under ${memoryDir}/ following the frontmatter + MEMORY.md index convention`,
-    'already defined in your system prompt. Two files suggested — skip either if',
-    'there\'s nothing new to record:',
-    '',
-    `  1. ${projectFilename} (type: project)`,
-    '     Use this exact filename. It is date + session-id, so repeated compacts',
-    '     in the same session extend one file and distinct sessions never collide.',
-    '     - Decisions made, files touched with paths, follow-ups / open issues,',
-    '       any non-obvious context that took >3 attempts to discover',
-    '     - Why: detail the compact summary won\'t retain',
-    '     - How to apply: how to pick up this thread in the next session',
-    '',
-    '  2. reference_<slug>.md (type: reference or project) — ONLY if a reusable',
-    '     recipe, layout, or rule was discovered this session. Skip otherwise.',
-    '     Examples: file-layout convention, test fixture pattern, debugging',
-    '     approach that worked. <slug> should describe the pattern, not the date.',
-    '',
-    `Update ${memoryDir}/MEMORY.md with one-line pointer(s). If ${projectFilename}`,
-    'already exists, extend it in place rather than overwriting. If nothing new',
-    'is worth persisting, say so and move on.',
-    '',
-    '\u2501'.repeat(50),
+    'MEMORY OFFLOAD (pre-compact):',
+    `  Before detail collapses, persist non-obvious findings to ${memoryDir}/`,
+    `  using the frontmatter + MEMORY.md convention from your system prompt.`,
+    `  Extend ${projectFilename} (project) if new; add reference_<slug>.md only`,
+    `  for reusable recipes. Skip if nothing new is worth keeping.`,
     '',
   ].join('\n');
 }
@@ -415,7 +357,11 @@ async function main() {
 }
 
 main().catch(err => {
+  // exit(1) so the hook pipeline sees the failure. Previous exit(0) was
+  // indistinguishable from success; a crash in the shape-append or
+  // compact-history path would silently ship no hints + no handoff while
+  // the pipeline reported "completed successfully".
   console.error('[PreCompact] Error:', err.message);
-  intelLog('pre-compact', 'error', 'hook crashed', { err: err.message });
-  process.exit(0);
+  intelLog('pre-compact', 'error', 'hook crashed', { err: err.message, stack: err.stack });
+  process.exit(1);
 });

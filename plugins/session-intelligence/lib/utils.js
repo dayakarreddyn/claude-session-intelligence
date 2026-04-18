@@ -33,7 +33,20 @@ function ensureDir(dirPath) {
 function readFile(filePath) {
   try {
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (err) {
+    // ENOENT is the "file doesn't exist yet" case callers expect null for.
+    // Everything else (EACCES from chmod, EISDIR from a bad path, etc.) is
+    // a real problem the caller can't distinguish — route to debug log so
+    // it's at least diagnosable when `debug.enabled=true`. Required lazily
+    // to keep utils.js loadable even when intel-debug isn't on disk (e.g.
+    // during a partial install).
+    if (err && err.code !== 'ENOENT') {
+      try {
+        const { intelLog } = require('./intel-debug');
+        intelLog('utils', 'debug', 'readFile failed (non-ENOENT)',
+          { path: filePath, code: err.code, err: err.message });
+      } catch { /* optional */ }
+    }
     return null;
   }
 }

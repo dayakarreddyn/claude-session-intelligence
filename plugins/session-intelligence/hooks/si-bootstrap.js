@@ -47,6 +47,25 @@ const os = require('os');
 let intelLog = () => {};
 try { ({ intelLog } = require('../lib/intel-debug')); } catch { /* optional */ }
 
+// Walks up from cwd until it finds an existing ~/.claude/projects/<encoded>/
+// directory. Must match the resolution used by writeHandoff in si-pre-compact
+// — otherwise read and write diverge when cwd is a subpath of the repo
+// (e.g. plugin dogfooding from a nested dir).
+let resolveProjectDir = () => null;
+try { ({ resolveProjectDir } = require('../lib/utils')); } catch { /* optional */ }
+
+// Classify an Error as a filesystem-missing/permission case (log at debug)
+// vs. a programming error like ReferenceError/TypeError/SyntaxError (log at
+// warn — those are real bugs that shouldn't hide below the default log
+// threshold). The `err.code` field is populated by fs/subprocess errors
+// but absent on V8-thrown programming errors, which gives us a clean
+// binary classifier without wiring in an explicit error taxonomy.
+function errLogLevel(err) {
+  if (!err) return 'debug';
+  if (typeof err.code === 'string' && err.code.length > 0) return 'debug';
+  return 'warn';
+}
+
 function homeDir() {
   return process.env.HOME || process.env.USERPROFILE || os.homedir();
 }
@@ -366,9 +385,22 @@ function runGit(cwd, args) {
     const { execFileSync } = require('child_process');
     return execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8', timeout: 1500,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      // Capture stderr instead of dropping it. Without this, "git not on
+      // PATH" (ENOENT) and "fatal: not a git repository" both look like
+      // "git returned empty" — autoFillSessionContext then produces a
+      // confusingly empty task with no log trail. Errors go to intelLog
+      // at debug since non-git directories are a legitimate use case.
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
-  } catch { return ''; }
+  } catch (err) {
+    intelLog('bootstrap', 'debug', 'runGit failed', {
+      cwd, args,
+      code: err && err.code,
+      status: err && err.status,
+      stderr: err && err.stderr && err.stderr.toString().trim().slice(0, 200),
+    });
+    return '';
+  }
 }
 
 function guessTaskType(subject) {
@@ -577,7 +609,11 @@ function buildNexusAdditionalContext(cwd) {
       sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
     });
   } catch (err) {
-    intelLog('bootstrap', 'debug', 'nexus injection failed', { err: err && err.message });
+    intelLog('bootstrap', errLogLevel(err), 'nexus injection failed', {
+      err: err && err.message,
+      code: err && err.code,
+      name: err && err.name,
+    });
     return '';
   }
 }
@@ -613,12 +649,20 @@ function buildContinuationAdditionalContext(cwd) {
   catch { /* optional */ }
   if (siCfg.continue && siCfg.continue.afterCompact === false) return '';
   try {
+    if (!cwd) return '';
+    // Walk up (matches writeHandoff's resolver). Bare encode of cwd fails
+    // when Claude is opened inside a subpath of the repo — the project
+    // dir only exists for the canonical root.
     const projectDir = resolveProjectDir(cwd);
     if (!projectDir) return '';
     const handoff = require('../lib/handoff');
     return handoff.readAndRenderHandoff(projectDir);
   } catch (err) {
-    intelLog('bootstrap', 'debug', 'handoff read failed', { err: err && err.message });
+    intelLog('bootstrap', errLogLevel(err), 'handoff read failed', {
+      err: err && err.message,
+      code: err && err.code,
+      name: err && err.name,
+    });
     return '';
   }
 }
@@ -659,7 +703,16 @@ function main() {
 }
 
 try { main(); } catch (err) {
-  // Never block the session on a bootstrap failure.
-  process.stderr.write(`[session-intelligence] bootstrap error: ${err.message}\n`);
-  process.exit(0);
+  // Never block the session on a bootstrap failure — but DO make the crash
+  // visible. Prior behaviour swallowed ReferenceError/TypeError and exited
+  // 0, which is indistinguishable from success to the hook pipeline; that
+  // hid a real bug (undefined symbol) for a full dogfood cycle.
+  //
+  // ENOENT / EACCES on optional files aren't programming bugs; those are
+  // already handled inside main() with their own catches. Anything that
+  // reaches here escaped those, so treat it as a real crash.
+  const msg = err && err.message ? err.message : String(err);
+  process.stderr.write(`[session-intelligence] bootstrap error: ${msg}\n`);
+  try { intelLog('bootstrap', 'error', 'hook crashed', { err: msg, stack: err && err.stack }); } catch { /* intelLog may be why we crashed */ }
+  process.exit(1);
 }

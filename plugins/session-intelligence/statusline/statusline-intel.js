@@ -69,6 +69,19 @@ function loadThinkingLib() {
   return null;
 }
 
+// Shared session-context parser — same placeholder + autofill rules the
+// handoff reader and pre-compact hint formatter use. Loaded lazily so a
+// missing lib dir just falls back to the legacy inline parser below.
+function loadSessionContextLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'session-context.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 function loadConfig() {
   const shared = loadSharedConfig();
   if (shared) {
@@ -306,8 +319,41 @@ function isPlaceholder(s) {
 // Extract the user-authored task string from session-context.md. Returns
 // null when the file is missing, absent, or still placeholder-only — the
 // caller then falls back to the git last-commit subject.
+//
+// When the shared session-context parser is available, delegate to it so
+// autofill content (synthesised from last-commit) is treated as absent —
+// the statusline's git-last-commit fallback already covers that case and
+// presenting the autofilled text would misrepresent its provenance. When
+// the shared lib is missing (older install), fall back to the legacy
+// inline parser below — behaviourally identical for user-authored tasks.
 function readSessionContextTask(projectDir) {
   if (!projectDir) return null;
+  const shared = loadSessionContextLib();
+  if (shared) {
+    const { currentTask, mtimeMs, isAutofill } = shared.readSessionContext(projectDir);
+    if (isAutofill || !currentTask) return null;
+    const body = currentTask;
+    const typeLine = body.match(/^type:\s*(.+)$/m);
+    if (typeLine) {
+      const raw = typeLine[1].trim();
+      if (isPlaceholder(raw)) return null;
+      const sep = raw.match(/\s[\u2014-]\s/);
+      if (sep) {
+        const type = raw.slice(0, sep.index).trim();
+        const desc = raw.slice(sep.index + sep[0].length).trim();
+        if (type && desc) return { text: `${type} \u2014 ${desc}`, mtimeMs };
+        if (type) return { text: type, mtimeMs };
+      }
+      return { text: raw, mtimeMs };
+    }
+    const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
+    if (isPlaceholder(firstLine)) return null;
+    const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+    return cleaned ? { text: cleaned, mtimeMs } : null;
+  }
+
+  // Legacy path — inline parse when the shared lib isn't on disk yet
+  // (e.g. mid-plugin-upgrade). Same placeholder heuristic as before.
   const file = path.join(projectDir, 'session-context.md');
   let content;
   let mtimeMs = 0;

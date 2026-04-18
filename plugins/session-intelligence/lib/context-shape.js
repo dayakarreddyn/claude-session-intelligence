@@ -248,18 +248,25 @@ function analyzeShape(entries, opts) {
   cold.sort(byLastDesc);
 
   // Domain shift — Jaccard of rootDir sets at the two ends of the window.
-  const head = new Set(withRoot.slice(0, SHIFT_WINDOW).map((e) => e.root));
-  const tail = new Set(withRoot.slice(-SHIFT_WINDOW).map((e) => e.root));
-  const inter = [...head].filter((r) => tail.has(r));
-  const uni = new Set([...head, ...tail]);
-  const jaccard = uni.size > 0 ? inter.length / uni.size : 1;
-  const shift = jaccard < SHIFT_JACCARD_THRESHOLD
-    ? {
+  // Requires withRoot.length >= 2 * SHIFT_WINDOW so head and tail don't
+  // overlap; on smaller sessions an overlapping slice trivially produces
+  // jaccard=1 and masks real pivots. Sub-threshold sessions report `null`
+  // shift rather than a misleading "no shift" signal.
+  let shift = null;
+  if (withRoot.length >= 2 * SHIFT_WINDOW) {
+    const head = new Set(withRoot.slice(0, SHIFT_WINDOW).map((e) => e.root));
+    const tail = new Set(withRoot.slice(-SHIFT_WINDOW).map((e) => e.root));
+    const inter = [...head].filter((r) => tail.has(r));
+    const uni = new Set([...head, ...tail]);
+    const jaccard = uni.size > 0 ? inter.length / uni.size : 1;
+    if (jaccard < SHIFT_JACCARD_THRESHOLD) {
+      shift = {
         from: [...head].filter((r) => !tail.has(r)).slice(0, 3),
         to: [...tail].filter((r) => !head.has(r)).slice(0, 3),
         jaccard: Number(jaccard.toFixed(2)),
-      }
-    : null;
+      };
+    }
+  }
 
   // Rough "stale tokens" estimate = fraction of calls landing in COLD dirs.
   const totalCalls = withRoot.length;

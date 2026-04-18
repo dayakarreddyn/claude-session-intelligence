@@ -26,6 +26,11 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
+// Optional debug logger. When unavailable (e.g. tests), warn/error calls
+// degrade to no-ops instead of crashing the whole module.
+let intelLog = () => {};
+try { ({ intelLog } = require('./intel-debug')); } catch { /* optional */ }
+
 const HANDOFF_FILENAME = '.si-handoff.json';
 const GIT_EXEC_OPTS = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 };
 const CURRENT_TASK_STALE_HOURS = 12;
@@ -34,13 +39,18 @@ function handoffPath(projectDir) {
   return path.join(projectDir, HANDOFF_FILENAME);
 }
 
+const IN_FLIGHT_CAP = 20;
+
 function gitPorcelain(cwd) {
   try {
     const out = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], GIT_EXEC_OPTS);
-    return out.split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .slice(0, 20);
+    const all = out.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (all.length <= IN_FLIGHT_CAP) return all;
+    // Signal the truncation so the model doesn't silently plan against a
+    // subset. The sentinel carries the hidden count so the user can see at
+    // a glance that "finish these before starting new work" is incomplete.
+    const extra = all.length - IN_FLIGHT_CAP;
+    return [...all.slice(0, IN_FLIGHT_CAP), `   ... and ${extra} more (truncated)`];
   } catch { return []; }
 }
 
@@ -56,51 +66,17 @@ function gitRecentCommits(cwd, sinceMs) {
   } catch { return []; }
 }
 
-// Mirror of si-pre-compact.js's stripPlaceholderLines + parseSessionContext.
-// Duplicated intentionally so handoff.js stays standalone — pulling it in
-// from the hook file would couple every consumer of handoff to that file's
-// internal state.
-function stripPlaceholderLines(text) {
-  return text
-    .split('\n')
-    .filter((line) => {
-      const t = line.trim();
-      if (!t) return true;
-      if (t.startsWith('#')) return true;
-      if (/^\(.*\)$/.test(t)) return false;
-      return true;
-    })
-    .join('\n')
-    .trim();
-}
-
-function parseSessionContextSections(content) {
-  const sections = {};
-  let current = null;
-  for (const line of content.split('\n')) {
-    const m = line.match(/^##\s+(.+)/);
-    if (m) { current = m[1].trim(); sections[current] = []; }
-    else if (current) sections[current].push(line);
-  }
-  for (const k of Object.keys(sections)) {
-    sections[k] = stripPlaceholderLines(sections[k].join('\n'));
-  }
-  return sections;
-}
+// Session-context parsing lives in ./session-context.js — single source of
+// truth for placeholder stripping, autofill detection, and section
+// extraction. We re-export the legacy helpers via `_internal` so existing
+// tests (and the `_internal` export at the bottom of this file) stay
+// backwards-compatible.
+const sessionCtx = require('./session-context');
+const parseSessionContextSections = sessionCtx.parseSessionContext;
 
 function readSessionContext(projectDir) {
-  if (!projectDir) return { currentTask: '', keyFiles: '', mtimeMs: 0 };
-  const file = path.join(projectDir, 'session-context.md');
-  try {
-    const stat = fs.statSync(file);
-    const content = fs.readFileSync(file, 'utf8');
-    const sections = parseSessionContextSections(content);
-    return {
-      currentTask: sections['Current Task'] || '',
-      keyFiles: sections['Key Files'] || '',
-      mtimeMs: stat.mtimeMs,
-    };
-  } catch { return { currentTask: '', keyFiles: '', mtimeMs: 0 }; }
+  const { currentTask, keyFiles, mtimeMs } = sessionCtx.readSessionContext(projectDir);
+  return { currentTask, keyFiles, mtimeMs };
 }
 
 /**
@@ -238,7 +214,18 @@ function writeHandoff(opts) {
   try {
     fs.writeFileSync(handoffPath(projectDir), JSON.stringify(handoff, null, 2) + '\n');
     return true;
-  } catch { return false; }
+  } catch (err) {
+    // Distinguishable from the intentional "no strong signal" skip: the
+    // caller treats both as `wrote: false`, but this one leaves a log
+    // trail so a disk-full / permissions / bad-path regression is
+    // diagnosable after the fact.
+    intelLog('handoff', 'warn', 'writeHandoff failed', {
+      path: handoffPath(projectDir),
+      code: err && err.code,
+      err: err && err.message,
+    });
+    return false;
+  }
 }
 
 /**
@@ -253,19 +240,65 @@ function writeHandoff(opts) {
 function readAndRenderHandoff(projectDir) {
   if (!projectDir) return '';
   const file = handoffPath(projectDir);
-  let handoff;
-  try { handoff = JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch { return ''; }
 
-  // Stale handoff (>1h) — don't replay, just remove.
+  // Atomic consume: rename-to-owned before read so two concurrent Claude
+  // sessions opened on the same repo don't both replay the same handoff.
+  // rename() on POSIX is atomic within a filesystem; the process that wins
+  // the rename proceeds, the loser gets ENOENT and returns empty.
+  const owned = `${file}.${process.pid}.${Date.now()}`;
+  try { fs.renameSync(file, owned); }
+  catch (err) {
+    // ENOENT is the normal "no handoff to consume" case — silent.
+    // Anything else (EACCES, EBUSY on Windows) is worth a trail.
+    if (err && err.code !== 'ENOENT') {
+      intelLog('handoff', 'warn', 'handoff rename failed', { file, code: err.code, err: err.message });
+    }
+    return '';
+  }
+
+  let handoff;
+  try { handoff = JSON.parse(fs.readFileSync(owned, 'utf8')); }
+  catch (err) {
+    intelLog('handoff', 'warn', 'handoff parse failed', { code: err && err.code, err: err && err.message });
+    try { fs.unlinkSync(owned); } catch { /* ignore */ }
+    return '';
+  }
+
+  // Stale handoff (>1h) — don't replay, just clean up.
   if (handoff && Number.isFinite(handoff.t) && Date.now() - handoff.t > 3600000) {
-    try { fs.unlinkSync(file); } catch { /* ignore */ }
+    try { fs.unlinkSync(owned); } catch { /* ignore */ }
     return '';
   }
 
   const block = renderHandoffBlock(handoff);
-  try { fs.unlinkSync(file); } catch { /* one-shot; ignore cleanup failure */ }
+  // Mirror a compact banner to stderr. SessionStart's stdout is a JSON
+  // payload for the model; stderr is the only channel where the user
+  // can actually SEE that the resume fired.
+  try { process.stderr.write(renderHandoffBanner(handoff) + '\n'); } catch { /* ignore */ }
+  try { fs.unlinkSync(owned); } catch { /* one-shot; ignore cleanup failure */ }
   return block;
+}
+
+// Short user-facing banner — first line of the task plus counts of the
+// other signals. Kept to 2-4 lines so it doesn't flood the transcript.
+function renderHandoffBanner(handoff) {
+  if (!handoff) return '';
+  const taskFirstLine = String(handoff.currentTask || '').split('\n').find((l) => l.trim()) || '';
+  const head = taskFirstLine
+    ? `\u2192 resuming: ${taskFirstLine.trim().slice(0, 100)}`
+    : '\u2192 resuming previous session';
+  const parts = [];
+  if (Array.isArray(handoff.inFlightFiles) && handoff.inFlightFiles.length) {
+    parts.push(`${handoff.inFlightFiles.length} in-flight`);
+  }
+  if (Array.isArray(handoff.recentCommits) && handoff.recentCommits.length) {
+    parts.push(`${handoff.recentCommits.length} commits`);
+  }
+  if (Array.isArray(handoff.nextPriorities) && handoff.nextPriorities.length) {
+    parts.push(`${handoff.nextPriorities.length} follow-ups`);
+  }
+  const tail = parts.length ? `  (${parts.join(', ')})` : '';
+  return `[session-intelligence] ${head}${tail}`;
 }
 
 function renderHandoffBlock(handoff) {
@@ -314,6 +347,7 @@ module.exports = {
   writeHandoff,
   readAndRenderHandoff,
   renderHandoffBlock,
+  renderHandoffBanner,
   handoffPath,
   _internal: {
     parseSessionContextSections,

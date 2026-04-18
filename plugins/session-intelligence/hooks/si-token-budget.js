@@ -138,11 +138,15 @@ async function main() {
   // touched, so suggest-compact and pre-compact can generate grounded
   // preserve/drop hints instead of generic "consider /compact". Observation
   // only — decisions happen elsewhere. Never fails the hook.
+  // Load config once — used both for shape tracking (rootDirDepth, maxEntries)
+  // and for zone-crossover messages below (statusline.zones). Loading outside
+  // the shape-tracking try so a shape error doesn't leave `cfg` unbound when
+  // getZone() runs.
+  const cfg = loadSiConfig();
   try {
     const toolName = (parsedInput && parsedInput.tool_name) || '';
     const toolInput = (parsedInput && parsedInput.tool_input) || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
-    const cfg = loadSiConfig();
     const depth = (cfg && cfg.shape && Number.isFinite(cfg.shape.rootDirDepth))
       ? cfg.shape.rootDirDepth : 2;
     const root = rootDirOf(filePath, depth);
@@ -198,9 +202,13 @@ async function main() {
     intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });
   }
 
-  // Log at zone boundaries (only when crossing, not every call)
-  const prevZone = getZone(cumulative - callTokens);
-  const newZone = getZone(cumulative);
+  // Log at zone boundaries (only when crossing, not every call). Zones come
+  // from statusline.zones so token-budget, statusline, and suggest-compact
+  // report the SAME zone for a given token count — mismatched thresholds
+  // produce incoherent "orange at 300k in log, 350k in statusline" UX.
+  const zones = resolveZones(cfg);
+  const prevZone = getZone(cumulative - callTokens, zones);
+  const newZone = getZone(cumulative, zones);
 
   if (newZone !== prevZone && newZone !== 'green') {
     const messages = {
@@ -217,11 +225,27 @@ async function main() {
   process.exit(0);
 }
 
-function getZone(tokens) {
-  if (tokens >= 400000) return 'red';
-  if (tokens >= 300000) return 'orange';
-  if (tokens >= 200000) return 'yellow';
+function getZone(tokens, zones) {
+  const z = zones || DEFAULT_ZONES;
+  if (tokens >= z.red) return 'red';
+  if (tokens >= z.orange) return 'orange';
+  if (tokens >= z.yellow) return 'yellow';
   return 'green';
+}
+
+// Same defaults as lib/config.js DEFAULTS.statusline.zones. Duplicated with
+// intent — if the config module is missing, we still want reasonable zones
+// rather than throwing.
+const DEFAULT_ZONES = { yellow: 200000, orange: 300000, red: 400000 };
+
+function resolveZones(cfg) {
+  const fromCfg = cfg && cfg.statusline && cfg.statusline.zones;
+  if (!fromCfg) return DEFAULT_ZONES;
+  return {
+    yellow: Number.isFinite(fromCfg.yellow) ? fromCfg.yellow : DEFAULT_ZONES.yellow,
+    orange: Number.isFinite(fromCfg.orange) ? fromCfg.orange : DEFAULT_ZONES.orange,
+    red:    Number.isFinite(fromCfg.red)    ? fromCfg.red    : DEFAULT_ZONES.red,
+  };
 }
 
 function formatTokens(n) {
@@ -231,7 +255,10 @@ function formatTokens(n) {
 }
 
 main().catch(err => {
+  // exit(1) so the hook pipeline sees the failure. See si-pre-compact.js
+  // for the rationale — crashes in the shape-append / regret-check paths
+  // would otherwise ship as silent "success" and hide regressions.
   console.error('[TokenBudget] Error:', err.message);
-  intelLog('token-budget', 'error', 'hook crashed', { err: err.message });
-  process.exit(0);
+  intelLog('token-budget', 'error', 'hook crashed', { err: err.message, stack: err.stack });
+  process.exit(1);
 });
