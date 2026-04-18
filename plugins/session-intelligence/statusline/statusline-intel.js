@@ -61,7 +61,7 @@ function loadConfig() {
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
-    maxTaskLength: 70,
+    maxTaskLength: 40,
     separator: ' · ',
     colors: true,
     serviceHealth: [],
@@ -317,7 +317,7 @@ function readSessionContextTask(projectDir) {
 //   3. Last git commit subject — auto-refreshes every commit so the bar
 //      keeps reflecting actual work even when the file is never updated.
 //   4. empty.
-function loadCurrentTask(projectDir, cwd, maxLen = 60, staleHours = 12) {
+function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
   const fromFile = readSessionContextTask(projectDir);
   if (fromFile && fromFile.text) {
     const ageMs = Date.now() - fromFile.mtimeMs;
@@ -518,6 +518,14 @@ function buildRenderers(C) {
     // context FOR that signal — making them bright just adds noise.
     model: (input) => {
       const m = input.model?.display_name || input.model?.id || 'claude';
+      // "Effort" = reasoning/output-style mode. Claude Code exposes this via
+      // input.output_style (string OR {name}). Shown beside the model name so
+      // the bar tells you "which Claude + in what mode" in one glance.
+      const styleRaw = input.output_style;
+      const style = typeof styleRaw === 'string' ? styleRaw : (styleRaw && styleRaw.name) || '';
+      if (style && style !== 'default') {
+        return `${C.dim}${m} · ${style}${C.reset}`;
+      }
       return `${C.dim}${m}${C.reset}`;
     },
 
@@ -531,7 +539,7 @@ function buildRenderers(C) {
     dirty: (input) => {
       const n = gitDirtyCount(input.cwd);
       if (n === 0) return '';
-      return `${C.dim}\u00b1${n}${C.reset}`;
+      return `${C.yellow}\u00b1${n}${C.reset}`;
     },
 
     tokens: (input, ctx) => {
@@ -593,7 +601,7 @@ function buildRenderers(C) {
     diffstat: (input, _ctx) => {
       const s = gitDiffStat(input.cwd);
       if (!s.added && !s.deleted) return '';
-      return `${C.dim}(+${s.added},-${s.deleted})${C.reset}`;
+      return `${C.gray}(${C.green}+${s.added}${C.gray},${C.red}-${s.deleted}${C.gray})${C.reset}`;
     },
 
     /** GH issue number (#164) parsed from branch or current task. */
@@ -820,7 +828,7 @@ function main() {
   const projectDir = resolveProjectDir(cwd);
   const staleHours = Number.isFinite(cfg.taskStaleHours) ? cfg.taskStaleHours : 12;
   const taskInfo = cfg.fields.includes('task')
-    ? loadCurrentTask(projectDir, cwd, cfg.maxTaskLength || 60, staleHours)
+    ? loadCurrentTask(projectDir, cwd, cfg.maxTaskLength || 40, staleHours)
     : { text: '', source: 'none' };
 
   const ctx = {

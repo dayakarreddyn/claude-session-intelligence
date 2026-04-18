@@ -41,7 +41,7 @@ const DEFAULTS = {
     fields: STATUSLINE_PRESETS.verbose.slice(),
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
-    maxTaskLength: 60,
+    maxTaskLength: 40,
     separator: ' · ',
     colors: true,
     serviceHealth: [],
