@@ -662,7 +662,13 @@ function buildContinuationAdditionalContext(cwd) {
     const projectDir = resolveProjectDir(cwd);
     if (!projectDir) return '';
     const handoff = require('../lib/handoff');
-    return handoff.readAndRenderHandoff(projectDir);
+    const block = handoff.readAndRenderHandoff(projectDir);
+    if (!block) return '';
+    // Wrap with a model-echo directive so the resume banner actually reaches
+    // the user. On source=compact, Claude Code suppresses SessionStart hook
+    // stderr AND drops the systemMessage field — the only user-visible
+    // surface is the model's chat output. See wrapHandoffForModelEcho.
+    return handoff.wrapHandoffForModelEcho(block);
   } catch (err) {
     intelLog('bootstrap', errLogLevel(err), 'handoff read failed', {
       err: err && err.message,

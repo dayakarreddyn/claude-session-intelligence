@@ -310,11 +310,12 @@ function readAndRenderHandoff(projectDir) {
   return block;
 }
 
-// Produce the user-visible stderr rendering: the full block wrapped in a
-// banner so it surfaces in Claude Code's "SessionStart completed successfully"
-// transcript line. SessionStart stdout is reserved for the JSON
-// additionalContext payload, so stderr is the only channel the user actually
-// sees on the CLI. Separate function — the caller chooses whether to display.
+// Produce the banner wrapping for the resume block. Used by both the stderr
+// fallback (non-compact sessions + operator debugging) and the model-echo
+// directive (the sole user-visible channel on source=compact — Claude Code
+// suppresses SessionStart hook stderr and ignores systemMessage for compact
+// resume, so the only way the user sees this banner is for the model to
+// print it verbatim at the start of its reply).
 function renderHandoffStderr(block) {
   if (!block) return '';
   const div = '\u2501'.repeat(51);
@@ -326,6 +327,24 @@ function renderHandoffStderr(block) {
     block,
     div,
     '',
+  ].join('\n');
+}
+
+// Wrap the handoff for delivery via SessionStart additionalContext. Prefixes
+// an explicit directive instructing the model to echo the banner verbatim at
+// the start of its next reply — this is the user-visible channel on
+// source=compact (see renderHandoffStderr comment for why other channels fail).
+function wrapHandoffForModelEcho(block) {
+  if (!block) return '';
+  const banner = renderHandoffStderr(block);
+  return [
+    'SESSION RESUME — display to user:',
+    '',
+    'At the START of your next reply, print the block between the markers below VERBATIM (preserve the \u2501 dividers and line breaks exactly). Do not paraphrase, summarise, or wrap in code fences. After printing it, continue with the task.',
+    '',
+    '---BEGIN RESUME BLOCK---',
+    banner.replace(/\n+$/, ''),
+    '---END RESUME BLOCK---',
   ].join('\n');
 }
 
@@ -399,6 +418,7 @@ module.exports = {
   renderHandoffBlock,
   renderHandoffBanner,
   renderHandoffStderr,
+  wrapHandoffForModelEcho,
   handoffPath,
   _internal: {
     parseSessionContextSections,
