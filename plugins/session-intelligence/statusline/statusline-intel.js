@@ -1016,21 +1016,24 @@ function main() {
     return leading + rest.map((r) => r.text).join(sep);
   };
 
-  const lines = groups.map(renderGroup).filter((l) => l.length > 0);
-
-  // If a line's first field is one of our emoji pseudo-fields, it already
-  // carries its own width. Only lines without a leading emoji need indent
-  // to align under the line-1 emoji column (3 cells for typical 2-col emoji).
+  // Render every configured group, INCLUDING empty ones. Dropping empty
+  // groups makes the bar height fluctuate as fields pop in/out (task
+  // populates, session crosses 1m, deploy breadcrumb ages past the window
+  // etc.) — from the user's perspective the prompt above keeps moving up
+  // and down. Reserving a blank row per configured group keeps the layout
+  // append-only: once a line slot exists, it stays there for the session.
   const firstLineHasEmoji = groups.length > 0 && groups[0][0] === 'emoji';
   const indent = firstLineHasEmoji ? '   ' : '';
-  const finalLines = lines.map((l, i) => {
-    if (i === 0) return l;
-    const firstField = groups[i] && groups[i][0];
+  const finalLines = groups.map((group, i) => {
+    const rendered = renderGroup(group);
+    if (i === 0) return rendered || 'claude';
+    if (!rendered) return ' '; // reserve the row slot (whitespace is a visible line)
+    const firstField = group[0];
     const leadsWithEmoji = firstField === 'emoji' || firstField === 'emoji2';
-    return leadsWithEmoji ? l : indent + l;
+    return leadsWithEmoji ? rendered : indent + rendered;
   });
 
-  process.stdout.write(finalLines.length ? finalLines.join('\n') : 'claude');
+  process.stdout.write(finalLines.join('\n'));
 }
 
 try { main(); } catch { process.stdout.write('claude'); }
