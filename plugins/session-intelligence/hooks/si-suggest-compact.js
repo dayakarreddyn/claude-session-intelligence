@@ -74,6 +74,8 @@ async function main() {
   const fullCfg = loadSiConfig();
   const cfg = fullCfg.compact || {};
   const learnCfg = fullCfg.learn || {};
+  const shapeCfg = fullCfg.shape || {};
+  const preserveGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
   const stdinInput = readStdinJson();
   const rawSid = (stdinInput && (stdinInput.session_id || stdinInput.sessionId))
     || process.env.CLAUDE_SESSION_ID
@@ -207,7 +209,7 @@ async function main() {
       // token-budget-tracker has been writing observation entries per tool
       // call. analyzeShape returns null when there isn't enough signal to
       // bother (short sessions, no file paths), which we handle below.
-      const shape = analyzeShape(readShape(sessionId));
+      const shape = analyzeShape(readShape(sessionId), { preserveGlobs });
       const diagnosis = draftMessage(shape);
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';

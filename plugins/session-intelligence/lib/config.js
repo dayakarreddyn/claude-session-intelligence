@@ -71,6 +71,19 @@ const DEFAULTS = {
     //   3 → `packages/core/src`   (deep — monorepos with packages/*)
     // Clamped 1..5 at read time. See context-shape.js::rootDirOf.
     rootDirDepth: 2,
+    // Ring-buffer cap for /tmp/claude-ctx-shape-<sid>.jsonl. 200 is fine
+    // for small repos; large monorepos with frequent tool calls need more
+    // so the banding window isn't "recent 5 min vs last 30 min". Clamped
+    // to [50, 2000] at read time.
+    maxEntries: 200,
+    // Glob patterns whose files/roots force-bubble into the HOT band
+    // regardless of recency. For planning docs, task trackers, and
+    // architecture notes that get read heavily early then sit idle — pure
+    // recency banding would flag them SAFE TO DROP, but they're the
+    // load-bearing intent of the session. Matched against the `file`
+    // field of each shape entry and against the `root` itself. Empty by
+    // default — opt in per-repo.
+    preserveGlobs: [],
   },
   learn: {
     // When true and adaptive zones (compact-history derived) materially

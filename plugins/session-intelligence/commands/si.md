@@ -18,6 +18,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si explain <key>                         # describe what a key does
 /si configure                             # walk every key one at a time, review combined diff, confirm
 /si migrate                               # import legacy ~/.claude/statusline-intel.json
+/si tail                                  # show latest intel log + shape log for this session
 ```
 
 Keys use dotted paths. Values parse as JSON when possible, else plain string.
@@ -74,6 +75,14 @@ Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's std
 **`configure`** — Interactive per-key wizard. See the dedicated section below.
 
 **`migrate`** — If `~/.claude/statusline-intel.json` exists, read it, nest its keys under `"statusline"`, merge into the unified config, show the diff, and wait for YES before writing. Keep the legacy file on disk as a backup.
+
+**`tail`** — Read-only snapshot for debugging. Print, in order, with horizontal rule separators between sections:
+
+1. Last 20 lines of today's intel log: `~/.claude/logs/session-intel-<YYYY-MM-DD>.log`. If the file is missing, say so and suggest `/si set debug.enabled true` if the user wants more verbose logging.
+2. Last 20 lines of the shape log for the current session: `/tmp/claude-ctx-shape-<sid>.jsonl`. Resolve `<sid>` from the hook stdin `session_id`. Pretty-print each JSONL entry as `tok=<n>k tool=<Name> root=<root> file=<file> event=<event>` — drop any null fields. If no shape file exists, say "no tool calls observed yet for this session."
+3. Last 10 adaptive-zones announcements (`~/.claude/logs/adaptive-zones-announced.json`) — a small JSON object keyed by cwd. Relevant when debugging why zones are or aren't adapting.
+
+No diff, no config write, no subagents. This is a "what is the plugin doing right now" view. Emit three clear section headers (`INTEL LOG`, `SHAPE LOG`, `ADAPTIVE ZONES`) so the user can navigate the output quickly.
 
 ### `configure` — interactive per-key wizard
 

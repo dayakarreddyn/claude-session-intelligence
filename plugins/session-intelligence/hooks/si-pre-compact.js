@@ -209,6 +209,16 @@ async function main() {
   const cwd = stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir) || process.cwd();
   const projectDir = resolveProjectDir(cwd);
 
+  // One config load for the whole hook — shape analysis (preserveGlobs),
+  // memory-offload gating, and any future knobs all read from this.
+  // Missing config.js falls through to an empty object; downstream
+  // callers defensively handle nullish fields.
+  let siCfg = {};
+  try { siCfg = require(path.join(SI_LIB, 'config')).loadConfig() || {}; }
+  catch { /* optional */ }
+  const preserveGlobs = (siCfg.shape && Array.isArray(siCfg.shape.preserveGlobs))
+    ? siCfg.shape.preserveGlobs : [];
+
   // Shape hints pulled from the live tool-usage history for THIS session id
   // (same session id every other hook uses). Generated fresh at compact-time
   // so we never feed the model stale hot/cold bands.
@@ -225,7 +235,7 @@ async function main() {
   if (ctxShape) {
     try {
       const entries = ctxShape.readShape(sessionId);
-      const analysis = ctxShape.analyzeShape(entries);
+      const analysis = ctxShape.analyzeShape(entries, { preserveGlobs });
       if (analysis) {
         shapeInjection = ctxShape.formatCompactInjection(analysis);
       }
@@ -236,6 +246,7 @@ async function main() {
         hot: analysis ? analysis.hot.length : 0,
         cold: analysis ? analysis.cold.length : 0,
         staleTokens: analysis ? analysis.staleTokens : 0,
+        allowlisted: analysis ? analysis.hot.filter((h) => h.allowlisted).length : 0,
       });
     } catch (err) {
       intelLog('pre-compact', 'warn', 'shape analysis failed', { err: err && err.message });
@@ -276,12 +287,7 @@ async function main() {
   // users who don't want this can disable (CLAUDE_COMPACT_MEMORY_OFFLOAD=0
   // or compact.memoryOffload:false in ~/.claude/session-intelligence.json).
   let memoryOffload = '';
-  try {
-    const cfg = require(path.join(SI_LIB, 'config')).loadConfig();
-    if (cfg && cfg.compact && cfg.compact.memoryOffload !== false) {
-      memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
-    }
-  } catch { /* config optional — default is to emit the block */
+  if (!siCfg.compact || siCfg.compact.memoryOffload !== false) {
     memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
   }
 
@@ -321,7 +327,7 @@ async function main() {
   if (compactHistory && ctxShape) {
     try {
       const entries = ctxShape.readShape(sessionId);
-      const analysis = ctxShape.analyzeShape(entries);
+      const analysis = ctxShape.analyzeShape(entries, { preserveGlobs });
 
       // tokens-at-compact = last observed cumulative budget, fallback to 0.
       // cost-at-compact  = same, best-effort from transcript.

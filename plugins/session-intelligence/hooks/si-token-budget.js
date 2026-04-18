@@ -161,6 +161,8 @@ async function main() {
     // Only append entries that carry a signal — a pure Bash echo with no file
     // and no event adds noise without informing the analyzer.
     if (root || event) {
+      const maxEntries = (cfg && cfg.shape && Number.isFinite(cfg.shape.maxEntries))
+        ? cfg.shape.maxEntries : undefined;
       appendShape(sessionId, {
         t: Date.now(),
         tok: cumulative,
@@ -168,7 +170,7 @@ async function main() {
         root: root || null,
         file: filePath ? String(filePath) : null,
         event,
-      });
+      }, { maxEntries });
     }
 
     // Post-compact regret monitoring: if there's a live snapshot (written by

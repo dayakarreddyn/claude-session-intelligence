@@ -28,13 +28,68 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const MAX_ENTRIES = 200;
-const MAX_BYTES = 128 * 1024; // hard cap on the jsonl file
+const DEFAULT_MAX_ENTRIES = 200;
+const MAX_ENTRIES_HARD_CEILING = 2000; // above this the byte cap kicks in first anyway
+const MAX_ENTRIES_FLOOR = 50;
+const MAX_BYTES_PER_ENTRY = 640; // ~empirical — covers typical entry with samples
 const SHIFT_WINDOW = 10;
 const SHIFT_JACCARD_THRESHOLD = 0.3;
 const HOT_FRACTION = 0.2;   // last 20% of token-span → HOT
 const WARM_FRACTION = 0.6;  // last 60% → WARM (else COLD)
 const MIN_STALE_TO_MENTION = 20000; // don't cite stale bands smaller than this
+
+// Minimal glob → regex. Supports:
+//   **       — zero or more path segments (incl. empty)
+//   *        — zero or more chars within a segment (no /)
+//   ?        — single non-/ char
+//   literals — quoted via regex escape
+// Intentionally NOT a full minimatch — keeps the module dep-free. Patterns
+// compile once per analyze call; cheap enough that caching is not worth
+// the complexity.
+function compileGlob(pattern) {
+  if (typeof pattern !== 'string' || !pattern) return null;
+
+  // Normalise trailing `/**` so `plans/**` matches `plans` itself and
+  // anything beneath — otherwise pure recency-banded directory roots
+  // (which store as the bare prefix) miss the allowlist.
+  let p = pattern;
+  let optionalTail = '';
+  if (p.endsWith('/**')) {
+    p = p.slice(0, -3);
+    optionalTail = '(?:/.*)?';
+  }
+
+  let re = '^';
+  let i = 0;
+  while (i < p.length) {
+    const ch = p[i];
+    if (ch === '*' && p[i + 1] === '*') {
+      if (p[i + 2] === '/') { re += '(?:.*/)?'; i += 3; }
+      else                  { re += '.*';        i += 2; }
+    } else if (ch === '*') {
+      re += '[^/]*'; i++;
+    } else if (ch === '?') {
+      re += '[^/]';  i++;
+    } else if ('.+^$()|{}[]\\'.includes(ch)) {
+      re += '\\' + ch; i++;
+    } else {
+      re += ch; i++;
+    }
+  }
+  re += optionalTail + '$';
+  try { return new RegExp(re); } catch { return null; }
+}
+
+function matchesAnyGlob(candidate, regexes) {
+  if (!candidate || !regexes || regexes.length === 0) return false;
+  for (const re of regexes) if (re && re.test(candidate)) return true;
+  return false;
+}
+
+function compilePreserveGlobs(globs) {
+  if (!Array.isArray(globs)) return [];
+  return globs.map(compileGlob).filter(Boolean);
+}
 
 function shapeFilePath(sessionId) {
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
@@ -77,36 +132,50 @@ function rootDirOf(filePath, depth) {
   return isAbs ? `/${root}` : root;
 }
 
+function clampMaxEntries(n) {
+  if (!Number.isFinite(n)) return DEFAULT_MAX_ENTRIES;
+  const floored = Math.max(MAX_ENTRIES_FLOOR, Math.floor(n));
+  return Math.min(MAX_ENTRIES_HARD_CEILING, floored);
+}
+
 /**
- * Append one observation entry. Truncates to MAX_ENTRIES when the file
- * grows past MAX_BYTES. Best-effort: failures never propagate.
+ * Append one observation entry. Truncates to `maxEntries` (default 200,
+ * clamped to [50, 2000]) when the file grows past the derived byte cap.
+ * Best-effort: failures never propagate.
+ *
+ * @param {string} sessionId
+ * @param {object} entry
+ * @param {{ maxEntries?: number }} [opts]
  */
-function appendShape(sessionId, entry) {
+function appendShape(sessionId, entry, opts) {
   if (!sessionId || !entry) return;
+  const maxEntries = clampMaxEntries(opts && opts.maxEntries);
+  const maxBytes = maxEntries * MAX_BYTES_PER_ENTRY;
   const file = shapeFilePath(sessionId);
   const line = JSON.stringify(entry) + '\n';
   try {
     fs.appendFileSync(file, line);
     const stat = fs.statSync(file);
-    if (stat.size > MAX_BYTES) {
+    if (stat.size > maxBytes) {
       const buf = fs.readFileSync(file, 'utf8');
       const lines = buf.split('\n').filter(Boolean);
-      if (lines.length > MAX_ENTRIES) {
-        fs.writeFileSync(file, lines.slice(-MAX_ENTRIES).join('\n') + '\n');
+      if (lines.length > maxEntries) {
+        fs.writeFileSync(file, lines.slice(-maxEntries).join('\n') + '\n');
       }
     }
   } catch { /* best effort — tracker must not break the hook */ }
 }
 
 /** Read the last `limit` entries. Returns [] when missing / unreadable. */
-function readShape(sessionId, limit = MAX_ENTRIES) {
+function readShape(sessionId, limit) {
   if (!sessionId) return [];
+  const cap = Number.isFinite(limit) ? clampMaxEntries(limit) : MAX_ENTRIES_HARD_CEILING;
   const file = shapeFilePath(sessionId);
   try {
     const buf = fs.readFileSync(file, 'utf8');
     const lines = buf.split('\n').filter(Boolean);
     return lines
-      .slice(-limit)
+      .slice(-cap)
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean);
   } catch { return []; }
@@ -115,8 +184,15 @@ function readShape(sessionId, limit = MAX_ENTRIES) {
 /**
  * Classify observation history into HOT / WARM / COLD bands and detect a
  * domain shift. Returns `null` when there isn't enough signal to bother.
+ *
+ * @param {Array} entries — output of readShape()
+ * @param {{ preserveGlobs?: string[] }} [opts] — user-configured
+ *   allowlist. Any root or any of its sample files matching one of these
+ *   globs force-promotes the root to HOT (tagged `allowlisted: true`),
+ *   regardless of recency banding. Intended for planning/docs/task dirs
+ *   that get read heavily early and sit idle thereafter.
  */
-function analyzeShape(entries) {
+function analyzeShape(entries, opts) {
   if (!Array.isArray(entries) || entries.length < 5) return null;
 
   // Only entries with a usable rootDir contribute to banding.
@@ -131,11 +207,14 @@ function analyzeShape(entries) {
   const hotCutoff  = lastTok - span * HOT_FRACTION;
   const warmCutoff = lastTok - span * WARM_FRACTION;
 
+  const preserveRegexes = compilePreserveGlobs(opts && opts.preserveGlobs);
+
   // Aggregate per rootDir: first/last token-offset, count, sample file paths.
   const roots = new Map();
   for (const e of withRoot) {
     const cur = roots.get(e.root) || {
       root: e.root, first: e.tok, last: e.tok, count: 0, samples: [],
+      allowlisted: false,
     };
     cur.first = Math.min(cur.first, e.tok);
     cur.last  = Math.max(cur.last, e.tok);
@@ -143,14 +222,23 @@ function analyzeShape(entries) {
     if (cur.samples.length < 3 && e.file && !cur.samples.includes(e.file)) {
       cur.samples.push(e.file);
     }
+    // Allowlist check — match either the root itself or any file under it.
+    // Idempotent: once set, no need to recompute.
+    if (!cur.allowlisted && preserveRegexes.length) {
+      if (matchesAnyGlob(e.root, preserveRegexes)
+          || (e.file && matchesAnyGlob(e.file, preserveRegexes))) {
+        cur.allowlisted = true;
+      }
+    }
     roots.set(e.root, cur);
   }
 
   const hot = [], warm = [], cold = [];
   for (const info of roots.values()) {
-    if (info.last >= hotCutoff) hot.push(info);
-    else if (info.last >= warmCutoff) warm.push(info);
-    else cold.push(info);
+    if (info.allowlisted)              hot.push(info);
+    else if (info.last >= hotCutoff)   hot.push(info);
+    else if (info.last >= warmCutoff)  warm.push(info);
+    else                               cold.push(info);
   }
 
   // Sort within each band, most-recent-touched first.
@@ -249,7 +337,8 @@ function formatCompactInjection(analysis) {
     lines.push('PRESERVE (recently active, still in use):');
     for (const h of analysis.hot) {
       const files = h.samples.length ? ` — e.g. ${h.samples.slice(0, 2).join(', ')}` : '';
-      lines.push(`  - ${h.root} (${h.count} calls)${files}`);
+      const tag = h.allowlisted ? ' [allowlisted]' : '';
+      lines.push(`  - ${h.root} (${h.count} calls)${tag}${files}`);
     }
   }
 
@@ -286,5 +375,9 @@ module.exports = {
   draftMessage,
   formatCompactInjection,
   shapeFilePath, // exported for tests / cleanup
-  _thresholds: { HOT_FRACTION, WARM_FRACTION, SHIFT_JACCARD_THRESHOLD, MIN_STALE_TO_MENTION },
+  compileGlob,   // exported for tests
+  _thresholds: {
+    HOT_FRACTION, WARM_FRACTION, SHIFT_JACCARD_THRESHOLD, MIN_STALE_TO_MENTION,
+    DEFAULT_MAX_ENTRIES, MAX_ENTRIES_FLOOR, MAX_ENTRIES_HARD_CEILING,
+  },
 };
