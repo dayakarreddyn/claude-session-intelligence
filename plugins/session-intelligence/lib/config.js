@@ -60,6 +60,22 @@ const DEFAULTS = {
     prompt: true,
     promptTimeout: 20,
   },
+  shape: {
+    // How many path segments define a "rootDir" in the shape tracker.
+    //   1 → `src`                 (coarser — good for small repos)
+    //   2 → `src/auth`            (default — balances feature separation)
+    //   3 → `packages/core/src`   (deep — monorepos with packages/*)
+    // Clamped 1..5 at read time. See context-shape.js::rootDirOf.
+    rootDirDepth: 2,
+  },
+  learn: {
+    // When true and adaptive zones (compact-history derived) materially
+    // differ from the last time they were shown to the user, the next
+    // zone-crossover feedback tacks on a one-line "(zones moved: ...)"
+    // hint. Opt-in because silent adaptation is the shipped default —
+    // users who want visibility into the learning loop enable this.
+    announce: false,
+  },
   debug: {
     enabled: false,             // verbose debug logs
     quiet: false,               // suppress everything except errors
@@ -143,6 +159,13 @@ function applyEnvOverrides(cfg) {
   if (env.CLAUDE_COMPACT_MEMORY_OFFLOAD === '0') cfg.compact.memoryOffload = false;
 
   if (env.CLAUDE_TASK_CHANGE === '0') cfg.taskChange.enabled = false;
+
+  if (env.CLAUDE_SHAPE_ROOT_DIR_DEPTH) {
+    const n = parseInt(env.CLAUDE_SHAPE_ROOT_DIR_DEPTH, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 5) cfg.shape.rootDirDepth = n;
+  }
+  if (env.CLAUDE_LEARN_ANNOUNCE === '1') cfg.learn.announce = true;
+  if (env.CLAUDE_LEARN_ANNOUNCE === '0') cfg.learn.announce = false;
 
   if (env.CLAUDE_INTEL_DEBUG === '1') cfg.debug.enabled = true;
   if (env.CLAUDE_INTEL_QUIET === '1') cfg.debug.quiet = true;

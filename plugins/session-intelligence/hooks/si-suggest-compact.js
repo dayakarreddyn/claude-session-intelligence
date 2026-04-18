@@ -71,7 +71,9 @@ function loadSiConfig() {
 }
 
 async function main() {
-  const cfg = loadSiConfig().compact || {};
+  const fullCfg = loadSiConfig();
+  const cfg = fullCfg.compact || {};
+  const learnCfg = fullCfg.learn || {};
   const stdinInput = readStdinJson();
   const rawSid = (stdinInput && (stdinInput.session_id || stdinInput.sessionId))
     || process.env.CLAUDE_SESSION_ID
@@ -123,11 +125,17 @@ async function main() {
   // history when ≥5 samples are available. Otherwise fall back to the
   // static 200/300/400k defaults. adaptiveZones() is bounded ±30% from the
   // defaults so a noisy history can't silence the warnings entirely.
+  //
+  // Per-cwd bucketing: when this repo has ≥5 of its own compacts, zones
+  // derive from those alone; otherwise cross-project history is used so
+  // new repos still benefit from global learning.
+  const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
   const staticZones = { yellow: 200000, orange: 300000, red: 400000 };
   let zonesCfg = staticZones;
   try {
     if (compactHistory) {
-      zonesCfg = compactHistory.adaptiveZones(compactHistory.readHistory(), staticZones);
+      zonesCfg = compactHistory.adaptiveZones(
+        compactHistory.readHistory(), staticZones, { cwd: cwdForZones });
     }
   } catch { /* keep static */ }
 
@@ -227,9 +235,19 @@ async function main() {
         `Free-text hint after /compact still works.`
       );
       if (zonesCfg.adaptive) {
+        const scope = zonesCfg.bucket === 'cwd' ? 'this repo' : 'your history';
         lines.push(
-          `(Zones adapted to your history: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
+          `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
         );
+      }
+      // Opt-in adaptive-shift announcement (learn.announce=true). Fires
+      // once per material shift per cwd — the helper tracks state so we
+      // don't re-announce the same zones on every subsequent crossover.
+      if (learnCfg.announce === true && compactHistory && compactHistory.announceAdaptiveShift) {
+        try {
+          const shiftLine = compactHistory.announceAdaptiveShift(zonesCfg, cwdForZones);
+          if (shiftLine) lines.push(shiftLine);
+        } catch { /* best effort */ }
       }
       lines.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
       process.stderr.write(`${lines.join(' ')}\n`);

@@ -92,15 +92,36 @@ function percentiles(values) {
  * (frequently touched dropped dirs post-compact), we PUSH the orange/red
  * thresholds out rather than pull them in — the signal is "I needed that
  * context", so suggest compaction less eagerly.
+ *
+ * Per-cwd bucketing: when `opts.cwd` is passed and the cwd has ≥5 entries
+ * of its own, derive from that subset instead of mixing repos. Falls back
+ * to the full history otherwise so a new repo still benefits from global
+ * learning. Result carries `bucket: 'cwd' | 'global'` for caller logging.
  */
-function adaptiveZones(history, defaults) {
+function adaptiveZones(history, defaults, opts) {
   const base = defaults || { yellow: 200000, orange: 300000, red: 400000 };
-  if (!history || history.length < MIN_SAMPLES_FOR_ADAPTIVE) return { ...base, adaptive: false };
+  const cwd = opts && typeof opts.cwd === 'string' ? opts.cwd : null;
 
-  const tokensAtCompact = history
+  let bucket = 'global';
+  let workingHistory = history;
+  if (cwd && Array.isArray(history)) {
+    const sameCwd = history.filter((h) => h && h.cwd === cwd);
+    if (sameCwd.length >= MIN_SAMPLES_FOR_ADAPTIVE) {
+      workingHistory = sameCwd;
+      bucket = 'cwd';
+    }
+  }
+
+  if (!workingHistory || workingHistory.length < MIN_SAMPLES_FOR_ADAPTIVE) {
+    return { ...base, adaptive: false, bucket };
+  }
+
+  const tokensAtCompact = workingHistory
     .map((h) => h.tokens)
     .filter((n) => Number.isFinite(n) && n > 0);
-  if (tokensAtCompact.length < MIN_SAMPLES_FOR_ADAPTIVE) return { ...base, adaptive: false };
+  if (tokensAtCompact.length < MIN_SAMPLES_FOR_ADAPTIVE) {
+    return { ...base, adaptive: false, bucket };
+  }
 
   const p = percentiles(tokensAtCompact);
 
@@ -114,9 +135,11 @@ function adaptiveZones(history, defaults) {
 
   // Regret dampening — if recent compacts frequently caused regret, push
   // the threshold OUT so we warn later, giving the user more context budget.
-  const recentRegret = history.slice(-10)
+  // Use the bucketed history so per-cwd regret doesn't get diluted by other
+  // repos' patterns.
+  const recentRegret = workingHistory.slice(-10)
     .reduce((sum, h) => sum + (Number.isFinite(h.regretCount) ? h.regretCount : 0), 0);
-  const totalCompacts = Math.min(10, history.length);
+  const totalCompacts = Math.min(10, workingHistory.length);
   const regretRate = totalCompacts > 0 ? recentRegret / totalCompacts : 0;
   if (regretRate >= 1) {
     orange = Math.min(orangeMax, Math.round(orange * 1.1));
@@ -138,11 +161,68 @@ function adaptiveZones(history, defaults) {
   return {
     yellow, orange, red,
     adaptive: true,
+    bucket,
     sampleCount: p.count,
     p50: p.p50,
     p90: p.p90,
     regretRate: Number(regretRate.toFixed(2)),
   };
+}
+
+// ── Announce-on-shift (opt-in) ───────────────────────────────────────────
+// Keyed by cwd so per-repo zones announce independently. Announces only
+// when the current adaptive zones differ materially from what was last
+// shown to the user — "material" = any zone moved by ≥10k tokens. The
+// caller sets learn.announce=true in config to opt in.
+
+const ANNOUNCE_FILE = path.join(LOG_DIR, 'adaptive-zones-announced.json');
+const ANNOUNCE_MIN_DELTA = 10000;
+
+function readAnnounceState() {
+  try { return JSON.parse(fs.readFileSync(ANNOUNCE_FILE, 'utf8')) || {}; }
+  catch { return {}; }
+}
+
+function writeAnnounceState(state) {
+  ensureLogDir();
+  try { fs.writeFileSync(ANNOUNCE_FILE, JSON.stringify(state) + '\n'); }
+  catch { /* best effort */ }
+}
+
+/**
+ * Compare current adaptive zones to the last-announced set for this cwd.
+ * Returns a short human-readable line when there's a material shift (or
+ * no prior announcement). Returns '' when zones are unchanged / static.
+ * Side effect: updates the announce state file so the same shift isn't
+ * announced twice.
+ */
+function announceAdaptiveShift(zones, cwd) {
+  if (!zones || !zones.adaptive) return '';
+  const key = String(cwd || 'default');
+  const state = readAnnounceState();
+  const prev = state[key];
+
+  const changed = !prev
+    || Math.abs((prev.yellow || 0) - zones.yellow) >= ANNOUNCE_MIN_DELTA
+    || Math.abs((prev.orange || 0) - zones.orange) >= ANNOUNCE_MIN_DELTA
+    || Math.abs((prev.red || 0) - zones.red) >= ANNOUNCE_MIN_DELTA;
+  if (!changed) return '';
+
+  const fmt = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  const bucket = zones.bucket === 'cwd' ? ' (this repo)' : ' (all repos)';
+  let msg;
+  if (!prev) {
+    msg = `Adaptive zones engaged${bucket}: yellow=${fmt(zones.yellow)}, orange=${fmt(zones.orange)}, red=${fmt(zones.red)} from ${zones.sampleCount} past compacts.`;
+  } else {
+    msg = `Zones shifted${bucket}: orange ${fmt(prev.orange)}→${fmt(zones.orange)}, red ${fmt(prev.red)}→${fmt(zones.red)} (${zones.sampleCount} compacts).`;
+  }
+
+  state[key] = {
+    yellow: zones.yellow, orange: zones.orange, red: zones.red,
+    sampleCount: zones.sampleCount, t: Date.now(),
+  };
+  writeAnnounceState(state);
+  return msg;
 }
 
 // ── Snapshot (per-session, ephemeral) ────────────────────────────────────
@@ -238,6 +318,7 @@ module.exports = {
   readHistory,
   percentiles,
   adaptiveZones,
+  announceAdaptiveShift,
   snapshotPath,
   writeSnapshot,
   readSnapshot,
@@ -248,5 +329,6 @@ module.exports = {
     ADAPTIVE_BOUND,
     REGRET_WINDOW_CALLS,
     REGRET_WINDOW_MS,
+    ANNOUNCE_MIN_DELTA,
   },
 };

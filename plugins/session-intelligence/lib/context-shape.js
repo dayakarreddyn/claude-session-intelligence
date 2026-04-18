@@ -43,27 +43,37 @@ function shapeFilePath(sessionId) {
 
 /**
  * Reduce an arbitrary file path to a stable "rootDir" signature.
+ *
+ * Examples at depth=2 (default):
  *   src/auth/login.ts        -> src/auth
  *   tests/browser/spec.ts    -> tests/browser
  *   README.md                -> .
  *   /tmp/foo/bar             -> /tmp/foo
- *   (empty)                  -> ''
  *
- * Two-segment depth is a deliberate compromise — deeper grouping (src/auth
- * vs src/billing) keeps different features apart, but going to 3+ segments
- * fragments directories that should cluster (each test file in its own
- * "root" defeats the point).
+ * Examples at depth=3 (monorepos with packages/*):
+ *   packages/core/src/auth/login.ts -> packages/core/src
+ *
+ * depth is clamped to [1, 5]. Invalid / missing → defaults to 2. Going
+ * deeper than 3 fragments directories that should cluster (each test file
+ * in its own "root" defeats the point); going shallower collapses features
+ * into the same root (src/auth and src/billing both become `src`).
  */
-function rootDirOf(filePath) {
+function rootDirOf(filePath, depth) {
   if (!filePath || typeof filePath !== 'string') return '';
   const norm = filePath.replace(/\\/g, '/').trim();
   if (!norm) return '';
-  // Absolute paths keep their leading component for clarity.
+
+  let d = Number.isFinite(depth) ? Math.floor(depth) : 2;
+  if (d < 1) d = 1;
+  if (d > 5) d = 5;
+
   const isAbs = norm.startsWith('/');
   const parts = norm.split('/').filter(Boolean);
   if (parts.length === 0) return '';
   if (parts.length === 1) return isAbs ? `/${parts[0]}` : '.';
-  const root = parts.slice(0, 2).join('/');
+
+  const effective = Math.min(d, parts.length);
+  const root = parts.slice(0, effective).join('/');
   return isAbs ? `/${root}` : root;
 }
 

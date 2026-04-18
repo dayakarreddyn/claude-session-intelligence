@@ -44,6 +44,13 @@ const { rootDirOf, appendShape } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 
+// Unified config — gives us shape.rootDirDepth (monorepo knob) with env
+// overrides already applied. Failure here just means we fall back to depth 2.
+function loadSiConfig() {
+  try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
+  catch { return {}; }
+}
+
 const CHARS_PER_TOKEN = 4;
 const TOOL_OVERHEAD_TOKENS = 100;
 
@@ -129,7 +136,10 @@ async function main() {
     const toolName = (parsedInput && parsedInput.tool_name) || '';
     const toolInput = (parsedInput && parsedInput.tool_input) || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
-    const root = rootDirOf(filePath);
+    const cfg = loadSiConfig();
+    const depth = (cfg && cfg.shape && Number.isFinite(cfg.shape.rootDirDepth))
+      ? cfg.shape.rootDirDepth : 2;
+    const root = rootDirOf(filePath, depth);
     const cmd = toolInput.command || '';
     let event = null;
     if (toolName === 'Bash' && typeof cmd === 'string') {
