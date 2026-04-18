@@ -82,7 +82,7 @@ fi
 
 # New install path (all hooks carry the si- prefix for discoverability in
 # shared hook directories).
-for hook in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
+for hook in si-bootstrap.js si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
   if [ -f "${HOOKS_DIR}/${hook}" ]; then
     if grep -q "Session Intelligence" "${HOOKS_DIR}/${hook}" 2>/dev/null; then
       info "  ${hook} already installed, updating..."
@@ -93,6 +93,7 @@ for hook in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-c
   fi
 done
 
+cp "${PLUGIN_SRC}/hooks/si-bootstrap.js"       "${HOOKS_DIR}/si-bootstrap.js"
 cp "${PLUGIN_SRC}/hooks/si-pre-compact.js"     "${HOOKS_DIR}/si-pre-compact.js"
 cp "${PLUGIN_SRC}/hooks/si-suggest-compact.js" "${HOOKS_DIR}/si-suggest-compact.js"
 cp "${PLUGIN_SRC}/hooks/si-token-budget.js"    "${HOOKS_DIR}/si-token-budget.js"
@@ -168,6 +169,7 @@ if [ -f "${PLUGIN_SRC}/commands/si.md" ]; then
   ok "Installed /si slash command → ${COMMANDS_DIR}/si.md"
 fi
 
+chmod +x "${HOOKS_DIR}/si-bootstrap.js"
 chmod +x "${HOOKS_DIR}/si-pre-compact.js"
 chmod +x "${HOOKS_DIR}/si-suggest-compact.js"
 chmod +x "${HOOKS_DIR}/si-token-budget.js"
@@ -227,6 +229,23 @@ const preCompactEntry = {
 };
 if (preCompactIdx >= 0) settings.hooks.PreCompact[preCompactIdx] = preCompactEntry;
 else settings.hooks.PreCompact.push(preCompactEntry);
+
+// SessionStart: bootstrap (seeds config, autofills session-context, consumes
+// one-shot .si-handoff.json written by pre-compact and emits the resume
+// banner). Without this, /compact resume silently drops on every project
+// that runs install.sh (plugin-based projects wire it via hooks.json).
+if (!settings.hooks.SessionStart) settings.hooks.SessionStart = [];
+const bootIdx = settings.hooks.SessionStart.findIndex(h =>
+  h.id === 'si:bootstrap'
+);
+const bootEntry = {
+  matcher: '*',
+  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-bootstrap.js\"', timeout: 5 }],
+  description: 'Session Intelligence: seed config + consume post-compact handoff',
+  id: 'si:bootstrap'
+};
+if (bootIdx >= 0) settings.hooks.SessionStart[bootIdx] = bootEntry;
+else settings.hooks.SessionStart.push(bootEntry);
 
 if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
 const budgetIdx = settings.hooks.PostToolUse.findIndex(h =>

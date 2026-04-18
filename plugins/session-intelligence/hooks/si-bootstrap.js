@@ -40,19 +40,38 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Resolve SI lib dir. Source layout: ../lib (sibling of hooks/).
+// Installed-via-install.sh layout: ./session-intelligence/lib (bundled under
+// ~/.claude/scripts/hooks/). context-shape.js is SI-only, so it's the
+// sentinel distinguishing the full SI bundle from an ECC lib dir that might
+// happen to live at ../lib. Without this resolver, install.sh users hit
+// silent `require('../lib/handoff')` failures and the resume block never
+// surfaces — exactly the CSM symptom the 2026-04-18 dogfood session hit.
+function resolveSiLibDir() {
+  const candidates = [
+    path.join(__dirname, '..', 'lib'),
+    path.join(__dirname, 'session-intelligence', 'lib'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'context-shape.js'))) return dir;
+  }
+  return candidates[0];
+}
+const SI_LIB = resolveSiLibDir();
+
 // Debug log surface so silent step failures leave a trail in
 // ~/.claude/logs/session-intel-YYYY-MM-DD.log. Bootstrap never writes to
 // stderr/stdout for failures (would clutter the user's SessionStart output);
 // intelLog is the pressure-valve.
 let intelLog = () => {};
-try { ({ intelLog } = require('../lib/intel-debug')); } catch { /* optional */ }
+try { ({ intelLog } = require(path.join(SI_LIB, 'intel-debug'))); } catch { /* optional */ }
 
 // Walks up from cwd until it finds an existing ~/.claude/projects/<encoded>/
 // directory. Must match the resolution used by writeHandoff in si-pre-compact
 // — otherwise read and write diverge when cwd is a subpath of the repo
 // (e.g. plugin dogfooding from a nested dir).
 let resolveProjectDir = () => null;
-try { ({ resolveProjectDir } = require('../lib/utils')); } catch { /* optional */ }
+try { ({ resolveProjectDir } = require(path.join(SI_LIB, 'utils'))); } catch { /* optional */ }
 
 // Classify an Error as a filesystem-missing/permission case (log at debug)
 // vs. a programming error like ReferenceError/TypeError/SyntaxError (log at
@@ -605,13 +624,13 @@ function readStdinJsonOrEmpty() {
 // git-log over and over. Silent when disabled, non-git, or empty result.
 function buildNexusAdditionalContext(cwd) {
   let siCfg = {};
-  try { siCfg = require('../lib/config').loadConfig() || {}; }
+  try { siCfg = require(path.join(SI_LIB, 'config')).loadConfig() || {}; }
   catch { return ''; }
   const gitNexusCfg = (siCfg.shape && siCfg.shape.gitNexus) || {};
   if (gitNexusCfg.injectAtStart !== true) return '';
 
   try {
-    const { topTouchedFiles, renderNexusBlock } = require('../lib/git-nexus');
+    const { topTouchedFiles, renderNexusBlock } = require(path.join(SI_LIB, 'git-nexus'));
     const anchors = topTouchedFiles(cwd, {
       sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
       limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
@@ -664,7 +683,7 @@ function emitAdditionalContext(textParts, systemMessage) {
 // false in config.
 function buildContinuationAdditionalContext(cwd) {
   let siCfg = {};
-  try { siCfg = require('../lib/config').loadConfig() || {}; }
+  try { siCfg = require(path.join(SI_LIB, 'config')).loadConfig() || {}; }
   catch { /* optional */ }
   if (siCfg.continue && siCfg.continue.afterCompact === false) return '';
   try {
@@ -674,7 +693,7 @@ function buildContinuationAdditionalContext(cwd) {
     // dir only exists for the canonical root.
     const projectDir = resolveProjectDir(cwd);
     if (!projectDir) return '';
-    const handoff = require('../lib/handoff');
+    const handoff = require(path.join(SI_LIB, 'handoff'));
     const block = handoff.readAndRenderHandoff(projectDir);
     if (!block) return '';
     // Wrap with a model-echo directive so the resume banner actually reaches
@@ -730,7 +749,7 @@ function main() {
   let systemMessage = '';
   if (continuation) {
     try {
-      const { renderHandoffStderr } = require('../lib/handoff');
+      const { renderHandoffStderr } = require(path.join(SI_LIB, 'handoff'));
       const banner = renderHandoffStderr(continuation);
       process.stderr.write(banner);
       systemMessage = banner;
