@@ -216,8 +216,28 @@ async function main() {
   let siCfg = {};
   try { siCfg = require(path.join(SI_LIB, 'config')).loadConfig() || {}; }
   catch { /* optional */ }
-  const preserveGlobs = (siCfg.shape && Array.isArray(siCfg.shape.preserveGlobs))
+  const userGlobs = (siCfg.shape && Array.isArray(siCfg.shape.preserveGlobs))
     ? siCfg.shape.preserveGlobs : [];
+
+  // Git Nexus — fold top-touched files into the allowlist when enabled. This
+  // is the "auto" half of preserve: user doesn't have to enumerate planning/
+  // foundational dirs if git commit frequency already surfaces them.
+  const gitNexusCfg = (siCfg.shape && siCfg.shape.gitNexus) || {};
+  let nexusGlobs = [];
+  if (gitNexusCfg.enabled !== false) {
+    try {
+      const { topTouchedFiles, toPreserveGlobs } = require(path.join(SI_LIB, 'git-nexus'));
+      const anchors = topTouchedFiles(cwd, {
+        sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
+        limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
+      });
+      nexusGlobs = toPreserveGlobs(anchors);
+      intelLog('pre-compact', 'debug', 'git-nexus anchors resolved', { count: nexusGlobs.length });
+    } catch (err) {
+      intelLog('pre-compact', 'debug', 'git-nexus lookup failed', { err: err && err.message });
+    }
+  }
+  const preserveGlobs = [...userGlobs, ...nexusGlobs];
 
   // Shape hints pulled from the live tool-usage history for THIS session id
   // (same session id every other hook uses). Generated fresh at compact-time

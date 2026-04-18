@@ -84,6 +84,19 @@ const DEFAULTS = {
     // field of each shape entry and against the `root` itself. Empty by
     // default — opt in per-repo.
     preserveGlobs: [],
+    // Git Nexus — derive preserveGlobs automatically from repo commit
+    // frequency. Top-N most-touched files in the last `sinceDays` become
+    // an implicit allowlist, unioned with user-set `preserveGlobs`. Cheap
+    // (one git-log per session, cached 24h). `injectAtStart` is opt-in
+    // because session-start context injection is a surprise if the user
+    // didn't ask for it.
+    gitNexus: {
+      enabled: true,        // fold git-frequency into allowlist
+      sinceDays: 90,
+      limit: 20,
+      injectAtStart: false, // emit anchor block via SessionStart additionalContext
+      injectLimit: 10,
+    },
   },
   learn: {
     // When true and adaptive zones (compact-history derived) materially

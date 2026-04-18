@@ -552,6 +552,54 @@ function readStdinJsonOrEmpty() {
   } catch { return {}; }
 }
 
+// ── Git Nexus injection (opt-in) ──────────────────────────────────────────
+// When shape.gitNexus.injectAtStart is true, compute the top-N most-touched
+// files and emit them as SessionStart additionalContext so Claude starts
+// the session knowing "these are your anchors." Cached 24h in /tmp via
+// lib/git-nexus.js, so repeated session opens in the same repo don't burn
+// git-log over and over. Silent when disabled, non-git, or empty result.
+function buildNexusAdditionalContext(cwd) {
+  let siCfg = {};
+  try { siCfg = require('../lib/config').loadConfig() || {}; }
+  catch { return ''; }
+  const gitNexusCfg = (siCfg.shape && siCfg.shape.gitNexus) || {};
+  if (gitNexusCfg.injectAtStart !== true) return '';
+
+  try {
+    const { topTouchedFiles, renderNexusBlock } = require('../lib/git-nexus');
+    const anchors = topTouchedFiles(cwd, {
+      sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
+      limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
+    });
+    if (!anchors.length) return '';
+    return renderNexusBlock(anchors, {
+      limit: Number.isFinite(gitNexusCfg.injectLimit) ? gitNexusCfg.injectLimit : 10,
+      sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
+    });
+  } catch (err) {
+    intelLog('bootstrap', 'debug', 'nexus injection failed', { err: err && err.message });
+    return '';
+  }
+}
+
+// Emit additionalContext via Claude Code's SessionStart hook protocol:
+//   { "hookSpecificOutput": { "hookEventName": "SessionStart",
+//                             "additionalContext": "..." } }
+// Called at the VERY end of main() so bootstrap's stdout side-effects
+// (the `[session-intelligence] wired...` line) still reach the user.
+// Emitting a second JSON blob after those lines is fine — Claude Code
+// parses the last JSON object on stdout for hook output.
+function emitAdditionalContext(text) {
+  if (!text) return;
+  const payload = JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      additionalContext: text,
+    },
+  });
+  process.stdout.write(payload + '\n');
+}
+
 function main() {
   const input = readStdinJsonOrEmpty();
   const cwd = input.cwd || input.workspace?.current_dir || process.cwd();
@@ -573,6 +621,11 @@ function main() {
   } finally {
     if (locked) releaseStateLock();
   }
+
+  // Nexus injection runs OUTSIDE the lock since it reads from the 24h-cached
+  // git-nexus file most of the time (no disk contention) and only shells out
+  // to `git log` on cache miss.
+  emitAdditionalContext(buildNexusAdditionalContext(cwd));
 
   process.exit(0);
 }

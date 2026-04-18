@@ -122,9 +122,11 @@ Then `AskUserQuestion` with 3–5 short options. Always include **Keep current**
 | 11 | `taskChange.enabled` | bool | Detect task-domain changes | `true`, `false` |
 | 12 | `taskChange.minTokens` | number | Skip detection below this many tokens | `50000`, `100000`, `150000` |
 | 13 | `shape.rootDirDepth` | number | Path segments to group tool calls by (monorepo knob) | `1`, `2`, `3` |
-| 14 | `learn.announce` | bool | Emit one-line zone-shift summary when adaptive zones change | `true`, `false` |
-| 15 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
-| 16 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
+| 14 | `shape.gitNexus.enabled` | bool | Auto-derive preserveGlobs from git commit frequency | `true`, `false` |
+| 15 | `shape.gitNexus.injectAtStart` | bool | Emit top anchor files as SessionStart context | `true`, `false` |
+| 16 | `learn.announce` | bool | Emit one-line zone-shift summary when adaptive zones change | `true`, `false` |
+| 17 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
+| 18 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
 
 Walk this list top-to-bottom. Do not reorder. Do not insert keys that are not in this table (service health, prices, individual fields array — those are covered by `/si set`).
 

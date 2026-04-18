@@ -645,6 +645,15 @@ loop on user turn:
 - **Should the plugin learn which *dirs* the user regrets dropping vs just the rate?** A per-dir regret score would let drop suggestions avoid specific paths even when the overall threshold is unchanged.
 - **Can we detect a *good* compact?** No-regret isn't the same as positive signal. A no-op compact (user's next 30 calls touch nothing dropped, but also don't do much) is indistinguishable from a great compact right now.
 
+### 11.4 Git Nexus — auto-derived anchors
+
+Added after the §11.1 Ship-now + Tier 2 passes, to address "this works on small repos but a 1000-file monorepo collapses the signal":
+
+- `lib/git-nexus.js` shells out to `git log --since=<N> days --name-only --no-merges --pretty=format:`, filters by extension, counts per-path frequency, sorts desc. Cached 24h per-cwd under `/tmp/claude-git-nexus-<hash>.json` so the shell-out is amortised across every hook fire in a session.
+- `shape.gitNexus.enabled` (default `true`) folds the top-N touched files into `analyzeShape`'s allowlist, unioned with user-set `preserveGlobs`. Files that change often across recent commits force-promote into HOT regardless of session-recency banding. Addresses the "planning docs look COLD" failure mode without requiring per-repo config.
+- `shape.gitNexus.injectAtStart` (default `false`, opt-in) emits a markdown anchor block via the SessionStart hook's `additionalContext` channel. Claude starts the session with "these files anchor the repo's active work; prefer them when inferring context." Reduces rediscovery rounds when a session opens cold.
+- Co-change clustering (files that change TOGETHER, implicit dependency graph) is explicitly **not** implemented yet. The argument: frequency alone solves 80% of the problem; clustering is where overfitting bugs live (bulk refactors skew co-change arbitrarily). Revisit after real dogfood data shows frequency missing obvious "these files should be grouped" cases.
+
 ### 11.3 Design tradeoffs accepted
 
 - **Heuristic over principled** — Jaccard 0.3 for shift, HOT = last 20%, P50 × 0.9 for orange. All picked by inspection. A proper methodology would use held-out session traces. Deferred as "good enough to ship" pending real usage data.

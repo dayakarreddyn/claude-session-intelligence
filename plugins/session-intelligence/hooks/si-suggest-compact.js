@@ -75,15 +75,34 @@ async function main() {
   const cfg = fullCfg.compact || {};
   const learnCfg = fullCfg.learn || {};
   const shapeCfg = fullCfg.shape || {};
-  const preserveGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
+  const userGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
+
   const stdinInput = readStdinJson();
+
+  // Git-nexus allowlist is resolved lazily — cached 24h, so the cost of the
+  // `git log` is amortised across every suggest-compact fire in a session.
+  // Same inputs as pre-compact so both hooks see the same HOT band.
+  const gitNexusCfg = shapeCfg.gitNexus || {};
+  let preserveGlobs = userGlobs;
+  if (gitNexusCfg.enabled !== false) {
+    try {
+      const { topTouchedFiles, toPreserveGlobs } = require(path.join(SI_LIB, 'git-nexus'));
+      const stdinCwd = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
+      const anchors = topTouchedFiles(stdinCwd, {
+        sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
+        limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
+      });
+      preserveGlobs = [...userGlobs, ...toPreserveGlobs(anchors)];
+    } catch { /* optional — fall back to user globs */ }
+  }
   const rawSid = (stdinInput && (stdinInput.session_id || stdinInput.sessionId))
     || process.env.CLAUDE_SESSION_ID
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
   const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
-  intelLog('suggest-compact', 'debug', 'hook fired', { sessionId });
+  intelLog('suggest-compact', 'debug', 'hook fired',
+    { sessionId, preserveGlobs: preserveGlobs.length });
   const threshold = Number.isFinite(cfg.threshold) && cfg.threshold > 0 && cfg.threshold <= 10000
     ? cfg.threshold
     : 50;
