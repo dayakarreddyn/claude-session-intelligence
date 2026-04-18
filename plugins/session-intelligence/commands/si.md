@@ -16,6 +16,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si set <key> <value>                     # stage a change, show diff, wait for YES
 /si reset <key|*>                         # reset a key (or all) to default
 /si explain <key>                         # describe what a key does
+/si configure                             # walk every key one at a time, review combined diff, confirm
 /si migrate                               # import legacy ~/.claude/statusline-intel.json
 ```
 
@@ -70,7 +71,67 @@ Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's std
 
 **`explain <key>`** — Describe what the key controls, its type, its default, and its effect on which hook. Keep it under 60 words. Do not modify anything.
 
+**`configure`** — Interactive per-key wizard. See the dedicated section below.
+
 **`migrate`** — If `~/.claude/statusline-intel.json` exists, read it, nest its keys under `"statusline"`, merge into the unified config, show the diff, and wait for YES before writing. Keep the legacy file on disk as a backup.
+
+### `configure` — interactive per-key wizard
+
+Walks every tunable key in order, **one at a time**, using the `AskUserQuestion` tool. For each key, stage the user's selection in an in-memory patch; after the last key (or when the user picks **Quit wizard**), fall through to Step 3's write protocol so the combined change is previewed and confirmed in a single diff.
+
+**Loop invariants**
+- Never write to disk inside the loop. Only Step 3 writes.
+- Never ask more than one `AskUserQuestion` at a time. Do not batch multiple keys into a single prompt.
+- Preserve the current value when the user picks **Keep**, **Skip**, or **Quit**. Only mutate the staged config on explicit selection.
+- If the user picks **Custom…**, immediately follow up with a second `AskUserQuestion` (or plain message) that accepts a free-form value. Parse numbers with `parseInt` / `parseFloat`; refuse and re-ask on parse failure — never silently skip.
+
+**Prompt shape (per key)**
+
+Every question header must include: dotted key, current value, default value, one-sentence description. Example:
+
+```
+statusline.zones.orange — caution zone where compact is strongly suggested
+  current: 300000   default: 300000
+```
+
+Then `AskUserQuestion` with 3–5 short options. Always include **Keep current**, **Custom…**, **Skip**, and **Quit wizard** in addition to the named presets. Do not invent options outside the table below.
+
+**Keys to walk, in order**
+
+| # | Key | Type | Description (≤12 words) | Named options |
+|---|-----|------|-------------------------|---------------|
+| 1 | `statusline.preset` | enum | Line shape preset | `minimal`, `standard`, `verbose` |
+| 2 | `statusline.tokenSource` | enum | How token count is read | `auto`, `transcript`, `estimate` |
+| 3 | `statusline.zones.yellow` | number | Tokens → caution zone | `150000`, `200000`, `250000` |
+| 4 | `statusline.zones.orange` | number | Tokens → compact-now zone | `250000`, `300000`, `350000` |
+| 5 | `statusline.zones.red` | number | Tokens → urgent zone | `350000`, `400000`, `450000` |
+| 6 | `statusline.maxTaskLength` | number | Line-2 task text truncation | `25`, `35`, `50`, `70` |
+| 7 | `statusline.colors` | bool | ANSI colors in statusline | `true`, `false` |
+| 8 | `compact.threshold` | number | Tool calls before first advisory | `50`, `75`, `100` |
+| 9 | `compact.autoblock` | bool | Surface compact suggestion as tool feedback | `true`, `false` |
+| 10 | `compact.memoryOffload` | bool | Pre-compact memory-offload directive | `true`, `false` |
+| 11 | `taskChange.enabled` | bool | Detect task-domain changes | `true`, `false` |
+| 12 | `taskChange.minTokens` | number | Skip detection below this many tokens | `50000`, `100000`, `150000` |
+| 13 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
+| 14 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
+
+Walk this list top-to-bottom. Do not reorder. Do not insert keys that are not in this table (service health, prices, individual fields array — those are covered by `/si set`).
+
+**Selection handling**
+- `Keep current` → no change staged, advance.
+- A named option → stage `config[key] = option` on the in-memory copy, advance.
+- `Custom…` → ask for a free-form value, validate against the type column, stage, advance. On repeated invalid input (twice), treat as `Skip`.
+- `Skip` → no change staged, advance.
+- `Quit wizard` → stop immediately, jump to Step 3.
+
+**After the loop**
+
+If zero keys were staged, print *"No changes — wizard finished with current config intact."* and stop. Otherwise:
+1. Compute the new config (= current deep-merged with the staged patch).
+2. Enter Step 3's write protocol verbatim: show the combined diff, then ask for `YES`.
+3. On `YES`, write once; on anything else, discard the staged patch.
+
+No mid-wizard writes. No partial saves. One diff, one confirmation.
 
 ### Step 3 — Write protocol (for `set` / `reset` / `migrate`)
 
