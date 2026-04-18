@@ -282,6 +282,22 @@ async function main() {
     });
   }
 
+  // Continue-hint footer. Claude Code pauses for user input after /compact
+  // and won't auto-fire SessionStart until the user types something, so the
+  // resume banner only appears after that input. Surface the hint at the
+  // END of the pre-compact block — it becomes the last thing the user sees
+  // before the input prompt, which is exactly when they need it.
+  if (hints || shapeInjection || memoryOffload) {
+    const bar = '\u2501'.repeat(50);
+    process.stdout.write(
+      '\nNEXT (to resume):\n'
+      + '  Send any short message (e.g. `c` or `continue`) to show the post-compact\n'
+      + '  resume banner and auto-continue the last task. Claude Code pauses for\n'
+      + '  input after /compact, so the banner only fires on your next turn.\n'
+      + `\n${bar}\n`
+    );
+  }
+
   // Learning-loop logging: record this compaction event so future sessions
   // can adapt zones + dampen drop suggestions based on observed behaviour.
   // Also write a per-session snapshot so token-budget-tracker can watch for

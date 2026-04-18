@@ -432,8 +432,6 @@ function renderHandoffBlock(handoff) {
   }
 
   lines.push('Resume the current task now. Only ask first if the task is finished and no actionable next priority exists, or if `/compact` was meant to change topics (in which case this context is stale).');
-  lines.push('');
-  lines.push('(Tip: Claude Code pauses for input after /compact. Send any short message next time \u2014 e.g. just `c` or `continue` \u2014 and this banner shows + I auto-resume from here.)');
   return lines.join('\n');
 }
 
