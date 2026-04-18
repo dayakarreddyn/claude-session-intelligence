@@ -530,12 +530,11 @@ function buildRenderers(C) {
     // context FOR that signal — making them bright just adds noise.
     model: (input) => {
       const m = input.model?.display_name || input.model?.id || 'claude';
-      // "Effort" = reasoning/output-style mode. Claude Code exposes this via
-      // input.output_style as a string OR object {name: string}. Compare
-      // case-insensitively against "default" because observed payloads use
-      // both "default" and "Default" depending on how the style was set.
-      // Guard against non-string .name so a malformed object can't leak
-      // "[object Object]" into the bar.
+      // output_style is the named output mode (concise, explanatory, etc.) —
+      // NOT the reasoning effort / thinking budget. Claude Code exposes it as
+      // either a string or {name: string}. Case-insensitive compare against
+      // "default" because observed payloads use both casings. Guard non-string
+      // .name so a malformed object can't leak "[object Object]".
       const styleRaw = input.output_style;
       let style = '';
       if (typeof styleRaw === 'string') style = styleRaw;
@@ -776,15 +775,29 @@ function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRI
 function readSessionStartTime(transcriptPath) {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
   try {
-    // Just first few KB — first line is typically the session-start event.
+    // Scan the head of the transcript for the earliest event with a timestamp.
+    // The *literal* first line is often a `permission-mode` marker that has no
+    // timestamp field — so we can't just parse line 0. 8 KB covers the first
+    // ~20 events which is plenty to catch the session-start hook output.
+    const stat = fs.statSync(transcriptPath);
     const fd = fs.openSync(transcriptPath, 'r');
     try {
-      const buf = Buffer.alloc(Math.min(4096, fs.statSync(transcriptPath).size));
+      const buf = Buffer.alloc(Math.min(8192, stat.size));
       fs.readSync(fd, buf, 0, buf.length, 0);
-      const firstLine = buf.toString('utf8').split('\n')[0];
-      const d = JSON.parse(firstLine);
-      const ts = d.timestamp || d.message?.timestamp;
-      if (ts) return new Date(ts).getTime();
+      const lines = buf.toString('utf8').split('\n');
+      // Don't consume the last slice — it may be a partial line.
+      for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        try {
+          const d = JSON.parse(line);
+          const ts = d.timestamp || d.message?.timestamp;
+          if (ts) {
+            const ms = new Date(ts).getTime();
+            if (Number.isFinite(ms)) return ms;
+          }
+        } catch { /* skip partial/invalid line */ }
+      }
     } finally { fs.closeSync(fd); }
   } catch { /* ignore */ }
   return null;
@@ -818,11 +831,21 @@ function main() {
     tokens = estimate.tokens;
   }
 
-  // Session duration from transcript's first timestamp.
+  // Session duration: prefer Claude Code's authoritative number on stdin
+  // (input.cost.total_duration_ms) — it survives transcript rotation and
+  // covers resumes correctly. Fall back to the earliest transcript timestamp
+  // when the stdin number is absent or zero.
   let sessionDurationMs = 0;
   if (cfg.fields.includes('session')) {
-    const start = readSessionStartTime(transcriptPath);
-    if (start) sessionDurationMs = Date.now() - start;
+    const officialMs = input.cost && typeof input.cost === 'object'
+      ? Number(input.cost.total_duration_ms)
+      : Number(input.total_duration_ms);
+    if (Number.isFinite(officialMs) && officialMs > 0) {
+      sessionDurationMs = officialMs;
+    } else {
+      const start = readSessionStartTime(transcriptPath);
+      if (start) sessionDurationMs = Date.now() - start;
+    }
   }
 
   // Cost — prefer Claude Code's authoritative number when it passes one on
