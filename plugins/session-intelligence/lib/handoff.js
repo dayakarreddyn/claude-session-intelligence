@@ -306,12 +306,27 @@ function readAndRenderHandoff(projectDir) {
   }
 
   const block = renderHandoffBlock(handoff);
-  // Mirror a compact banner to stderr. SessionStart's stdout is a JSON
-  // payload for the model; stderr is the only channel where the user
-  // can actually SEE that the resume fired.
-  try { process.stderr.write(renderHandoffBanner(handoff) + '\n'); } catch { /* ignore */ }
   try { fs.unlinkSync(owned); } catch { /* one-shot; ignore cleanup failure */ }
   return block;
+}
+
+// Produce the user-visible stderr rendering: the full block wrapped in a
+// banner so it surfaces in Claude Code's "SessionStart completed successfully"
+// transcript line. SessionStart stdout is reserved for the JSON
+// additionalContext payload, so stderr is the only channel the user actually
+// sees on the CLI. Separate function — the caller chooses whether to display.
+function renderHandoffStderr(block) {
+  if (!block) return '';
+  const div = '\u2501'.repeat(51);
+  return [
+    div,
+    '  SESSION INTELLIGENCE \u2014 post-compact resume',
+    div,
+    '',
+    block,
+    div,
+    '',
+  ].join('\n');
 }
 
 // Short user-facing banner — first line of the task plus counts of the
@@ -383,6 +398,7 @@ module.exports = {
   readAndRenderHandoff,
   renderHandoffBlock,
   renderHandoffBanner,
+  renderHandoffStderr,
   handoffPath,
   _internal: {
     parseSessionContextSections,

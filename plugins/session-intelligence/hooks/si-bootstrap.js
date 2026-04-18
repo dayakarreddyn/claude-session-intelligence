@@ -694,10 +694,21 @@ function main() {
   // and don't touch shared bootstrap state. Both get combined into a
   // single additionalContext payload — only the last JSON object on
   // stdout is honoured by Claude Code's hook parser.
-  emitAdditionalContext([
-    buildContinuationAdditionalContext(cwd),
-    buildNexusAdditionalContext(cwd),
-  ]);
+  const continuation = buildContinuationAdditionalContext(cwd);
+  const nexus = buildNexusAdditionalContext(cwd);
+
+  // Surface the resume block to the user on the CLI via stderr. Claude Code
+  // shows the hook's stderr in the "[SessionStart] completed successfully"
+  // transcript line, matching the PreCompact banner style. stdout is
+  // reserved for the JSON additionalContext payload below.
+  if (continuation) {
+    try {
+      const { renderHandoffStderr } = require('../lib/handoff');
+      process.stderr.write(renderHandoffStderr(continuation));
+    } catch { /* rendering failure shouldn't block the hook */ }
+  }
+
+  emitAdditionalContext([continuation, nexus]);
 
   process.exit(0);
 }
