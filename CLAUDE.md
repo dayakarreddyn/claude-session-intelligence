@@ -23,6 +23,23 @@ Use subagents (Agent tool) for work that produces large intermediate output:
 - **Impact analysis** — blast radius checks before refactors
 - Mental test: *"Will I need this tool output again, or just the conclusion?"*
 
+#### Capture Insights As They Happen (CRITICAL)
+Don't wait for `/compact` to catch up — the pre-compact block is a safety net, not the primary capture surface. When a finding surfaces mid-session, persist it **before moving on to the next step**:
+
+Triggers (any of these in your own output or your thinking):
+- `★ Insight`, `gotcha`, `non-obvious`, `worth remembering`, `heads up`, `trap`
+- Bug that took >2 debugging attempts to isolate
+- Library quirk or version incompatibility (e.g. `slowapi + __future__ annotations` class of issue)
+- Decision that won't be obvious from reading the code later
+
+Where it goes (pick one):
+- **`session-context.md` → `## Key Decisions`** — small, this-session-only, the next task will still care
+- **`session-context.md` → `## On Compact` (PRESERVE line)** — must explicitly survive the next compact
+- **`memory/reference_<slug>.md`** — reusable recipe that future sessions/projects want (type: reference, one-line pointer in `MEMORY.md`)
+- **`memory/project_session_YYYY_MM_DD.md`** — this-project session log, extend in place
+
+Append *as the insight surfaces*. A single Edit or Write call, then continue the task. Do NOT batch these until pre-compact — by then detail has collapsed.
+
 #### Memory Offloading
 SI now nudges this automatically at zone crossover (orange/red stderr feedback) and injects an explicit **MEMORY OFFLOAD CHECKPOINT** block into the pre-compact summary with the concrete path to `~/.claude/projects/<encoded>/memory/`.
 
