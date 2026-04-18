@@ -77,6 +77,54 @@ async function main() {
   const shapeCfg = fullCfg.shape || {};
   const userGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
 
+  // ANSI styling for zone-crossover advisories. Two layers:
+  //   - foreground zone colour for the headline (bright + bold), so a
+  //     dim terminal scroll still registers the alert
+  //   - dark-grey background wrapping around the whole block so it
+  //     visually reads as a callout / code block distinct from the rest
+  //     of the conversation
+  //
+  // Respects:
+  //   - NO_COLOR env (universal convention)
+  //   - statusline.colors=false in user config (same flag the bar uses)
+  //
+  // Background rendering depends on the terminal / UI — if the host
+  // ignores the 48;5;N codes, the foreground colour still comes through,
+  // so the alert never disappears entirely.
+  const colorsEnabled = process.env.NO_COLOR !== '1'
+    && (!fullCfg.statusline || fullCfg.statusline.colors !== false);
+  const ANSI = {
+    reset:  colorsEnabled ? '\x1b[0m'          : '',
+    bold:   colorsEnabled ? '\x1b[1m'          : '',
+    yellow: colorsEnabled ? '\x1b[1;33m'       : '',         // bold bright yellow
+    orange: colorsEnabled ? '\x1b[1;38;5;208m' : '',         // bold 256-color orange
+    red:    colorsEnabled ? '\x1b[1;31m'       : '',         // bold bright red
+    bg:     colorsEnabled ? '\x1b[48;5;236m'   : '',         // subtle dark-grey BG
+    dim:    colorsEnabled ? '\x1b[2;38;5;250m' : '',         // dim light-grey FG for body
+  };
+  function paintZone(zoneName, text) {
+    const code = ANSI[zoneName] || ANSI.bold;
+    return code ? `${code}${text}${ANSI.reset}` : text;
+  }
+  // Render a multi-line block as a "callout": each line gets the dark
+  // grey background with a 2-space left pad, so the block reads as one
+  // cohesive surface even across multiple lines. Headline line keeps the
+  // zone colour on top of the BG; body lines use dim light-grey FG.
+  function renderCallout(headlineZone, headline, bodyLines) {
+    if (!colorsEnabled) {
+      // Plaintext fallback: single-line concat, same shape as before.
+      return [headline, ...bodyLines].join(' ');
+    }
+    const pad = '  ';
+    const padded = (text, fg) => `${ANSI.bg}${pad}${fg || ''}${text}${ANSI.reset}`;
+    const headlineCode = ANSI[headlineZone] || ANSI.bold;
+    const lines = [
+      padded(headline, headlineCode),
+      ...bodyLines.map((l) => padded(l, ANSI.dim)),
+    ];
+    return lines.join('\n');
+  }
+
   const stdinInput = readStdinJson();
 
   // Git-nexus allowlist is resolved lazily — cached 24h, so the cost of the
@@ -189,13 +237,13 @@ async function main() {
     const prevZone = getZone(tokenBudget - 5000, zonesCfg);
 
     if (zone === 'yellow' && prevZone === 'green') {
-      log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks (offload rich detail to auto-memory first).`);
+      log(paintZone('yellow', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks (offload rich detail to auto-memory first).`));
       intelLog('suggest-compact', 'info', `suggestion: yellow-zone`, { tokenBudget, count });
     } else if (zone === 'orange' && prevZone === 'yellow') {
-      log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — CONTEXT ROT ZONE. Compact now: /compact [preserve current task context]`);
+      log(paintZone('orange', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — CONTEXT ROT ZONE. Compact now: /compact [preserve current task context]`));
       intelLog('suggest-compact', 'warn', `suggestion: orange-zone`, { tokenBudget, count });
     } else if (zone === 'red' && prevZone === 'orange') {
-      log(`[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — URGENT. /compact immediately or /clear and start fresh.`);
+      log(paintZone('red', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — URGENT. /compact immediately or /clear and start fresh.`));
       intelLog('suggest-compact', 'warn', `suggestion: red-zone`, { tokenBudget, count });
     }
   }
@@ -233,10 +281,9 @@ async function main() {
 
       const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
       const costStr = (costEst && sessionCost > 0) ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
-      const lines = [
-        `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens${costStr}.`,
-      ];
-      if (diagnosis) lines.push(`Observed: ${diagnosis}.`);
+      const headline = `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens${costStr}.`;
+      const body = [];
+      if (diagnosis) body.push(`Observed: ${diagnosis}.`);
 
       // Memory-offload nudge — give Claude a turn to write rich detail to
       // auto-memory BEFORE /compact collapses it. Context is still live at
@@ -248,30 +295,27 @@ async function main() {
         const memLine = projectDir
           ? `Offload to auto-memory FIRST: write under ${path.join(projectDir, 'memory')}/ (project_session_*.md / reference_*.md + MEMORY.md index), THEN /compact.`
           : 'Offload rich detail to auto-memory FIRST (project-session + reference files + MEMORY.md index), THEN /compact.';
-        lines.push(memLine);
+        body.push(memLine);
       }
 
-      lines.push(
-        `Run \`/compact\` — preserve/drop hints will be auto-injected from observed tool usage. ` +
-        `Free-text hint after /compact still works.`
+      body.push(
+        'Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage. '
+        + 'Free-text hint after /compact still works.'
       );
       if (zonesCfg.adaptive) {
         const scope = zonesCfg.bucket === 'cwd' ? 'this repo' : 'your history';
-        lines.push(
+        body.push(
           `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
         );
       }
-      // Opt-in adaptive-shift announcement (learn.announce=true). Fires
-      // once per material shift per cwd — the helper tracks state so we
-      // don't re-announce the same zones on every subsequent crossover.
       if (learnCfg.announce === true && compactHistory && compactHistory.announceAdaptiveShift) {
         try {
           const shiftLine = compactHistory.announceAdaptiveShift(zonesCfg, cwdForZones);
-          if (shiftLine) lines.push(shiftLine);
+          if (shiftLine) body.push(shiftLine);
         } catch { /* best effort */ }
       }
-      lines.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
-      process.stderr.write(`${lines.join(' ')}\n`);
+      body.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
+      process.stderr.write(renderCallout(zone, headline, body) + '\n');
       intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, {
         tokenBudget, count, lastZone, sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
