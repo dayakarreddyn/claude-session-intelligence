@@ -112,8 +112,10 @@ Then `AskUserQuestion` with 3–5 short options. Always include **Keep current**
 | 10 | `compact.memoryOffload` | bool | Pre-compact memory-offload directive | `true`, `false` |
 | 11 | `taskChange.enabled` | bool | Detect task-domain changes | `true`, `false` |
 | 12 | `taskChange.minTokens` | number | Skip detection below this many tokens | `50000`, `100000`, `150000` |
-| 13 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
-| 14 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
+| 13 | `shape.rootDirDepth` | number | Path segments to group tool calls by (monorepo knob) | `1`, `2`, `3` |
+| 14 | `learn.announce` | bool | Emit one-line zone-shift summary when adaptive zones change | `true`, `false` |
+| 15 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
+| 16 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
 
 Walk this list top-to-bottom. Do not reorder. Do not insert keys that are not in this table (service health, prices, individual fields array — those are covered by `/si set`).
 
@@ -179,6 +181,8 @@ After a successful write, remind the user in one line if any change requires a C
 | `statusline.*` | Next status line redraw (no restart needed) |
 | `compact.*` | Next tool call after the hook fires |
 | `taskChange.*` | Next user prompt |
+| `shape.*` | Next tool call after the hook fires |
+| `learn.*` | Next compact-suggestion advisory |
 | `debug.*` | New sessions (restart recommended) |
 
 ## Edge cases

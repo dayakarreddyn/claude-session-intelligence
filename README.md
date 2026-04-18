@@ -401,7 +401,7 @@ Every write shows a unified diff of the proposed change and waits for you to rep
 
 ### `/si configure` — interactive wizard
 
-For users who'd rather not memorize dotted keys. The wizard walks the 14 user-facing tunables one prompt at a time via `AskUserQuestion`: statusline preset, token source, all three zone thresholds, task-length truncation, colours, compact threshold, autoblock, memory-offload, task-change on/off and min-tokens, debug on/quiet. Each prompt shows **current value · default value · one-line description** and 3–4 named choices; "Other" lets you type a custom value, `skip`, or `quit`.
+For users who'd rather not memorize dotted keys. The wizard walks the user-facing tunables one prompt at a time via `AskUserQuestion`: statusline preset, token source, all three zone thresholds, task-length truncation, colours, compact threshold, autoblock, memory-offload, task-change on/off and min-tokens, `shape.rootDirDepth` (monorepo knob), `learn.announce` (opt-in zone-shift summary), and debug on/quiet. Each prompt shows **current value · default value · one-line description** and 3–4 named choices; "Other" lets you type a custom value, `skip`, or `quit`.
 
 Selections stage into an in-memory patch — nothing is written until the very end, when the combined diff is previewed and the standard **YES** gate runs once. One confirmation regardless of how many keys changed.
 

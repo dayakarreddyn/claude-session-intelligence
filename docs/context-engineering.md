@@ -627,7 +627,7 @@ loop on user turn:
 
 1. **Shape tracker can't see model "thinking" tokens.** Reasoning tokens before a tool call aren't observed. A session where Claude thinks heavily but calls few tools will look small in the shape log even though its context is large. The `tokens` field (from transcript usage) catches this; the *shape* does not.
 
-2. **rootDir granularity is fixed at two segments.** Deep monorepos (`packages/core/src/auth/login.ts` → `packages/core`) can under-distinguish features. A `depth` config knob would help but isn't implemented.
+2. ~~**rootDir granularity is fixed at two segments.**~~ *Resolved in `75d72ba` (Ship-now tier).* `shape.rootDirDepth` is now a config knob clamped to `[1..5]`, default `2`. Deep monorepos can raise it (`/si set shape.rootDirDepth 3` → `packages/core/src`) without touching the analyzer. Env override: `CLAUDE_SHAPE_ROOT_DIR_DEPTH`.
 
 3. **Phase event detection is Bash-only.** A user who commits via their IDE or via `gh` (e.g. `gh repo commit`) won't produce a commit event in the log. The plugin under-detects phase boundaries for those workflows.
 
@@ -635,7 +635,7 @@ loop on user turn:
 
 5. **Regret detection treats all re-touches equally.** Touching a dropped dir to clean up a leftover is different from re-reading it because you lost the context. No way to distinguish.
 
-6. **Cross-project history blurs.** A user working in 5 repos has one history file. If one repo pushes the median compact point up, the others' thresholds drift with it. Per-cwd bucketing would help.
+6. ~~**Cross-project history blurs.**~~ *Resolved in `75d72ba` (Ship-now tier).* `adaptiveZones()` now buckets history by `cwd`. When a repo has ≥5 same-cwd compacts, its thresholds derive from its own percentiles; otherwise it falls back to the global distribution. The suggest-compact line labels the scope (`this repo` vs `your history`). Opt-in `learn.announce` surfaces a one-line summary when zones first engage or shift by ≥10k tokens.
 
 ### 11.2 Open questions
 
