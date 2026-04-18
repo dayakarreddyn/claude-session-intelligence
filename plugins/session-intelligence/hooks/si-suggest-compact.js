@@ -190,6 +190,18 @@ async function main() {
   intelLog('suggest-compact', 'debug', 'token budget resolved',
     { tokenBudget, tokenSource });
 
+  // Session cost — surfaced in the escalation message and fed into
+  // adaptiveZones so expensive sessions compact earlier (Q2 cost-band
+  // tightening). Pulled from transcript usage; 0 when transcript isn't
+  // available.
+  let sessionCost = 0;
+  try {
+    if (costEst && transcriptPath) {
+      sessionCost = costEst.totalCostFromTranscript(
+        transcriptPath, sessionId, costEst.DEFAULT_PRICES);
+    }
+  } catch { /* best effort */ }
+
   // Zones: prefer adaptive thresholds derived from the user's own compact
   // history when ≥5 samples are available. Otherwise fall back to the
   // static 200/300/400k defaults. adaptiveZones() is bounded ±30% from the
@@ -198,29 +210,23 @@ async function main() {
   // Per-cwd bucketing: when this repo has ≥5 of its own compacts, zones
   // derive from those alone; otherwise cross-project history is used so
   // new repos still benefit from global learning.
+  //
+  // Cost-band: when sessionCost exceeds the user's historical p75 cost,
+  // orange tightens by 12% — expensive sessions warrant earlier warnings.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
   const staticZones = { yellow: 200000, orange: 300000, red: 400000 };
   let zonesCfg = staticZones;
   try {
     if (compactHistory) {
       zonesCfg = compactHistory.adaptiveZones(
-        compactHistory.readHistory(), staticZones, { cwd: cwdForZones });
+        compactHistory.readHistory(),
+        staticZones,
+        { cwd: cwdForZones, currentCost: sessionCost });
     }
   } catch { /* keep static */ }
 
   const zone = getZone(tokenBudget, zonesCfg);
   const budgetStr = tokenBudget > 0 ? ` (~${formatTokens(tokenBudget)} tokens, ${zone} zone)` : '';
-
-  // Session cost — surfaced in the escalation message and used by the model
-  // when deciding whether the suggestion is worth acting on. Pulled from
-  // transcript usage; 0 when transcript isn't available.
-  let sessionCost = 0;
-  try {
-    if (costEst && transcriptPath) {
-      sessionCost = costEst.totalCostFromTranscript(
-        transcriptPath, sessionId, costEst.DEFAULT_PRICES);
-    }
-  } catch { /* best effort */ }
 
   // Tool-call based suggestions (original logic)
   if (count === threshold) {

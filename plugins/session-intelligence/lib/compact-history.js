@@ -175,6 +175,26 @@ function adaptiveZones(history, defaults, opts) {
     orange = Math.min(orangeMax, Math.round(orange * 1.1));
   }
 
+  // Cost-band tightening — expensive sessions cost more to re-do than to
+  // compact, so warn earlier when the running cost exceeds the user's own
+  // p75. 12% tightening is empirically ~20-30k tokens on a 200-250k orange,
+  // enough to nudge a /compact one "chunk of work" sooner without being
+  // disruptive. Opposite-direction of regret-rate; both can apply.
+  let costTightened = false;
+  const currentCost = opts && Number.isFinite(opts.currentCost) ? opts.currentCost : null;
+  if (currentCost !== null && currentCost > 0) {
+    const costs = workingHistory
+      .map((h) => h.cost)
+      .filter((c) => Number.isFinite(c) && c > 0);
+    if (costs.length >= MIN_SAMPLES_FOR_ADAPTIVE) {
+      const cp = percentiles(costs);
+      if (cp && currentCost > cp.p75) {
+        orange = Math.max(orangeMin, Math.round(orange * 0.88));
+        costTightened = true;
+      }
+    }
+  }
+
   // Yellow hugs orange; red gives headroom above P90.
   const yellow = Math.max(
     Math.round(base.yellow * (1 - ADAPTIVE_BOUND)),
@@ -196,6 +216,7 @@ function adaptiveZones(history, defaults, opts) {
     p50: p.p50,
     p90: p.p90,
     regretRate: Number(regretRate.toFixed(2)),
+    costTightened,
   };
 }
 
@@ -280,18 +301,27 @@ function clearSnapshot(sessionId) {
 
 /**
  * Called from token-budget-tracker after each PostToolUse. Returns
- * `{ regretHit, windowClosed, weight }` so the caller can log appropriately.
- * A regret hit is when the tool call touched a rootDir that was in the
- * snapshot's dropped set. The window closes after N calls OR N minutes
- * since the compact — whichever first.
+ * `{ regretHit, positiveHit, windowClosed, weight }` so the caller can log
+ * appropriately. Two classifications run against the same snapshot:
  *
- * `opts.toolName` and `opts.toolInput` let us weight the hit by operation
- * type: a Read on a dropped dir is full regret (1.0); an Edit is partial
- * (0.3, natural follow-up); a `git add` inside it is cleanup (0.1).
+ *   - regret: tool call touched a rootDir the pre-compact analysis marked
+ *     as DROP. Weight by operation type (Read=1.0, Edit=0.3, cleanup=0.1).
+ *   - positive: tool call touched a rootDir marked HOT. Counts as "compact
+ *     freed attention for the stuff we flagged as important" — the Q5
+ *     good-compact signal. Same op-type weights as regret.
+ *
+ * The window closes after N calls OR N minutes since the compact. On
+ * close, `upgradeHistoryRegret` stamps both regretCount and
+ * continuationQuality back onto the history entry.
  */
 function checkPostCompactRegret(sessionId, rootDir, opts) {
   const snap = readSnapshot(sessionId);
-  if (!snap) return { regretHit: false, windowClosed: true, snapshot: null, weight: 0 };
+  if (!snap) {
+    return {
+      regretHit: false, positiveHit: false,
+      windowClosed: true, snapshot: null, weight: 0,
+    };
+  }
 
   const now = Date.now();
   const age = now - (snap.t || 0);
@@ -299,15 +329,27 @@ function checkPostCompactRegret(sessionId, rootDir, opts) {
 
   const windowClosed = calls > REGRET_WINDOW_CALLS || age > REGRET_WINDOW_MS;
   let regretHit = false;
+  let positiveHit = false;
   let weight = 0;
 
+  const toolName = opts && opts.toolName;
+  const toolInput = opts && opts.toolInput;
+
   if (rootDir && Array.isArray(snap.droppedDirs) && snap.droppedDirs.includes(rootDir)) {
-    const toolName = opts && opts.toolName;
-    const toolInput = opts && opts.toolInput;
     weight = regretWeightFor(toolName, toolInput);
     if (weight > 0) {
       regretHit = true;
       snap.regretHits = (snap.regretHits || []).concat([
+        { t: now, root: rootDir, tool: toolName || null, weight },
+      ]);
+    }
+  } else if (rootDir && Array.isArray(snap.hotDirs) && snap.hotDirs.includes(rootDir)) {
+    // Positive hit: same weight scheme. A Read in a HOT dir post-compact
+    // means the user is doing the work the compact said to focus on.
+    weight = regretWeightFor(toolName, toolInput);
+    if (weight > 0) {
+      positiveHit = true;
+      snap.positiveHits = (snap.positiveHits || []).concat([
         { t: now, root: rootDir, tool: toolName || null, weight },
       ]);
     }
@@ -321,35 +363,49 @@ function checkPostCompactRegret(sessionId, rootDir, opts) {
     writeSnapshot(sessionId, snap);
   }
 
-  return { regretHit, windowClosed, snapshot: snap, weight };
+  return { regretHit, positiveHit, windowClosed, snapshot: snap, weight };
 }
 
 /**
  * Find the most recent history entry matching the snapshot's compact time
- * and rewrite it with the final regret count. Because the file is JSONL we
- * rewrite from a parsed array — the file is small (P50 a few KB), so this
- * is cheap enough for a once-per-compact update.
+ * and stamp the post-compact verdict: weighted regretCount AND a
+ * continuationQuality score derived from positive vs regret hits.
+ *
+ * continuationQuality = (positiveWeight − regretWeight) / (positiveWeight
+ * + regretWeight). Range [-1, 1]. +1 = all work landed in HOT dirs,
+ * none in DROP; -1 = all in DROP. null when neither side fired (empty
+ * window — indistinguishable from "user did nothing after compact").
  */
 function upgradeHistoryRegret(snap) {
   if (!snap || !Number.isFinite(snap.t)) return;
-  const hits = snap.regretHits || [];
-  if (hits.length === 0) return; // nothing to upgrade
-  // regretCount is now a weighted sum. Older entries stored integer counts
-  // — adaptiveZones() treats both uniformly because it only checks Number
-  // .isFinite and compares to the 1.0 threshold, which is the same "one
-  // Read-worth of regret per compact" bar in either scheme.
-  const weightedCount = hits.reduce(
-    (sum, h) => sum + (Number.isFinite(h.weight) ? h.weight : 1),
-    0,
-  );
+  const regrets = snap.regretHits || [];
+  const positives = snap.positiveHits || [];
+  if (regrets.length === 0 && positives.length === 0) return; // nothing to stamp
+  // regretCount is a weighted sum. Older entries stored integer counts
+  // — adaptiveZones() treats both uniformly because it only checks
+  // Number.isFinite and compares to the 1.0 threshold, which is the same
+  // "one Read-worth of regret per compact" bar in either scheme.
+  const sumWeights = (arr) => arr.reduce(
+    (sum, h) => sum + (Number.isFinite(h.weight) ? h.weight : 1), 0);
+  const regretWeight = sumWeights(regrets);
+  const positiveWeight = sumWeights(positives);
+  const denom = positiveWeight + regretWeight;
+  const continuationQuality = denom > 0
+    ? Number(((positiveWeight - regretWeight) / denom).toFixed(2))
+    : null;
   try {
     const lines = fs.readFileSync(HISTORY_FILE, 'utf8').split('\n').filter(Boolean);
     const parsed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } });
     for (let i = parsed.length - 1; i >= 0; i--) {
       if (parsed[i] && parsed[i].t === snap.t) {
-        parsed[i].regretCount = Number(weightedCount.toFixed(2));
-        parsed[i].regretHits = hits.length;
-        parsed[i].regretDirs = hits.map((h) => h.root);
+        parsed[i].regretCount = Number(regretWeight.toFixed(2));
+        parsed[i].regretHits = regrets.length;
+        parsed[i].regretDirs = regrets.map((h) => h.root);
+        parsed[i].positiveHits = positives.length;
+        parsed[i].positiveWeight = Number(positiveWeight.toFixed(2));
+        if (continuationQuality !== null) {
+          parsed[i].continuationQuality = continuationQuality;
+        }
         fs.writeFileSync(
           HISTORY_FILE,
           parsed.filter(Boolean).map((o) => JSON.stringify(o)).join('\n') + '\n',
