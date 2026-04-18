@@ -117,11 +117,13 @@ function parseSessionContext(content) {
  *
  * Returns '' when projectDir is null — no memory home to write to.
  */
-function buildMemoryOffloadBlock(projectDir) {
+function buildMemoryOffloadBlock(projectDir, sessionId) {
   if (!projectDir) return '';
   const memoryDir = path.join(projectDir, 'memory');
   const today = new Date();
-  const ymd = `${today.getFullYear()}_${String(today.getMonth() + 1).padStart(2, '0')}_${String(today.getDate()).padStart(2, '0')}`;
+  const ymd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const sid8 = String(sessionId || 'session').slice(0, 8);
+  const projectFilename = `project_session_${ymd}_${sid8}.md`;
 
   return [
     '',
@@ -132,20 +134,22 @@ function buildMemoryOffloadBlock(projectDir) {
     'already defined in your system prompt. Two files suggested — skip either if',
     'there\'s nothing new to record:',
     '',
-    `  1. project_session_${ymd}.md (type: project)`,
+    `  1. ${projectFilename} (type: project)`,
+    '     Use this exact filename. It is date + session-id, so repeated compacts',
+    '     in the same session extend one file and distinct sessions never collide.',
     '     - Decisions made, files touched with paths, follow-ups / open issues,',
     '       any non-obvious context that took >3 attempts to discover',
     '     - Why: detail the compact summary won\'t retain',
     '     - How to apply: how to pick up this thread in the next session',
     '',
-    '  2. reference_<pattern>.md (type: reference or project) — ONLY if a',
-    '     reusable recipe, layout, or rule was discovered this session. Skip',
-    '     otherwise. Examples: file-layout convention, test fixture pattern,',
-    '     debugging approach that worked.',
+    '  2. reference_<slug>.md (type: reference or project) — ONLY if a reusable',
+    '     recipe, layout, or rule was discovered this session. Skip otherwise.',
+    '     Examples: file-layout convention, test fixture pattern, debugging',
+    '     approach that worked. <slug> should describe the pattern, not the date.',
     '',
-    `Then update ${memoryDir}/MEMORY.md with one-line pointer(s). Do not`,
-    'duplicate content already captured in prior memories — update those in',
-    'place instead. If nothing new is worth persisting, say so and move on.',
+    `Update ${memoryDir}/MEMORY.md with one-line pointer(s). If ${projectFilename}`,
+    'already exists, extend it in place rather than overwriting. If nothing new',
+    'is worth persisting, say so and move on.',
     '',
     '\u2501'.repeat(50),
     '',
@@ -268,10 +272,10 @@ async function main() {
   try {
     const cfg = require(path.join(SI_LIB, 'config')).loadConfig();
     if (cfg && cfg.compact && cfg.compact.memoryOffload !== false) {
-      memoryOffload = buildMemoryOffloadBlock(projectDir);
+      memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
     }
   } catch { /* config optional — default is to emit the block */
-    memoryOffload = buildMemoryOffloadBlock(projectDir);
+    memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
   }
 
   // Emit a single top-level "Session Intelligence" heading so the model
