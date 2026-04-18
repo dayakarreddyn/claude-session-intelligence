@@ -626,18 +626,24 @@ function buildNexusAdditionalContext(cwd) {
 // Emitting a single JSON blob after those lines — Claude Code parses the
 // LAST JSON object on stdout for hook output, so combine multiple context
 // sources (nexus anchors + post-compact handoff) into one payload.
-function emitAdditionalContext(textParts) {
+//
+// `systemMessage` is the user-visible surface. Unlike PreCompact, Claude
+// Code suppresses SessionStart hook stderr when source=compact, so the
+// resume banner only lands via systemMessage. additionalContext still
+// carries the model-facing copy.
+function emitAdditionalContext(textParts, systemMessage) {
   const combined = (Array.isArray(textParts) ? textParts : [textParts])
     .filter((s) => typeof s === 'string' && s.length > 0)
     .join('\n\n');
-  if (!combined) return;
-  const payload = JSON.stringify({
+  if (!combined && !systemMessage) return;
+  const out = {
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
       additionalContext: combined,
     },
-  });
-  process.stdout.write(payload + '\n');
+  };
+  if (systemMessage) out.systemMessage = systemMessage;
+  process.stdout.write(JSON.stringify(out) + '\n');
 }
 
 // Post-compact continuation handoff. One-shot: pre-compact wrote the
@@ -697,18 +703,21 @@ function main() {
   const continuation = buildContinuationAdditionalContext(cwd);
   const nexus = buildNexusAdditionalContext(cwd);
 
-  // Surface the resume block to the user on the CLI via stderr. Claude Code
-  // shows the hook's stderr in the "[SessionStart] completed successfully"
-  // transcript line, matching the PreCompact banner style. stdout is
-  // reserved for the JSON additionalContext payload below.
+  // Surface the resume block to the user on the CLI. Claude Code suppresses
+  // SessionStart hook stderr on source=compact (unlike PreCompact), so the
+  // user-visible channel is `systemMessage` in the hookSpecificOutput JSON.
+  // We still write to stderr for non-compact sessions + operator debugging.
+  let systemMessage = '';
   if (continuation) {
     try {
       const { renderHandoffStderr } = require('../lib/handoff');
-      process.stderr.write(renderHandoffStderr(continuation));
+      const banner = renderHandoffStderr(continuation);
+      process.stderr.write(banner);
+      systemMessage = banner;
     } catch { /* rendering failure shouldn't block the hook */ }
   }
 
-  emitAdditionalContext([continuation, nexus]);
+  emitAdditionalContext([continuation, nexus], systemMessage);
 
   process.exit(0);
 }
