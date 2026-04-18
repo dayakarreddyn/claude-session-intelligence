@@ -25,8 +25,32 @@ const path = require('path');
 const os = require('os');
 
 const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB cap per day
-const DEBUG = process.env.CLAUDE_INTEL_DEBUG === '1';
-const QUIET = process.env.CLAUDE_INTEL_QUIET === '1';
+
+// Flags are resolved per-call (not captured at require-time) so that a
+// user who flips `/si set debug.enabled true` sees logs appear on the
+// very next hook fire without restarting Claude Code. Env still wins over
+// config to keep one-shot overrides (`CLAUDE_INTEL_DEBUG=1 node ...`)
+// working. Unified config read is wrapped in try/catch because the
+// config module lives in the same lib dir and might not be on disk yet
+// during a partial install.
+function flagsFromConfig() {
+  try {
+    const { loadConfig } = require('./config');
+    const cfg = loadConfig();
+    return {
+      debug: !!(cfg && cfg.debug && cfg.debug.enabled),
+      quiet: !!(cfg && cfg.debug && cfg.debug.quiet),
+    };
+  } catch { return { debug: false, quiet: false }; }
+}
+
+function resolveFlags() {
+  const fromCfg = flagsFromConfig();
+  return {
+    debug: process.env.CLAUDE_INTEL_DEBUG === '1' || fromCfg.debug,
+    quiet: process.env.CLAUDE_INTEL_QUIET === '1' || fromCfg.quiet,
+  };
+}
 
 function getLogDir() {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -62,8 +86,9 @@ function truncate(value, maxLen = 200) {
 }
 
 function shouldLog(level) {
-  if (QUIET && (level === 'info' || level === 'warn' || level === 'debug')) return false;
-  if (level === 'debug' && !DEBUG) return false;
+  const { debug, quiet } = resolveFlags();
+  if (quiet && (level === 'info' || level === 'warn' || level === 'debug')) return false;
+  if (level === 'debug' && !debug) return false;
   return true;
 }
 
