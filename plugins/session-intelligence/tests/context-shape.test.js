@@ -15,7 +15,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { analyzeShape } = require('../lib/context-shape');
+const { analyzeShape, rootDirOf } = require('../lib/context-shape');
 
 // Build entries(n, pattern): tokens monotonically increasing, root chosen
 // by callback so tests can shape head vs. tail themselves.
@@ -70,4 +70,88 @@ test('analyzeShape reports no shift when domain is stable across window', () => 
 test('analyzeShape handles empty input without throwing', () => {
   assert.equal(analyzeShape([]), null);
   assert.equal(analyzeShape(null), null);
+});
+
+// ── rootDirOf cwd-awareness (CSM dogfood bug) ──────────────────────────────
+// Without cwd stripping, absolute paths under /Users/<name>/ burn both depth
+// slots on the home prefix, collapsing every file under that user to a
+// single bucket. With cwd stripping, depth counts from the project root —
+// which is what makes HOT/DROPPED bands and regret detection meaningful.
+
+test('rootDirOf without cwd: absolute path buckets at home (current broken behavior preserved)', () => {
+  // Legacy callers that don't pass cwd still get the old output.
+  const root = rootDirOf('/Users/alex/DWS/CSM/frontend/dashboard/App.tsx', 2);
+  assert.equal(root, '/Users/alex');
+});
+
+test('rootDirOf with cwd: absolute path under cwd buckets from project root', () => {
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSM/frontend/dashboard/App.tsx',
+    2,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, 'frontend/dashboard');
+});
+
+test('rootDirOf with cwd: file at cwd root returns "."', () => {
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSM/README.md',
+    2,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, '.');
+});
+
+test('rootDirOf with cwd: exact cwd match returns "."', () => {
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSM',
+    2,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, '.');
+});
+
+test('rootDirOf with cwd: path OUTSIDE cwd falls back to absolute bucketing', () => {
+  // /tmp is not under /Users/alex/DWS/CSM — don't strip anything.
+  const root = rootDirOf(
+    '/tmp/foo/bar/baz.txt',
+    2,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, '/tmp/foo');
+});
+
+test('rootDirOf with cwd: sibling path with shared prefix does NOT match', () => {
+  // /Users/alex/DWS/CSMX must not match cwd /Users/alex/DWS/CSM — requires
+  // full path-segment boundary.
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSMX/foo.ts',
+    2,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, '/Users/alex');
+});
+
+test('rootDirOf with cwd: relative path passthrough unchanged', () => {
+  // Relative paths bypass the cwd-strip branch entirely.
+  const root = rootDirOf('src/auth/login.ts', 2, { cwd: '/Users/alex/DWS/CSM' });
+  assert.equal(root, 'src/auth');
+});
+
+test('rootDirOf with cwd: trailing slash on cwd is handled', () => {
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSM/backend/api/auth.go',
+    2,
+    { cwd: '/Users/alex/DWS/CSM/' },
+  );
+  assert.equal(root, 'backend/api');
+});
+
+test('rootDirOf with cwd + depth=3: monorepo layer below project root', () => {
+  const root = rootDirOf(
+    '/Users/alex/DWS/CSM/packages/core/src/auth/login.ts',
+    3,
+    { cwd: '/Users/alex/DWS/CSM' },
+  );
+  assert.equal(root, 'packages/core/src');
 });

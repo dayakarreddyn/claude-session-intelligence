@@ -108,21 +108,46 @@ function shapeFilePath(sessionId) {
  * Examples at depth=3 (monorepos with packages/*):
  *   packages/core/src/auth/login.ts -> packages/core/src
  *
+ * When `opts.cwd` is provided and `filePath` is absolute under `cwd`, the
+ * cwd prefix is stripped first so depth-bucketing counts from the project
+ * root instead of burning two segments on `/Users/<name>/`. Without this,
+ * every file in `/Users/<name>/DWS/REPO/src/auth/...` collapses to
+ * `/Users/<name>` at depth=2 — useless for regret detection.
+ *
+ * Examples with cwd=/Users/alex/DWS/CSM, depth=2:
+ *   /Users/alex/DWS/CSM/frontend/dashboard/App.tsx -> frontend/dashboard
+ *   /Users/alex/DWS/CSM/backend/api/auth.go        -> backend/api
+ *   /tmp/foo/bar (outside cwd)                     -> /tmp/foo
+ *
  * depth is clamped to [1, 5]. Invalid / missing → defaults to 2. Going
  * deeper than 3 fragments directories that should cluster (each test file
  * in its own "root" defeats the point); going shallower collapses features
  * into the same root (src/auth and src/billing both become `src`).
  */
-function rootDirOf(filePath, depth) {
+function rootDirOf(filePath, depth, opts) {
   if (!filePath || typeof filePath !== 'string') return '';
-  const norm = filePath.replace(/\\/g, '/').trim();
+  let norm = filePath.replace(/\\/g, '/').trim();
   if (!norm) return '';
 
   let d = Number.isFinite(depth) ? Math.floor(depth) : 2;
   if (d < 1) d = 1;
   if (d > 5) d = 5;
 
-  const isAbs = norm.startsWith('/');
+  // Strip cwd prefix when the path is under it, so depth counts from the
+  // project root. Only kicks in for absolute paths with a provided cwd;
+  // plain-relative paths and out-of-cwd paths fall through unchanged.
+  const cwd = opts && typeof opts.cwd === 'string' ? opts.cwd.replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  let isAbs = norm.startsWith('/');
+  if (isAbs && cwd && cwd.startsWith('/')) {
+    // Exact match (file is at cwd) or prefix with path separator to avoid
+    // /Users/alex/DWS/CSMX matching cwd=/Users/alex/DWS/CSM.
+    if (norm === cwd) return '.';
+    if (norm.startsWith(cwd + '/')) {
+      norm = norm.slice(cwd.length + 1);
+      isAbs = false;
+    }
+  }
+
   const parts = norm.split('/').filter(Boolean);
   if (parts.length === 0) return '';
   if (parts.length === 1) return isAbs ? `/${parts[0]}` : '.';

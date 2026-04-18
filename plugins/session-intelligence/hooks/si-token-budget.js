@@ -149,7 +149,12 @@ async function main() {
     const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
     const depth = (cfg && cfg.shape && Number.isFinite(cfg.shape.rootDirDepth))
       ? cfg.shape.rootDirDepth : 2;
-    const root = rootDirOf(filePath, depth);
+    // Pass cwd so absolute paths under the project don't burn two depth
+    // slots on /Users/<name>/ — with cwd stripping, depth=2 on
+    // /Users/alex/DWS/CSM/frontend/dashboard/App.tsx yields
+    // `frontend/dashboard` instead of the useless `/Users/alex`.
+    const cwd = (parsedInput && (parsedInput.cwd || (parsedInput.workspace && parsedInput.workspace.current_dir))) || process.cwd();
+    const root = rootDirOf(filePath, depth, { cwd });
     const cmd = toolInput.command || '';
     const toolOutput = (parsedInput && (parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
     let event = null;
