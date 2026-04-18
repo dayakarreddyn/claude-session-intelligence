@@ -314,6 +314,11 @@ async function main() {
           `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
         );
       }
+      if (zonesCfg.costTightened) {
+        body.push(
+          `(Orange tightened 12%: session cost ${costEst ? costEst.formatUsd(sessionCost) : `$${sessionCost.toFixed(2)}`} exceeds your historical p75 — expensive sessions warrant earlier warnings.)`
+        );
+      }
       if (learnCfg.announce === true && compactHistory && compactHistory.announceAdaptiveShift) {
         try {
           const shiftLine = compactHistory.announceAdaptiveShift(zonesCfg, cwdForZones);
@@ -325,6 +330,7 @@ async function main() {
       intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, {
         tokenBudget, count, lastZone, sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
+        costTightened: !!zonesCfg.costTightened,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
       });
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
