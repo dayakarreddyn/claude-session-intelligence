@@ -587,17 +587,40 @@ function buildNexusAdditionalContext(cwd) {
 //                             "additionalContext": "..." } }
 // Called at the VERY end of main() so bootstrap's stdout side-effects
 // (the `[session-intelligence] wired...` line) still reach the user.
-// Emitting a second JSON blob after those lines is fine — Claude Code
-// parses the last JSON object on stdout for hook output.
-function emitAdditionalContext(text) {
-  if (!text) return;
+// Emitting a single JSON blob after those lines — Claude Code parses the
+// LAST JSON object on stdout for hook output, so combine multiple context
+// sources (nexus anchors + post-compact handoff) into one payload.
+function emitAdditionalContext(textParts) {
+  const combined = (Array.isArray(textParts) ? textParts : [textParts])
+    .filter((s) => typeof s === 'string' && s.length > 0)
+    .join('\n\n');
+  if (!combined) return;
   const payload = JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'SessionStart',
-      additionalContext: text,
+      additionalContext: combined,
     },
   });
   process.stdout.write(payload + '\n');
+}
+
+// Post-compact continuation handoff. One-shot: pre-compact wrote the
+// file, we render + delete it here. Opt-out via continue.afterCompact=
+// false in config.
+function buildContinuationAdditionalContext(cwd) {
+  let siCfg = {};
+  try { siCfg = require('../lib/config').loadConfig() || {}; }
+  catch { /* optional */ }
+  if (siCfg.continue && siCfg.continue.afterCompact === false) return '';
+  try {
+    const projectDir = resolveProjectDir(cwd);
+    if (!projectDir) return '';
+    const handoff = require('../lib/handoff');
+    return handoff.readAndRenderHandoff(projectDir);
+  } catch (err) {
+    intelLog('bootstrap', 'debug', 'handoff read failed', { err: err && err.message });
+    return '';
+  }
 }
 
 function main() {
@@ -622,10 +645,15 @@ function main() {
     if (locked) releaseStateLock();
   }
 
-  // Nexus injection runs OUTSIDE the lock since it reads from the 24h-cached
-  // git-nexus file most of the time (no disk contention) and only shells out
-  // to `git log` on cache miss.
-  emitAdditionalContext(buildNexusAdditionalContext(cwd));
+  // Nexus injection + post-compact continuation handoff run OUTSIDE the
+  // lock since they read from cached files / a one-shot project handoff
+  // and don't touch shared bootstrap state. Both get combined into a
+  // single additionalContext payload — only the last JSON object on
+  // stdout is honoured by Claude Code's hook parser.
+  emitAdditionalContext([
+    buildContinuationAdditionalContext(cwd),
+    buildNexusAdditionalContext(cwd),
+  ]);
 
   process.exit(0);
 }

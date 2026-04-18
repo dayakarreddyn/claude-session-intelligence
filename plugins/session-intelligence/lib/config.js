@@ -98,6 +98,14 @@ const DEFAULTS = {
       injectLimit: 10,
     },
   },
+  continue: {
+    // Post-compact continuation handoff — pre-compact writes a snapshot of
+    // current task + in-flight files + memory follow-ups; the next
+    // SessionStart reads it so Claude resumes the thread instead of
+    // starting blank. Self-gated: skipped when no directional signal
+    // (fresh current-task or unresolved memory follow-up) exists.
+    afterCompact: true,
+  },
   learn: {
     // When true and adaptive zones (compact-history derived) materially
     // differ from the last time they were shown to the user, the next

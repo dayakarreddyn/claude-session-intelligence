@@ -388,6 +388,24 @@ async function main() {
       intelLog('pre-compact', 'info', 'history + snapshot written', {
         tokens, cost: historyEntry.cost, dropped: droppedDirs.length, hot: hotDirs.length,
       });
+
+      // Post-compact continuation handoff. One-shot file in projectDir —
+      // SessionStart reads + deletes it so Claude resumes the task. Gated
+      // by continue.afterCompact; handoff self-skips when no directional
+      // signal exists (fresh current-task or unresolved memory follow-up).
+      if (projectDir && (!siCfg.continue || siCfg.continue.afterCompact !== false)) {
+        try {
+          const handoff = require(path.join(SI_LIB, 'handoff'));
+          const wrote = handoff.writeHandoff({
+            projectDir, cwd, sessionId,
+            sessionStartMs: entries.length ? entries[0].t : undefined,
+            hotDirs, droppedDirs,
+          });
+          intelLog('pre-compact', 'info', 'continuation handoff', { wrote });
+        } catch (err) {
+          intelLog('pre-compact', 'warn', 'handoff write failed', { err: err && err.message });
+        }
+      }
     } catch (err) {
       intelLog('pre-compact', 'warn', 'history/snapshot failed', { err: err && err.message });
     }
