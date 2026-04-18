@@ -178,17 +178,23 @@ function loadEstimate(sessionId) {
 
 // ─── Git ─────────────────────────────────────────────────────────────────────
 
+// Shared options for every git subprocess: stderr → ignore so non-git
+// cwds don't spew "fatal: not a git repository" to the user's terminal
+// every statusline redraw. stdin is closed so git can't block waiting
+// for input on weird terminal setups.
+const GIT_EXEC_OPTS = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] };
+
 function gitBranch(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'],
-      { encoding: 'utf8', timeout: 1000 }).trim();
+      { ...GIT_EXEC_OPTS, timeout: 1000 }).trim();
   } catch { return ''; }
 }
 
 function gitDirtyCount(cwd) {
   try {
     const out = execFileSync('git', ['-C', cwd, 'status', '--porcelain'],
-      { encoding: 'utf8', timeout: 1500 });
+      { ...GIT_EXEC_OPTS, timeout: 1500 });
     return out.split('\n').filter(Boolean).length;
   } catch { return 0; }
 }
@@ -201,18 +207,19 @@ function gitDirtyCount(cwd) {
 function gitLastCommitSubject(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, 'log', '-1', '--pretty=%s'],
-      { encoding: 'utf8', timeout: 1000 }).trim();
+      { ...GIT_EXEC_OPTS, timeout: 1000 }).trim();
   } catch { return ''; }
 }
 
 /**
- * Git short diff stat: returns { added, deleted } across all tracked + untracked
- * working-tree changes. Uses --numstat across both tracked diff and untracked files.
+ * Git short diff stat: returns { added, deleted } across tracked working-tree
+ * changes vs HEAD. Untracked files are counted by `dirty` (±N) so their
+ * existence is visible even without line counts.
  */
 function gitDiffStat(cwd) {
   try {
     const tracked = execFileSync('git', ['-C', cwd, 'diff', '--numstat', 'HEAD'],
-      { encoding: 'utf8', timeout: 2000 });
+      { ...GIT_EXEC_OPTS, timeout: 2000 });
     let added = 0, deleted = 0;
     for (const line of tracked.split('\n')) {
       if (!line.trim()) continue;
@@ -318,15 +325,20 @@ function readSessionContextTask(projectDir) {
 //      keeps reflecting actual work even when the file is never updated.
 //   4. empty.
 function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
+  // Clamp: truncate(s, 0 | negative) yields a shorter-by-one string via
+  // s.slice(0, max - 1), which is almost-empty junk. Anything <= 3 leaves
+  // no room for the single-char ellipsis either. Treat bad input as "use
+  // default" rather than producing garbage output.
+  const safeMax = Number.isFinite(maxLen) && maxLen > 3 ? Math.floor(maxLen) : 40;
   const fromFile = readSessionContextTask(projectDir);
   if (fromFile && fromFile.text) {
     const ageMs = Date.now() - fromFile.mtimeMs;
     const stale = ageMs > staleHours * 60 * 60 * 1000;
     const marker = stale ? ' (stale)' : '';
-    return { text: truncate(fromFile.text + marker, maxLen), source: stale ? 'file-stale' : 'file' };
+    return { text: truncate(fromFile.text + marker, safeMax), source: stale ? 'file-stale' : 'file' };
   }
   const subject = gitLastCommitSubject(cwd);
-  if (subject) return { text: truncate(subject, maxLen), source: 'commit' };
+  if (subject) return { text: truncate(subject, safeMax), source: 'commit' };
   return { text: '', source: 'none' };
 }
 
@@ -519,11 +531,16 @@ function buildRenderers(C) {
     model: (input) => {
       const m = input.model?.display_name || input.model?.id || 'claude';
       // "Effort" = reasoning/output-style mode. Claude Code exposes this via
-      // input.output_style (string OR {name}). Shown beside the model name so
-      // the bar tells you "which Claude + in what mode" in one glance.
+      // input.output_style as a string OR object {name: string}. Compare
+      // case-insensitively against "default" because observed payloads use
+      // both "default" and "Default" depending on how the style was set.
+      // Guard against non-string .name so a malformed object can't leak
+      // "[object Object]" into the bar.
       const styleRaw = input.output_style;
-      const style = typeof styleRaw === 'string' ? styleRaw : (styleRaw && styleRaw.name) || '';
-      if (style && style !== 'default') {
+      let style = '';
+      if (typeof styleRaw === 'string') style = styleRaw;
+      else if (styleRaw && typeof styleRaw.name === 'string') style = styleRaw.name;
+      if (style && style.toLowerCase() !== 'default') {
         return `${C.dim}${m} · ${style}${C.reset}`;
       }
       return `${C.dim}${m}${C.reset}`;

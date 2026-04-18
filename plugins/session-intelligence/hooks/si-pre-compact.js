@@ -212,7 +212,14 @@ async function main() {
   // Shape hints pulled from the live tool-usage history for THIS session id
   // (same session id every other hook uses). Generated fresh at compact-time
   // so we never feed the model stale hot/cold bands.
-  const rawSid = stdinInput.session_id || stdinInput.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
+  // session_id must be a string — guard against object/number/etc. payloads
+  // so we don't end up stringifying them to "[object Object]" and emitting
+  // meaningless filenames like project_session_<date>_objectOb.md.
+  const pickSid = (v) => typeof v === 'string' ? v : '';
+  const rawSid = pickSid(stdinInput.session_id)
+    || pickSid(stdinInput.sessionId)
+    || process.env.CLAUDE_SESSION_ID
+    || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   let shapeInjection = '';
   if (ctxShape) {
