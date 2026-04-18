@@ -184,8 +184,11 @@ under /Users/you/.claude/projects/<encoded>/memory/ following the frontmatter +
 MEMORY.md index convention already defined in your system prompt. Two files
 suggested — skip either if there's nothing new to record:
 
-  1. project_session_YYYY_MM_DD.md (type: project) — decisions, files touched,
-     follow-ups, any non-obvious context that took >3 attempts to discover
+  1. project_session_YYYY-MM-DD_<sid8>.md (type: project) — decisions, files
+     touched, follow-ups, any non-obvious context that took >3 attempts to
+     discover. Filename is deterministic: date + first 8 chars of session id,
+     so repeated compacts in the same session extend one file while distinct
+     sessions never collide.
   2. reference_<pattern>.md — ONLY if a reusable recipe/layout/rule was
      discovered this session
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -216,7 +219,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 
 | Field | Example | Description |
 |---|---|---|
-| `model` | `Opus 4.7 (1M)` | Model display name from Claude Code's stdin (dim) |
+| `model` | `Opus 4.7 (1M)` or `Opus 4.7 · explanatory` | Model display name. When `output_style` is non-default it's suffixed with ` · <style>` (e.g. `explanatory`, `concise`). This is the *output style mode*, not reasoning effort — Claude Code doesn't expose thinking-budget on stdin (dim) |
 | `project` | `CSM` | Basename of the working directory (dim) |
 | `branch` | `dev` | Current git branch (dim) |
 | `dirty` | `±3` | Simple count of dirty files (dim) |
@@ -225,7 +228,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `tokens` | `▰▰▰▱ 425k` | **Zone bar + count** — the ONE coloured field. Green → yellow → orange → red. Prefixed with `~` when using the estimate fallback |
 | `zone` | `orange` | Zone name only, coloured |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
-| `session` | `3h42m` | Duration since the first transcript timestamp (dim) |
+| `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
 | `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open (dim) |
 | `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (dim; prices configurable) |
 | `compactAge` | `compact:2h13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
@@ -327,6 +330,7 @@ If you had no statusLine configured, you get just the intel lines.
 | `CLAUDE_STATUSLINE_NO_PREV=1` | (Chain) Skip the previous command — show only our intel line |
 | `CLAUDE_STATUSLINE_NO_INTEL=1` | (Chain) Skip our line — show only the previous command |
 | `CLAUDE_STATUSLINE_SEP="..."` | (Chain) Separator between previous and intel (default: newline) |
+| `CLAUDE_STATUSLINE_PREV_FIRST=1` | (Chain) Flip default ordering so the previous command renders above the intel line — by default intel renders on top so the zone signal is at eye level |
 
 ### Deploy breadcrumb
 
@@ -389,10 +393,19 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 /si reset taskChange                # restore one section to defaults
 /si reset *                         # restore everything
 /si explain taskChange.minTokens    # describe what a key does
+/si configure                       # interactive per-key wizard — one prompt per setting
 /si migrate                         # fold legacy statusline-intel.json in
 ```
 
 Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
+
+### `/si configure` — interactive wizard
+
+For users who'd rather not memorize dotted keys. The wizard walks the 14 user-facing tunables one prompt at a time via `AskUserQuestion`: statusline preset, token source, all three zone thresholds, task-length truncation, colours, compact threshold, autoblock, memory-offload, task-change on/off and min-tokens, debug on/quiet. Each prompt shows **current value · default value · one-line description** and 3–4 named choices; "Other" lets you type a custom value, `skip`, or `quit`.
+
+Selections stage into an in-memory patch — nothing is written until the very end, when the combined diff is previewed and the standard **YES** gate runs once. One confirmation regardless of how many keys changed.
+
+Complex fields (`statusline.fields` array, `serviceHealth` URL list, `prices` overrides) stay under `/si set` because they're too freeform for 4-option prompts.
 
 ## Auto-Compact Suggestions
 
