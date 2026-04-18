@@ -525,6 +525,16 @@ This gets *appended* to whatever you have in `session-context.md`, so user-curat
 
 No need to remember preserve/drop syntax. Plain `/compact` works — the hook injects hints automatically. Free-text `/compact preserve auth refactor, drop old browser tests` still works too and composes on top of the auto-injection (your words go in first, hook adds its block after).
 
+### Post-compact resume
+
+Pre-compact writes a one-shot handoff file (`.si-handoff.json` in the project's `~/.claude/projects/<encoded>/` dir) with: current task, unresolved follow-ups from memory, in-flight (uncommitted) files, commits shipped this session, and recently-active directories. The next SessionStart reads it, deletes it (so unrelated compacts don't replay stale state), and injects a **SESSION RESUME** block via `additionalContext`.
+
+The resume block carries an explicit model directive to (1) echo the banner verbatim at the top of the next reply, then (2) auto-resume the current task — read files, make the next edit — without re-announcing what it's about to do. The model only pauses to ask if the current task is finished **and** no actionable next priority exists.
+
+**Claude Code pauses for input after manual `/compact`.** There's no hook channel to auto-trigger a model turn, so you need to send any short message (e.g. just `c`) for the resume banner to show + work to continue. The bootstrap hook surfaces this tip once per install; the banner itself carries the same hint at the bottom.
+
+Gated by `continue.afterCompact` (default true). Self-gated: if every signal is empty (no fresh current task, no follow-ups, no commits, no hot dirs) the handoff file isn't written at all, so a topic-pivot `/compact` doesn't drag old context forward.
+
 ## Learning Loop
 
 Three cooperating mechanisms so the plugin **gets better the longer you use it**:
@@ -585,7 +595,7 @@ The **regret rate across your last 10 compacts** feeds back into `adaptiveZones(
 
 ## Task Change Detector
 
-When you submit a prompt, `si-task-change.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, asks whether you want to `/compact`, `/clear`, or keep going before it processes the prompt.
+When you submit a prompt, `si-task-change.js` (UserPromptSubmit hook) decides whether it looks like a **domain change** from the task you're currently working on — and if so, writes a single-line **hint** to stderr suggesting `/compact` or `/clear`. The prompt is never blocked; derailing a legitimate topic shift is worse than a little context pollution. Background `<task-notification>` completions and slash-command artifacts (`<local-command-*>`, `<command-*>`) are filtered out — they aren't user intent and were previously mis-scored.
 
 ### Layer 1 — heuristic signals (always on)
 
@@ -616,11 +626,11 @@ When the heuristic score falls in the ambiguous band (`differentDomainScore < sc
 | Same-domain score | Tokens ≥ `minTokens` | Action |
 |---|---|---|
 | ≥ `sameDomainScore` (default 0.5) | any | silent |
-| between both thresholds | yes | recommend **/compact** (preserve current task) |
-| < `differentDomainScore` (default 0.2) | yes | recommend **/clear** (fresh start is cheaper) |
+| between both thresholds | yes | stderr hint: *consider `/compact` (preserve current task)* |
+| < `differentDomainScore` (default 0.2) | yes | stderr hint: *consider `/clear` (fresh start is cheaper)* |
 | any | no | silent (below `minTokens` — cheap either way) |
 
-The dialog offers three buttons: `[Continue]`, `[Compact]`, `[Clear]`. **Continue** proceeds. **Compact/Clear/timeout** block the prompt with exit 2 + an instruction for Claude to relay. One-shot per (session, prompt-hash) — retrying the same prompt won't re-prompt.
+The prompt is always allowed through (`exit 0`). One-shot per (session, prompt-hash) — retrying the same prompt won't re-hint.
 
 ### Tuning
 
@@ -631,8 +641,6 @@ Everything is in `taskChange.*`:
 /si set taskChange.minTokens 150000             # only kick in above 150k
 /si set taskChange.sameDomainScore 0.6          # stricter "same domain"
 /si set taskChange.differentDomainScore 0.15    # looser "different domain"
-/si set taskChange.prompt false                 # inline-only (no mac popup)
-/si set taskChange.promptTimeout 30
 /si set taskChange.conversationalMaxLen 120     # treat short prompts without
                                                 # file refs as conversation
 /si set taskChange.recentHours 24               # pool commits from last N hours
@@ -702,7 +710,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 | `si-pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
 | `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
 | `si-suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
-| `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; offers /compact, /clear, or continue when the task looks like it just shifted |
+| `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; writes a one-line stderr hint (never blocks) when the task looks like it just shifted |
 
 All emit structured entries to the debug log (see above).
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Session Intelligence — Task Change Detector
+ * Session Intelligence — Task Change Detector (hint-only)
  *
  * Runs on UserPromptSubmit. Decides whether the new prompt is in the SAME
  * domain as the current task (from session-context.md). If it's clearly a
- * different domain AND context is heavy enough to matter, the hook asks the
- * user whether to /clear, /compact, or continue — then blocks the prompt so
- * the user can act before work starts.
+ * different domain AND context is heavy enough to matter, the hook writes
+ * a single-line nudge to stderr. It NEVER blocks the prompt — the user
+ * already typed, and blocking mid-flow derails legitimate topic shifts.
  *
  * Signals (combined into a 0..1 same-domain score):
  *   1. File overlap   — paths mentioned in the new prompt vs. Key Files in
@@ -22,11 +22,10 @@
  *
  * Decision matrix (requires tokens ≥ taskChange.minTokens to fire at all):
  *   score ≥ sameDomainScore      → silent
- *   differentDomain < score      → advise /compact (preserve current task)
- *   score < differentDomainScore → advise /clear (fresh start cheaper)
+ *   differentDomain < score      → hint: consider /compact
+ *   score < differentDomainScore → hint: consider /clear
  *
- * One-shot per (session, promptHash). Reset when tokens drop after
- * /compact or /clear so the next change is detected again.
+ * One-shot per (session, promptHash) so retries don't repeat the hint.
  */
 
 const fs = require('fs');
@@ -109,6 +108,26 @@ function extractKeyFiles(sessionContext) {
     if (pathMatch) files.push(pathMatch[0].replace(/[,.;]$/, ''));
   }
   return files;
+}
+
+// System wrappers Claude Code injects into UserPromptSubmit that aren't
+// user task intent. `<task-notification>` is the background Task tool's
+// completion signal; `<local-command-*>` wraps slash-command output that
+// the model is explicitly told not to respond to.
+const SYSTEM_PROMPT_MARKERS = [
+  '<task-notification>',
+  '<local-command-caveat>',
+  '<local-command-stdout>',
+  '<local-command-stderr>',
+  '<command-name>',
+  '<command-message>',
+  '<command-args>',
+];
+
+function isSystemGeneratedPrompt(prompt) {
+  const trimmed = (prompt || '').trim();
+  if (!trimmed) return false;
+  return SYSTEM_PROMPT_MARKERS.some((marker) => trimmed.startsWith(marker));
 }
 
 // ─── Prompt parsing ──────────────────────────────────────────────────────────
@@ -361,42 +380,6 @@ function callClassifier(currentContext, newPrompt, cfg) {
   }
 }
 
-// ─── Dialog ──────────────────────────────────────────────────────────────────
-
-function askUserTaskChange(action, score, tokens, cfg) {
-  if (cfg.prompt === false) return 'unavailable';
-  if (process.platform !== 'darwin') return 'unavailable';
-
-  const body =
-    `New prompt looks like a different task domain (same-domain score ${score.toFixed(2)}).\n` +
-    `Context is at ~${fmtTokens(tokens)} tokens.\n\n` +
-    (action === 'clear'
-      ? `Fresh start (/clear) is usually cheapest. What do you want to do?`
-      : `Recommend /compact (preserve current task). What do you want to do?`);
-
-  const timeoutSec = Number.isFinite(cfg.promptTimeout) && cfg.promptTimeout > 0
-    ? cfg.promptTimeout : 20;
-
-  const script =
-    `display dialog ${JSON.stringify(body)} ` +
-    `buttons {"Continue", "Compact", "Clear"} default button ${JSON.stringify(action === 'clear' ? 'Clear' : 'Compact')} ` +
-    `with title "Claude Code — Task Change Detected" with icon note ` +
-    `giving up after ${timeoutSec}`;
-
-  try {
-    const out = execFileSync('osascript', ['-e', script], {
-      encoding: 'utf8',
-      timeout: (timeoutSec + 5) * 1000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (/gave up:\s*true/.test(out)) return 'timeout';
-    if (/button returned:\s*Clear/.test(out)) return 'clear';
-    if (/button returned:\s*Compact/.test(out)) return 'compact';
-    if (/button returned:\s*Continue/.test(out)) return 'continue';
-    return 'unavailable';
-  } catch { return 'unavailable'; }
-}
-
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function hashPrompt(s) {
@@ -417,6 +400,17 @@ function main() {
   const prompt = input.prompt || input.user_message?.content || input.message || '';
   if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 20) {
     // Too short to be a task change — things like "yes", "continue", "fix this".
+    process.exit(0);
+  }
+
+  // System-generated prompts (background task completions, slash-command
+  // artifacts) arrive via UserPromptSubmit but aren't user task intent.
+  // Scoring them against session-context always yields ~0 and blocks the
+  // real flow. Skip before any signal work.
+  if (isSystemGeneratedPrompt(prompt)) {
+    intelLog('task-change', 'debug', 'system-generated prompt — silent', {
+      head: prompt.trim().slice(0, 40),
+    });
     process.exit(0);
   }
 
@@ -532,30 +526,20 @@ function main() {
   } catch { /* no prior */ }
   try { writeFile(stateFile, promptHash); } catch { /* best effort */ }
 
-  const answer = askUserTaskChange(action, combined.score, tokenBudget, cfg);
-  intelLog('task-change', 'info', 'prompted', {
-    action, answer, score: combined.score, tokenBudget,
-    filesInPrompt: promptFiles.length, keyFiles: keyFiles.length,
-  });
-
-  if (answer === 'continue') {
-    log(`[TaskChange] domain shift acknowledged — continuing (score ${combined.score.toFixed(2)}).`);
-    process.exit(0);
-  }
-
-  // "compact", "clear", "timeout", "unavailable" → block with instruction.
-  const slash = (answer === 'clear' || action === 'clear') ? '/clear' : '/compact';
-  const approvedPrefix = (answer === 'clear' || answer === 'compact')
-    ? `User approved ${slash} via prompt. `
-    : '';
+  // Hint-only. The prompt is never blocked — the user already typed, and
+  // derailing a legitimate topic shift with a hard block is worse than
+  // risking a little context pollution. We surface a single-line nudge on
+  // stderr and let the prompt through. Disable entirely via
+  // `/si set taskChange.enabled false`.
+  const slash = action === 'clear' ? '/clear' : '/compact';
+  const parenth = slash === '/compact' ? ' (preserve current task context)' : '';
   const msg =
-    `[TaskChange] ${approvedPrefix}New prompt appears to be a different task domain ` +
+    `[TaskChange hint] Prompt looks like a different task domain ` +
     `(same-domain score ${combined.score.toFixed(2)}, ~${fmtTokens(tokenBudget)} tokens). ` +
-    `Run \`${slash}\`${slash === '/compact' ? ' (preserve current task context)' : ''} ` +
-    `before continuing; this prompt was blocked so you can act first. ` +
+    `Consider \`${slash}\`${parenth} before heavy new work. ` +
     `Disable via /si set taskChange.enabled false.`;
   process.stderr.write(`${msg}\n`);
-  process.exit(2); // block the prompt
+  process.exit(0);
 }
 
 try { main(); } catch (err) {

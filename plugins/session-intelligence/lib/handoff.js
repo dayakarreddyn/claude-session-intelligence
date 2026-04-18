@@ -340,7 +340,14 @@ function wrapHandoffForModelEcho(block) {
   return [
     'SESSION RESUME — display to user:',
     '',
-    'At the START of your next reply, print the block between the markers below VERBATIM (preserve the \u2501 dividers and line breaks exactly). Do not paraphrase, summarise, or wrap in code fences. After printing it, continue with the task.',
+    'At the START of your next reply, print the block between the markers below VERBATIM (preserve the \u2501 dividers and line breaks exactly). Do not paraphrase, summarise, or wrap in code fences.',
+    '',
+    'After printing the block, DO NOT idle or wait. Immediately continue working:',
+    '  1. If "Current task" names a concrete in-flight task, resume that task now — read the relevant files, make the next edit, run the next check.',
+    '  2. If the current task is finished and "Next priorities" lists a concrete actionable item, pick the top one and start it.',
+    '  3. Only stop to ask the user if BOTH (a) the current task is complete or ambiguous AND (b) there is no actionable next priority. In that case, one short line asking what to do next is enough.',
+    '',
+    'Do not re-announce what you are about to do in prose before tool calls — just start.',
     '',
     '---BEGIN RESUME BLOCK---',
     banner.replace(/\n+$/, ''),
@@ -408,7 +415,9 @@ function renderHandoffBlock(handoff) {
     lines.push('');
   }
 
-  lines.push('Ask the user before pivoting — if the `/compact` was meant to change topics, say so and this context becomes stale. Otherwise continue with the next priority above.');
+  lines.push('Resume the current task now. Only ask first if the task is finished and no actionable next priority exists, or if `/compact` was meant to change topics (in which case this context is stale).');
+  lines.push('');
+  lines.push('(Tip: Claude Code pauses for input after /compact. Send any short message next time \u2014 e.g. just `c` or `continue` \u2014 and this banner shows + I auto-resume from here.)');
   return lines.join('\n');
 }
 

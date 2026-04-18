@@ -575,6 +575,19 @@ function autoFillSessionContext(cwd, state) {
   }
 }
 
+// ─── First-run tips (shown once per install) ─────────────────────────────────
+//
+// Claude Code pauses for user input after manual /compact — there's no hook
+// channel to auto-trigger the next model turn. So the first time a user
+// /compacts they may be surprised that the resume banner doesn't appear until
+// they type something. Surface this expectation up front, once.
+function showFirstRunTips(state) {
+  if (state.shownCompactResumeTip) return false;
+  notify('tip: after /compact, send any short message (e.g. `c`) to show the resume banner and continue the last task.');
+  state.shownCompactResumeTip = new Date().toISOString();
+  return true;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function readStdinJsonOrEmpty() {
@@ -693,8 +706,9 @@ function main() {
     const didSeedCtx = seedSessionContext(cwd, state);
     const didAutoFill = autoFillSessionContext(cwd, state);
     const didInject = injectClaudeMdRules(cwd, state);
+    const didShowTips = showFirstRunTips(state);
 
-    if (didSeedConfig || didWire || didSeedCtx || didAutoFill || didInject) {
+    if (didSeedConfig || didWire || didSeedCtx || didAutoFill || didInject || didShowTips) {
       saveState(state);
     }
   } finally {
