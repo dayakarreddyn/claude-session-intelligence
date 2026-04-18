@@ -98,9 +98,16 @@ cp "${PLUGIN_SRC}/hooks/si-suggest-compact.js" "${HOOKS_DIR}/si-suggest-compact.
 cp "${PLUGIN_SRC}/hooks/si-token-budget.js"    "${HOOKS_DIR}/si-token-budget.js"
 cp "${PLUGIN_SRC}/hooks/si-task-change.js"     "${HOOKS_DIR}/si-task-change.js"
 cp "${PLUGIN_SRC}/hooks/si-status-report.js"   "${HOOKS_DIR}/si-status-report.js"
-cp "${PLUGIN_SRC}/lib/utils.js"                    "${LIB_DIR}/utils.js"
-cp "${PLUGIN_SRC}/lib/intel-debug.js"              "${LIB_DIR}/intel-debug.js"
-cp "${PLUGIN_SRC}/lib/config.js"                   "${LIB_DIR}/config.js"
+# Copy every .js in plugins/session-intelligence/lib/ so new modules
+# (thinking.js, phase-events.js, git-nexus.js, …) land automatically
+# without touching the installer each time. Pre-existing installs may
+# have stale copies from earlier cherry-picked `cp` lines; this loop
+# overwrites them all.
+for _lib in "${PLUGIN_SRC}/lib"/*.js; do
+  [ -f "$_lib" ] || continue
+  cp "$_lib" "${LIB_DIR}/$(basename "$_lib")"
+done
+unset _lib
 
 # Repair ECC-owned lib dir if an older SI install clobbered it.
 #
