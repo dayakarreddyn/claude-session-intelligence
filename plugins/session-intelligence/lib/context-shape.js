@@ -768,8 +768,16 @@ function draftMessage(analysis) {
  * This is what gets baked into the model's compaction instructions — so
  * wording here goes straight into Claude Code's compaction pipeline.
  */
-function formatCompactInjection(analysis) {
+function formatCompactInjection(analysis, opts = {}) {
   if (!analysis) return '';
+
+  // `stablePrefix` trades detail for cache-hit stability. This block
+  // becomes part of the post-compact prefix; any per-compact-volatile
+  // token (counts, stale-token estimates, Jaccard, phase-marker token
+  // positions) forces a cache miss every time the user re-compacts the
+  // same project. Stable mode emits only the names that survive across
+  // compacts of the same working set.
+  const stable = !!opts.stablePrefix;
 
   // Plain markdown headings — render cleanly on both the CLI terminal and
   // the Claude mobile client. The earlier 50×━ divider bars wrapped to
@@ -782,8 +790,9 @@ function formatCompactInjection(analysis) {
   if (analysis.shift) {
     const from = analysis.shift.from.join(', ') || '(earlier context)';
     const to = analysis.shift.to.join(', ') || '(current)';
+    const jac = stable ? '' : ` (Jaccard ${analysis.shift.jaccard})`;
     lines.push('');
-    lines.push(`**Domain shift:** ${from} \u2192 ${to} (Jaccard ${analysis.shift.jaccard})`);
+    lines.push(`**Domain shift:** ${from} \u2192 ${to}${jac}`);
   }
 
   if (analysis.hot.length) {
@@ -792,16 +801,21 @@ function formatCompactInjection(analysis) {
     for (const h of analysis.hot) {
       const files = h.samples.length ? ` \u2014 e.g. ${h.samples.slice(0, 2).join(', ')}` : '';
       const tag = h.allowlisted ? ' [allowlisted]' : '';
-      lines.push(`- ${h.root} (${h.count} calls)${tag}${files}`);
+      const count = stable ? '' : ` (${h.count} calls)`;
+      lines.push(`- ${h.root}${count}${tag}${files}`);
     }
   }
 
   if (analysis.cold.length && analysis.staleTokens >= MIN_STALE_TO_MENTION) {
     lines.push('');
-    lines.push(`**Safe to drop** (~${Math.round(analysis.staleTokens / 1000)}k stale tokens):`);
+    const header = stable
+      ? '**Safe to drop:**'
+      : `**Safe to drop** (~${Math.round(analysis.staleTokens / 1000)}k stale tokens):`;
+    lines.push(header);
     for (const c of analysis.cold) {
       const files = c.samples.length ? ` \u2014 e.g. ${c.samples.slice(0, 2).join(', ')}` : '';
-      lines.push(`- ${c.root} (${c.count} calls earlier)${files}`);
+      const count = stable ? '' : ` (${c.count} calls earlier)`;
+      lines.push(`- ${c.root}${count}${files}`);
     }
     lines.push('');
     lines.push('Keep only one-line summaries in the DROP section \u2014 detail is no longer load-bearing.');
@@ -811,7 +825,8 @@ function formatCompactInjection(analysis) {
     lines.push('');
     lines.push('**Phase markers:**');
     for (const ev of analysis.events) {
-      lines.push(`- ${ev.event} at ~${Math.round((ev.tok || 0) / 1000)}k tokens`);
+      const at = stable ? '' : ` at ~${Math.round((ev.tok || 0) / 1000)}k tokens`;
+      lines.push(`- ${ev.event}${at}`);
     }
   }
 

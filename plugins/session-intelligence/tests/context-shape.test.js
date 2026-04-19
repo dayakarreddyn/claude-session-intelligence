@@ -25,6 +25,7 @@ const {
   shapeFilePath, appendShape,
   projectRootOf, _resetProjectRootCache,
   sessionStatePath, readSessionState, writeSessionState, resolveSessionCwd,
+  formatCompactInjection,
 } = require('../lib/context-shape');
 
 // Build entries(n, pattern): tokens monotonically increasing, root chosen
@@ -625,4 +626,76 @@ test('rollupShape with canonicalCwd persists reclassified roots', () => {
   assert.ok(keys.includes('lib/helpers'), 'reclassified root persisted');
   assert.ok(!keys.includes('/Users/alex'), 'legacy blob not persisted');
   cleanupRollup(sid);
+});
+
+// ─── formatCompactInjection: stablePrefix mode ─────────────────────────
+// The pre-compact block becomes the post-compact prefix, so any per-compact
+// volatile value (call counts, stale-token estimate, Jaccard, phase token
+// positions) busts prompt-cache on every subsequent compact of the same
+// project. Stable mode must strip those without dropping names.
+
+function makeAnalysis(overrides = {}) {
+  // staleTokens must clear MIN_STALE_TO_MENTION (20k) or the cold band
+  // is silently suppressed — that threshold is orthogonal to the
+  // stable-prefix behavior under test.
+  return {
+    shift: { from: ['a'], to: ['b'], jaccard: 0.25 },
+    hot: [
+      { root: 'src/auth', count: 47, allowlisted: false, samples: ['src/auth/login.ts'] },
+      { root: 'src/api',  count: 12, allowlisted: true,  samples: [] },
+    ],
+    cold: [
+      { root: 'tests/fixtures', count: 30, samples: ['tests/fixtures/users.json'] },
+    ],
+    staleTokens: 35000,
+    events: [
+      { event: 'commit', tok: 123000 },
+    ],
+    ...overrides,
+  };
+}
+
+test('formatCompactInjection default mode includes counts + staleTokens + Jaccard', () => {
+  const out = formatCompactInjection(makeAnalysis());
+  assert.match(out, /\(47 calls\)/);
+  assert.match(out, /\(12 calls\)/);
+  assert.match(out, /\(30 calls earlier\)/);
+  assert.match(out, /~35k stale tokens/);
+  assert.match(out, /Jaccard 0\.25/);
+  assert.match(out, /commit at ~123k tokens/);
+});
+
+test('formatCompactInjection stablePrefix strips every per-compact volatile value', () => {
+  const out = formatCompactInjection(makeAnalysis(), { stablePrefix: true });
+  // Names + allowlist tag must still be present — that's the signal.
+  assert.match(out, /src\/auth/);
+  assert.match(out, /src\/api/);
+  assert.match(out, /\[allowlisted\]/);
+  assert.match(out, /tests\/fixtures/);
+  assert.match(out, /commit/);
+  // Volatile fragments must be gone.
+  assert.ok(!/\bcalls\b/.test(out), 'no call-count tallies');
+  assert.ok(!/stale tokens/.test(out), 'no stale-token estimate');
+  assert.ok(!/Jaccard/.test(out), 'no Jaccard coefficient');
+  assert.ok(!/~\d+k tokens/.test(out), 'no phase-marker token positions');
+});
+
+test('formatCompactInjection stablePrefix output is byte-identical across changing counts', () => {
+  // Same working set, different per-compact counts — the stable prefix
+  // must hash the same so the post-compact prefix stays cache-warm.
+  const a = formatCompactInjection(makeAnalysis({
+    hot: [{ root: 'src/auth', count: 47, allowlisted: false, samples: ['src/auth/login.ts'] }],
+    cold: [{ root: 'tests/fixtures', count: 30, samples: ['tests/fixtures/users.json'] }],
+    staleTokens: 35000,
+    events: [{ event: 'commit', tok: 123000 }],
+    shift: null,
+  }), { stablePrefix: true });
+  const b = formatCompactInjection(makeAnalysis({
+    hot: [{ root: 'src/auth', count: 9999, allowlisted: false, samples: ['src/auth/login.ts'] }],
+    cold: [{ root: 'tests/fixtures', count: 1, samples: ['tests/fixtures/users.json'] }],
+    staleTokens: 90000,
+    events: [{ event: 'commit', tok: 999000 }],
+    shift: null,
+  }), { stablePrefix: true });
+  assert.equal(a, b);
 });

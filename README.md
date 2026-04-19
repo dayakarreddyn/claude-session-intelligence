@@ -461,6 +461,8 @@ Hooks run as subprocesses — they can `exit 0/2`, write stdout/stderr, or emit 
 - Silence suggestions entirely: `export CLAUDE_COMPACT_AUTOBLOCK=0` (the env var keeps its old name for backwards compat — it no longer blocks anything)
 - Silence the memory-offload nudge + pre-compact directive: `/si set compact.memoryOffload false` or `export CLAUDE_COMPACT_MEMORY_OFFLOAD=0`
 - First advisory after N tool calls: `/si set compact.threshold 75`
+- Cache-friendly pre-compact output (default **on**): strips per-compact volatile values (call counts, stale-token estimate, Jaccard, dated/session-scoped memory filename, zone-crossover token + cost figures) from every model-visible channel so the post-compact prefix is byte-stable and survives as a prompt-cache hit across subsequent compacts of the same working set. Trades "47 calls / ~35k stale / $2.40 spent" detail for cache stability (roughly −90% read cost on the post-compact prefix). Opt back into the verbose metrics with `/si set compact.stablePrefix false` or `export CLAUDE_COMPACT_STABLE_PREFIX=0`.
+- Priorities-review directive (pre-compact): names `memory/MEMORY.md`, the most recent `memory/project_session_*.md`, and `session-context.md` and asks Claude to strike (`~~...~~`) any `## Follow-ups` / `## Next steps` / `## Next priorities` / `## TODO` bullet whose work visibly shipped this session. Struck items drop out of the next post-compact resume banner automatically. No regex matcher — Claude has transcript context and can judge what shipped semantically. Skipped when no priority-bearing file exists.
 
 ## Context Shape Tracker
 

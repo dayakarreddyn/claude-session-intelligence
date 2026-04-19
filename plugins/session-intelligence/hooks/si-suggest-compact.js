@@ -310,9 +310,16 @@ async function main() {
       });
       const diagnosis = draftMessage(shape);
 
+      // Stable mode: drop live token/cost numbers from the headline +
+      // skip the adaptive-zone and cost-tightened stat lines below. The
+      // zone name alone carries the actionable signal; the numbers are
+      // UX nice-to-haves that change every tool call.
+      const stablePrefix = !!(fullCfg.compact && fullCfg.compact.stablePrefix);
       const header = zone === 'red' ? 'High-risk zone' : 'Drift zone';
-      const costStr = (costEst && sessionCost > 0) ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
-      const headline = `[StrategicCompact] ${header} — context at ~${formatTokens(tokenBudget)} tokens${costStr}. Advisory only — continue if the task needs full context.`;
+      const costStr = (!stablePrefix && costEst && sessionCost > 0)
+        ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
+      const tokStr = stablePrefix ? '' : ` — context at ~${formatTokens(tokenBudget)} tokens${costStr}`;
+      const headline = `[StrategicCompact] ${header}${tokStr}. Advisory only — continue if the task needs full context.`;
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
 
@@ -332,13 +339,13 @@ async function main() {
       body.push(
         'When you do compact, `/compact` auto-injects preserve/drop hints from observed tool usage; free-text hints still work.'
       );
-      if (zonesCfg.adaptive) {
+      if (!stablePrefix && zonesCfg.adaptive) {
         const scope = zonesCfg.bucket === 'cwd' ? 'this repo' : 'your history';
         body.push(
           `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
         );
       }
-      if (zonesCfg.costTightened) {
+      if (!stablePrefix && zonesCfg.costTightened) {
         body.push(
           `(Orange tightened 12%: session cost ${costEst ? costEst.formatUsd(sessionCost) : `$${sessionCost.toFixed(2)}`} exceeds your historical p75 — expensive sessions warrant earlier warnings.)`
         );

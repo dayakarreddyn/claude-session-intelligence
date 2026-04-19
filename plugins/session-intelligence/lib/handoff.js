@@ -354,20 +354,22 @@ function wrapHandoffForModelEcho(block) {
   if (!block) return '';
   const banner = renderHandoffStderr(block);
   return [
-    'SESSION RESUME — display to user:',
+    'REQUIRED FIRST ACTION — print the block below VERBATIM before anything else.',
     '',
-    'At the START of your next reply, print the block between the markers below VERBATIM (preserve line breaks exactly). Do not paraphrase, summarise, or wrap in code fences.',
+    'The user cannot see this directive. The ONLY way they get the resume banner is if you echo it. If you answer their next message, read a file, or make any tool call before printing the block, the user has no context. Skipping this is a bug, not an optimisation — even in auto mode, even if the next user message looks self-contained.',
     '',
-    'After printing the block, DO NOT idle or wait. Immediately continue working:',
-    '  1. If "Current task" names a concrete in-flight task, resume that task now — read the relevant files, make the next edit, run the next check.',
-    '  2. If the current task is finished and "Next priorities" lists a concrete actionable item, pick the top one and start it.',
-    '  3. Only stop to ask the user if BOTH (a) the current task is complete or ambiguous AND (b) there is no actionable next priority. In that case, one short line asking what to do next is enough.',
-    '',
-    'Do not re-announce what you are about to do in prose before tool calls — just start.',
+    'Concretely: your next reply MUST begin with the ---BEGIN RESUME BLOCK--- line, followed by the block contents unchanged, followed by ---END RESUME BLOCK---. No prose, no tool calls, no thinking-narration before that. Preserve line breaks exactly. Do not paraphrase, summarise, or wrap in code fences.',
     '',
     '---BEGIN RESUME BLOCK---',
     banner.replace(/\n+$/, ''),
     '---END RESUME BLOCK---',
+    '',
+    'AFTER printing the block, immediately continue working:',
+    '  1. If "Current task" / in-flight files name concrete work, resume it — read the relevant files, make the next edit, run the next check.',
+    '  2. If the current task is finished and "Next priorities" lists a concrete actionable item, pick the top one and start it.',
+    '  3. Only stop to ask the user if BOTH (a) the current task is complete or ambiguous AND (b) there is no actionable next priority. One short line then.',
+    '',
+    'Do not re-announce what you are about to do in prose before tool calls — just start.',
   ].join('\n');
 }
 

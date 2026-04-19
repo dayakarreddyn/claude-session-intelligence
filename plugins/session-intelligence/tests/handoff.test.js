@@ -201,9 +201,16 @@ test('wrapHandoffForModelEcho returns empty when block is empty', () => {
 test('wrapHandoffForModelEcho wraps block with echo directive + markers', () => {
   const block = 'Resuming after /compact. Work on auth.';
   const wrapped = handoff.wrapHandoffForModelEcho(block);
-  // Directive instructs the model to echo verbatim
-  assert.match(wrapped, /SESSION RESUME/);
-  assert.match(wrapped, /print the block .* VERBATIM/);
+  // Directive instructs the model to echo verbatim, with strong imperative
+  // framing to survive auto-mode "just answer" reflex.
+  assert.match(wrapped, /REQUIRED FIRST ACTION/);
+  assert.match(wrapped, /VERBATIM/);
+  // Names the failure mode explicitly — the user cannot see this directive,
+  // so skipping the echo strands them without context.
+  assert.match(wrapped, /user cannot see this directive/);
+  // Rules out the ambiguous "next reply starts when text begins" read —
+  // explicitly disallows pre-echo tool calls.
+  assert.match(wrapped, /no tool calls/);
   // Markers delimit the echo region
   assert.match(wrapped, /---BEGIN RESUME BLOCK---/);
   assert.match(wrapped, /---END RESUME BLOCK---/);

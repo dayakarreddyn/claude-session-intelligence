@@ -79,18 +79,58 @@ const parseSessionContext = require(path.join(SI_LIB, 'session-context')).parseS
  *
  * Returns '' when projectDir is null — no memory home to write to.
  */
-function buildMemoryOffloadBlock(projectDir, sessionId) {
+/**
+ * Priorities-review directive — tell Claude to strike resolved priorities
+ * before compact closes. Claude has full transcript context and can judge
+ * semantically what shipped, which a regex matcher cannot. The directive
+ * stands alone: it names the files + sections + strike convention and
+ * lets Claude scan + edit directly. No handoff-helper needed.
+ *
+ * Skipped when no priority-bearing file exists, so an empty block doesn't
+ * pollute the pre-compact output on first-ever compacts.
+ */
+function buildPrioritiesReviewBlock(projectDir) {
   if (!projectDir) return '';
   const memoryDir = path.join(projectDir, 'memory');
-  const today = new Date();
-  const ymd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  const sid8 = String(sessionId || 'session').slice(0, 8);
-  const projectFilename = `project_session_${ymd}_${sid8}.md`;
+  const sessionCtx = path.join(projectDir, 'session-context.md');
+  const hasMemory = fs.existsSync(memoryDir);
+  const hasCtx = fs.existsSync(sessionCtx);
+  if (!hasMemory && !hasCtx) return '';
+
+  return [
+    '',
+    '## PRIORITIES REVIEW (pre-compact)',
+    'Before compact closes, review the `## Follow-ups` / `## Next steps` / `## Next priorities` / `## TODO` sections in:',
+    hasMemory ? `  - \`${path.join('memory', 'MEMORY.md')}\` and the most recent \`memory/project_session_*.md\`` : null,
+    hasCtx ? `  - \`session-context.md\`` : null,
+    '',
+    'For any bullet whose work this session visibly shipped (commits landed, files written, issues closed), edit the source file in place — wrap the bullet body in `~~...~~`. Resolved items drop out of the next post-compact banner automatically. Surface one line of output: "struck N items" or "nothing to strike".',
+    '',
+  ].filter((l) => l !== null).join('\n');
+}
+
+function buildMemoryOffloadBlock(projectDir, sessionId, opts = {}) {
+  if (!projectDir) return '';
+  const memoryDir = path.join(projectDir, 'memory');
+  // Stable mode omits the dated + session-scoped filename — both change
+  // every compact and cache-bust the post-compact prefix. The generic
+  // "project_session_*.md" glob still gives Claude the convention
+  // without pinning a specific filename to resolve.
+  const stable = !!opts.stablePrefix;
+  let filenameRef;
+  if (stable) {
+    filenameRef = 'the latest `project_session_*.md`';
+  } else {
+    const today = new Date();
+    const ymd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const sid8 = String(sessionId || 'session').slice(0, 8);
+    filenameRef = `\`project_session_${ymd}_${sid8}.md\``;
+  }
 
   return [
     '',
     '## MEMORY OFFLOAD (pre-compact)',
-    `Before detail collapses, persist non-obvious findings to \`${memoryDir}/\` using the frontmatter + MEMORY.md convention from your system prompt. Extend \`${projectFilename}\` (project) if new; add \`reference_<slug>.md\` only for reusable recipes. Skip if nothing new is worth keeping.`,
+    `Before detail collapses, persist non-obvious findings to \`${memoryDir}/\` using the frontmatter + MEMORY.md convention from your system prompt. Extend ${filenameRef} (project) if new; add \`reference_<slug>.md\` only for reusable recipes. Skip if nothing new is worth keeping.`,
     '',
   ].join('\n');
 }
@@ -229,13 +269,15 @@ async function main() {
     warmScoreCutoff: Number.isFinite(shapeCfg.warmScoreCutoff) ? shapeCfg.warmScoreCutoff : undefined,
   };
 
+  const stablePrefix = !!(siCfg.compact && siCfg.compact.stablePrefix);
+
   let shapeInjection = '';
   if (ctxShape) {
     try {
       const entries = ctxShape.readShape(sessionId);
       const analysis = ctxShape.analyzeShape(entries, analyzeOpts);
       if (analysis) {
-        shapeInjection = ctxShape.formatCompactInjection(analysis);
+        shapeInjection = ctxShape.formatCompactInjection(analysis, { stablePrefix });
       }
       intelLog('pre-compact', 'info', 'shape analysis', {
         entries: entries.length,
@@ -288,13 +330,17 @@ async function main() {
   // or compact.memoryOffload:false in ~/.claude/session-intelligence.json).
   let memoryOffload = '';
   if (!siCfg.compact || siCfg.compact.memoryOffload !== false) {
-    memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
+    memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId, { stablePrefix });
   }
+
+  // Priorities-review directive — cheaper than a regex auto-matcher;
+  // Claude has transcript context and can judge what shipped semantically.
+  const prioritiesReview = buildPrioritiesReviewBlock(projectDir);
 
   // Single top-level heading so the model knows this block came from the
   // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
   // mobile render it cleanly, no wide bars that wrap on narrow screens.
-  if (hints || shapeInjection || memoryOffload) {
+  if (hints || shapeInjection || memoryOffload || prioritiesReview) {
     process.stdout.write(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
@@ -315,6 +361,14 @@ async function main() {
     intelLog('pre-compact', 'info', 'memory offload directive emitted', {
       projectDir: path.basename(projectDir || ''),
       bytes: memoryOffload.length,
+    });
+  }
+  if (prioritiesReview) {
+    process.stdout.write(prioritiesReview);
+    log('[PreCompact] Injected priorities-review directive');
+    intelLog('pre-compact', 'info', 'priorities review directive emitted', {
+      projectDir: path.basename(projectDir || ''),
+      bytes: prioritiesReview.length,
     });
   }
 

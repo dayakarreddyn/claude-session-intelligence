@@ -55,6 +55,15 @@ const DEFAULTS = {
     threshold: 50,              // tool calls before first advisory
     autoblock: true,            // surface orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
     memoryOffload: true,        // inject a "offload rich detail to auto-memory" directive into pre-compact stdout
+    // When true, model-visible pre-compact/zone-crossover output omits
+    // per-compact-volatile values (call counts, stale-token estimates,
+    // dated filenames, dollar amounts, live token counts). Trades UX
+    // detail for a byte-stable prefix that survives as a cache hit for
+    // the rest of the post-compact session. On by default — the cache
+    // win (read cost −90% for the post-compact prefix) outweighs losing
+    // exact counts in the compaction guidance. Set to false or export
+    // CLAUDE_COMPACT_STABLE_PREFIX=0 to see the verbose metrics inline.
+    stablePrefix: true,
   },
   taskChange: {
     enabled: true,              // detect task-domain changes on UserPromptSubmit
@@ -234,6 +243,8 @@ function applyEnvOverrides(cfg) {
   }
   if (env.CLAUDE_COMPACT_AUTOBLOCK === '0') cfg.compact.autoblock = false;
   if (env.CLAUDE_COMPACT_MEMORY_OFFLOAD === '0') cfg.compact.memoryOffload = false;
+  if (env.CLAUDE_COMPACT_STABLE_PREFIX === '1') cfg.compact.stablePrefix = true;
+  if (env.CLAUDE_COMPACT_STABLE_PREFIX === '0') cfg.compact.stablePrefix = false;
 
   if (env.CLAUDE_TASK_CHANGE === '0') cfg.taskChange.enabled = false;
 
