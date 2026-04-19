@@ -441,12 +441,8 @@ function contextCap(input) {
 }
 
 /**
- * Render a Unicode progress bar with zone threshold markers.
- *
- *   fill is colored by current zone
- *   empty slots are dim
- *   yellow / orange / red threshold positions are marked with a thin
- *     vertical bar (│) so the user can see distance-to-next-zone at a glance
+ * Render a Unicode progress bar. Fill is colored by current zone; empty
+ * slots are dim. Zone state is conveyed by color alone — no markers.
  *
  * Returns an ANSI-colored string of visible width `width`.
  */
@@ -455,19 +451,7 @@ function renderContextBar(used, cap, zones, C, zoneColorName, width) {
   const ratio = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
   const filled = Math.round(ratio * w);
   const zoneColor = C[zoneColorName] || C.reset;
-  const thresholds = new Set();
-  for (const t of [zones.yellow, zones.orange, zones.red]) {
-    if (t > 0 && t < cap) thresholds.add(Math.max(1, Math.min(w - 1, Math.round((t / cap) * w))));
-  }
-  let out = '';
-  for (let i = 0; i < w; i++) {
-    const isThreshold = thresholds.has(i);
-    const ch = i < filled ? '▰' : (isThreshold ? '│' : '▱');
-    if (i < filled) out += `${zoneColor}${ch}${C.reset}`;
-    else if (isThreshold) out += `${C.dim}${ch}${C.reset}`;
-    else out += `${C.dim}${ch}${C.reset}`;
-  }
-  return out;
+  return `${zoneColor}${'▰'.repeat(filled)}${C.reset}${C.dim}${'▱'.repeat(w - filled)}${C.reset}`;
 }
 
 function zoneFor(tokens, zones) {
