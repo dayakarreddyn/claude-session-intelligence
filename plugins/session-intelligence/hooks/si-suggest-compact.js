@@ -246,10 +246,10 @@ async function main() {
       log(paintZone('yellow', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks (offload rich detail to auto-memory first).`));
       intelLog('suggest-compact', 'info', `suggestion: yellow-zone`, { tokenBudget, count });
     } else if (zone === 'orange' && prevZone === 'yellow') {
-      log(paintZone('orange', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — CONTEXT ROT ZONE. Compact now: /compact [preserve current task context]`));
+      log(paintZone('orange', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — drift zone. Hint: /compact at the next natural pause. Advisory, not blocking.`));
       intelLog('suggest-compact', 'warn', `suggestion: orange-zone`, { tokenBudget, count });
     } else if (zone === 'red' && prevZone === 'orange') {
-      log(paintZone('red', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — URGENT. /compact immediately or /clear and start fresh.`));
+      log(paintZone('red', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — high-risk zone. Hint: /compact soon. Continue if the task needs full context.`));
       intelLog('suggest-compact', 'warn', `suggestion: red-zone`, { tokenBudget, count });
     }
   }
@@ -285,9 +285,9 @@ async function main() {
       const shape = analyzeShape(readShape(sessionId), { preserveGlobs });
       const diagnosis = draftMessage(shape);
 
-      const header = zone === 'red' ? 'URGENT — RED ZONE' : 'ORANGE ZONE — context rot risk';
+      const header = zone === 'red' ? 'High-risk zone' : 'Drift zone';
       const costStr = (costEst && sessionCost > 0) ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
-      const headline = `[StrategicCompact] ${header}. Context at ~${formatTokens(tokenBudget)} tokens${costStr}.`;
+      const headline = `[StrategicCompact] ${header} — context at ~${formatTokens(tokenBudget)} tokens${costStr}. Advisory only — continue if the task needs full context.`;
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
 
@@ -299,14 +299,13 @@ async function main() {
         const cwd = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
         const projectDir = resolveProjectDir(cwd);
         const memLine = projectDir
-          ? `Offload to auto-memory FIRST: write under ${path.join(projectDir, 'memory')}/ (project_session_*.md / reference_*.md + MEMORY.md index), THEN /compact.`
-          : 'Offload rich detail to auto-memory FIRST (project-session + reference files + MEMORY.md index), THEN /compact.';
+          ? `Optional: offload rich detail to auto-memory at ${path.join(projectDir, 'memory')}/ (project_session_*.md / reference_*.md + MEMORY.md index) before compacting.`
+          : 'Optional: offload rich detail to auto-memory before compacting.';
         body.push(memLine);
       }
 
       body.push(
-        'Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage. '
-        + 'Free-text hint after /compact still works.'
+        'When you do compact, `/compact` auto-injects preserve/drop hints from observed tool usage; free-text hints still work.'
       );
       if (zonesCfg.adaptive) {
         const scope = zonesCfg.bucket === 'cwd' ? 'this repo' : 'your history';

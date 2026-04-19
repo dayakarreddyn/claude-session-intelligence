@@ -69,6 +69,16 @@ function loadThinkingLib() {
   return null;
 }
 
+function loadCompactHistoryLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'compact-history.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 // Shared session-context parser — same placeholder + autofill rules the
 // handoff reader and pre-compact hint formatter use. Loaded lazily so a
 // missing lib dir just falls back to the legacy inline parser below.
@@ -897,6 +907,21 @@ function main() {
   const input = safeParse(readStdinSync());
   const sessionId = input.session_id || input.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
   const cwd = input.cwd || input.workspace?.current_dir || process.cwd();
+
+  // Prefer adaptive zones (derived from this repo's compact history) over
+  // the static config zones so the bar color matches what si-suggest-compact
+  // reports. Falls back to config zones when the history lib or file is
+  // absent. Silent — failures never break rendering.
+  try {
+    const compactHistory = loadCompactHistoryLib();
+    if (compactHistory && typeof compactHistory.adaptiveZones === 'function') {
+      const history = typeof compactHistory.readHistory === 'function' ? compactHistory.readHistory() : [];
+      const adaptive = compactHistory.adaptiveZones(history, cfg.zones, { bucket: 'cwd', cwd });
+      if (adaptive && adaptive.adaptive) {
+        cfg.zones = { yellow: adaptive.yellow, orange: adaptive.orange, red: adaptive.red };
+      }
+    }
+  } catch { /* best effort — keep static zones on error */ }
   const transcriptPath = input.transcript_path || input.transcriptPath;
 
   // Token source resolution.
