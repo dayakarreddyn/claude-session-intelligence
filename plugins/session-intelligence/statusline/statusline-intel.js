@@ -682,7 +682,8 @@ function buildRenderers(C) {
       const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, 20);
       const used = fmtTokens(t);
       const total = cap >= 1000000 ? '1M' : fmtTokens(cap);
-      return `${bar}${C.reset} ${color}${sourceTag}${used}${C.reset}${C.dim}/${total}${C.reset}`;
+      const pct = cap > 0 ? Math.round((t / cap) * 100) : 0;
+      return `${bar}${C.reset} ${color}${sourceTag}${used}${C.reset}${C.dim}/${total} (${pct}%)${C.reset}`;
     },
 
     zone: (input, ctx) => {
