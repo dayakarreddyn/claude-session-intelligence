@@ -556,8 +556,8 @@ If every field competes for the user's eye with colour, the signal drowns in noi
 ### 9.2 Example
 
 ```
-Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰ 425k
-70 tools · compact:2h13m ago · feat — statusline v2
+Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)
+3h42m · 70 tools · $7.56 · feat — statusline v2 · compact:2h13m ago
 ```
 
 The eye goes to the coloured token bar first. Everything else stays available but doesn't compete. If you're in the red zone AND the last compact was 3h ago, you see two red marks — both genuinely critical.
@@ -732,9 +732,9 @@ Static thresholds still in effect (need 5). Same behaviour as session 1.
     [40 Read/Edit calls in src/billing, 20 in tests/billing]
     [context grows to ~235k]
 
-[StrategicCompact] ORANGE ZONE — context rot risk. Context at ~235k tokens, $2.84 spent.
+[StrategicCompact] Drift zone — context at ~235k tokens, $2.84 spent. Advisory only — continue if the task needs full context.
 Observed: shifted src/auth → src/billing · hot: src/billing, tests/billing.
-Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage.
+When you do compact, `/compact` auto-injects preserve/drop hints from observed tool usage.
 (Zones adapted to your history: orange=229k, red=310k, 5 past compacts.)
 Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```

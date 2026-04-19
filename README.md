@@ -201,8 +201,8 @@ The memory-offload block works with Claude Code's built-in auto-memory system (`
 Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw:
 
 ```
-Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰ 425k
-70 tools · compact:2h13m ago · feat — statusline v2
+Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)
+3h42m · 70 tools · $7.56 · feat — statusline v2 · compact:2h13m ago
 ```
 
 **Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim except `compactAge` which goes **red** when the last /compact was ≥2h ago. Emojis are off by default in the shipped presets — they added width and a second decision point ("what does that glyph mean?") on top of already-loud text. They're opt-in via the `emoji` / `emoji2` fields if you want them back.
@@ -225,7 +225,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `dirty` | `±3` | Simple count of dirty files (dim) |
 | `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
 | `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
-| `tokens` | `▰▰▰▱ 425k` | **Zone bar + count** — the ONE coloured field. Green → yellow → orange → red. Prefixed with `~` when using the estimate fallback |
+| `tokens` | `▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)` | **Full context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap, colored green → yellow → orange → red by current zone. Cap auto-detects from `model.id`: `[1m]` tag → 1M, else 200k. Prefixed with `~` when using the estimate fallback. Zones are adaptive (fall back to defaults when history < 5 compacts) |
 | `zone` | `orange` | Zone name only, coloured |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
 | `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
@@ -284,7 +284,7 @@ Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your work
     "fields": [
       "model", "project", "branch", "issue", "diffstat", "tokens",
       "newline",
-      "tools", "session", "cost", "compactAge", "deploy", "task"
+      "session", "tools", "cost", "deploy", "task", "compactAge"
     ],
     "tokenSource": "auto",
     "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
@@ -313,8 +313,8 @@ Most users already have a statusLine — ccstatusline, starship, a custom script
 ⏱️ Session: 0m · 💰 3hr 42m
 👾 Opus 4.7 (1M)
 ⏳ Weekly: 3.0% · Weekly Reset: 6d 10hr
-🔥 Opus 4.7 · project · dev · ▰▰▰▰ 425k            ← appended by us (line 1)
-   70 tools · $0.76 · feat — statusline v2          ← appended by us (line 2)
+🔥 Opus 4.7 · project · dev · ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)   ← appended by us (line 1)
+   3h42m · 70 tools · $0.76 · feat — statusline v2 · compact:2h13m ago  ← appended by us (line 2)
 ```
 
 If you had no statusLine configured, you get just the intel lines.
@@ -430,21 +430,20 @@ After **≥5 compacts** land in your history, the thresholds adapt: orange ancho
 When the budget first crosses orange on a tool call:
 
 ```
-[StrategicCompact] ORANGE ZONE — context rot risk. Context at ~260k tokens, $1.43 spent.
+[StrategicCompact] Drift zone — context at ~260k tokens, $1.43 spent. Advisory only — continue if the task needs full context.
 Observed: shifted src/auth → src/billing · ~82k stale in tests/browser · hot: src/billing.
-Offload to auto-memory FIRST: write under /Users/you/.claude/projects/<encoded>/memory/
-(project_session_*.md / reference_*.md + MEMORY.md index), THEN /compact.
-Run `/compact` — preserve/drop hints will be auto-injected from observed tool usage.
-Free-text hint after /compact still works.
+Optional: offload rich detail to auto-memory at /Users/you/.claude/projects/<encoded>/memory/
+(project_session_*.md / reference_*.md + MEMORY.md index) before compacting.
+When you do compact, `/compact` auto-injects preserve/drop hints from observed tool usage; free-text hints still work.
 (Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
 Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```
 
-Five layers in the message:
-- **Header** — zone + tokens + cost so Claude knows the stakes in dollars, not just tokens
+The tone is **advisory, not directive**. Claude is told "continue if the task needs full context" so a zone warning doesn't derail a mid-flight refactor. Five layers:
+- **Header** — zone + tokens + cost, explicitly flagged "advisory only"
 - **Diagnosis** — what the shape tracker observed: domain shifts, stale bands, hot dirs
-- **Memory offload** — nudges Claude to dump rich detail to auto-memory *before* compact collapses it, while context is still live. Concrete path included so there's no ambiguity about where to write
-- **Action** — plain `/compact` suffices; hints auto-inject via the PreCompact hook
+- **Memory offload** — *optional* nudge to dump rich detail to auto-memory before compact collapses it, while context is still live
+- **Action hint** — when you do compact, `/compact` auto-injects preserve/drop hints via the PreCompact hook
 - **Adaptive footnote** — only appears when zones learned from your history
 
 The hook exits `2` (stderr fed back to Claude Code as hook feedback), but because this runs on `PostToolUse` the tool call itself already completed successfully — the message arrives on the next assistant turn as a heads-up, not an interruption.
