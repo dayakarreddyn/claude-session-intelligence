@@ -94,6 +94,28 @@ const DEFAULTS = {
     // See lib/context-shape.js::combineScore for weights. Invalid values
     // are silently coerced to 'hybrid'.
     scoring: 'hybrid',
+    // WARM band lower bound. Score is recency/hybrid-normalised to [0, 1].
+    // Defaults to 0.40 (last 60% of session span) so legacy behaviour is
+    // preserved. Raise toward HOT_SCORE_CUTOFF (0.80) to tighten WARM when
+    // the middle tier is producing no signal — see per-project overrides
+    // below for the CSM-only experiment. Clamped to (0, 0.80) at read time.
+    warmScoreCutoff: 0.40,
+    // Per-project overrides, keyed by absolute canonical cwd (the project
+    // root resolved at SessionStart). The hook looks up the canonicalCwd
+    // key and merges any matching block over the top of `shape` before
+    // passing options to analyzeShape/rollupShape. Example:
+    //
+    //   "perProject": {
+    //     "/Users/me/DWS/CSM": { "warmScoreCutoff": 0.65 }
+    //   }
+    //
+    // Only keys that analyzeShape reads are honoured today:
+    //   - warmScoreCutoff
+    //   - scoring
+    //   - rootDirDepth
+    //   - preserveGlobs (merged, not replaced)
+    // Unknown keys are silently ignored.
+    perProject: {},
     // Accumulate per-root tallies across compacts in a session-scoped
     // rollup file at /tmp/claude-ctx-shape-<sid>.rollup.json. analyzeShape
     // merges the rollup with the current shape log so long-running heavy-
@@ -285,6 +307,33 @@ function saveConfig(cfg) {
   return file;
 }
 
+/**
+ * Resolve shape config for a specific project cwd. Merges `shape.perProject[cwd]`
+ * on top of the top-level `shape` block. `preserveGlobs` is unioned (project
+ * adds to user-global), everything else replaces. Unknown keys ignored.
+ *
+ * Returns a NEW object — the base shape config is untouched. Callers should
+ * feed the result directly into analyzeShape opts.
+ */
+function resolveShapeForCwd(cfg, cwd) {
+  const base = (cfg && cfg.shape) ? cfg.shape : {};
+  const overrides = (base.perProject && typeof base.perProject === 'object')
+    ? base.perProject[cwd]
+    : null;
+  if (!overrides || typeof overrides !== 'object') return { ...base };
+  const merged = { ...base, ...overrides };
+  // Union preserveGlobs so a per-project override adds to (not replaces) user-global.
+  const baseGlobs = Array.isArray(base.preserveGlobs) ? base.preserveGlobs : [];
+  const projGlobs = Array.isArray(overrides.preserveGlobs) ? overrides.preserveGlobs : [];
+  if (baseGlobs.length || projGlobs.length) {
+    merged.preserveGlobs = [...new Set([...baseGlobs, ...projGlobs])];
+  }
+  // perProject itself is irrelevant once resolved — strip it to keep the
+  // returned object shape tight.
+  delete merged.perProject;
+  return merged;
+}
+
 /** Dotted getter: get(cfg, "compact.autoblock"). */
 function get(cfg, dottedKey) {
   return dottedKey.split('.').reduce(
@@ -316,4 +365,5 @@ module.exports = {
   get,
   set,
   deepMerge,
+  resolveShapeForCwd,
 };

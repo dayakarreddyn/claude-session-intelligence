@@ -191,7 +191,9 @@ async function main() {
   // analyzeShape calls below pass identical options; drift between the two
   // would produce different hotDirs in the injected hints vs. the history
   // entry — silent but confusing.
-  const shapeCfg = (siCfg && siCfg.shape) || {};
+  // Resolve shape config AFTER canonicalCwd so per-project overrides apply.
+  // Default to top-level shape for now; re-resolved once canonicalCwd below.
+  let shapeCfg = (siCfg && siCfg.shape) || {};
   // Canonical cwd: prefer the session-state pin (written by si-bootstrap at
   // SessionStart), fall back to the hook's own stdin cwd. Passed to
   // analyzeShape + rollupShape so entries written with a missing/drifted cwd
@@ -206,6 +208,16 @@ async function main() {
       }
     } catch { /* fall back to payload cwd */ }
   }
+  // Re-resolve shape config against the canonical cwd so perProject overrides
+  // (warmScoreCutoff, per-repo scoring/rootDirDepth) take effect. Falls through
+  // to the top-level shape block when no per-project entry exists.
+  try {
+    const cfgMod = require(path.join(SI_LIB, 'config'));
+    if (cfgMod.resolveShapeForCwd) {
+      shapeCfg = cfgMod.resolveShapeForCwd(siCfg, canonicalCwd);
+    }
+  } catch { /* fall back to original shapeCfg */ }
+
   const rootDirDepth = Number.isFinite(shapeCfg.rootDirDepth) ? shapeCfg.rootDirDepth : 2;
   const analyzeOpts = {
     preserveGlobs,
@@ -214,6 +226,7 @@ async function main() {
     sessionId,
     canonicalCwd,
     rootDirDepth,
+    warmScoreCutoff: Number.isFinite(shapeCfg.warmScoreCutoff) ? shapeCfg.warmScoreCutoff : undefined,
   };
 
   let shapeInjection = '';

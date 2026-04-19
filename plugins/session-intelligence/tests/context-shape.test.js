@@ -555,6 +555,57 @@ test('analyzeShape without canonicalCwd preserves original roots', () => {
   assert.ok(allRoots.includes('/Users/alex'), 'opt-in gate — legacy root unchanged');
 });
 
+// ─── warmScoreCutoff opt ───────────────────────────────────────────────
+
+test('warmScoreCutoff=0.65 demotes mid-score roots from WARM to COLD', () => {
+  // Construct three roots with known score bands under recency:
+  //   src/hot:   last touch at tok 19000 of 20000 span → recency 0.95 → HOT
+  //   src/mid:   last touch at tok 14000 → recency ~0.70 → WARM at 0.40 cutoff
+  //   src/cold:  last touch at tok  4000 → recency ~0.20 → COLD at 0.40 cutoff
+  // With cutoff raised to 0.65, src/mid (0.70) stays WARM; at 0.75 it falls
+  // to COLD. Cutoff of 0.65 keeps mid in WARM; 0.80 (=HOT_CUTOFF boundary)
+  // collapses WARM entirely.
+  const specs = [];
+  for (let i = 0; i < 6; i++) specs.push({ root: 'src/hot',  tok: 18000 + i * 200 });
+  for (let i = 0; i < 6; i++) specs.push({ root: 'src/mid',  tok: 13500 + i * 150 });
+  for (let i = 0; i < 6; i++) specs.push({ root: 'src/cold', tok:  3000 + i * 250 });
+  specs.sort((a, b) => a.tok - b.tok);
+  const entries = specs.map((s) => ({
+    t: Date.now(), tok: s.tok, tool: 'Read', root: s.root, file: null, event: null,
+  }));
+
+  const loose = analyzeShape(entries, { scoring: 'recency' }); // default 0.40
+  const tight = analyzeShape(entries, { scoring: 'recency', warmScoreCutoff: 0.75 });
+
+  const warmOf = (r) => r.warm.map((x) => x.root);
+  const coldOf = (r) => r.cold.map((x) => x.root);
+
+  assert.ok(warmOf(loose).includes('src/mid'), 'src/mid is WARM at default cutoff');
+  assert.ok(!coldOf(loose).includes('src/mid'), 'src/mid is not COLD at default cutoff');
+
+  assert.ok(!warmOf(tight).includes('src/mid'), 'src/mid falls out of WARM at 0.75 cutoff');
+  assert.ok(coldOf(tight).includes('src/mid'), 'src/mid becomes COLD at 0.75 cutoff');
+});
+
+test('warmScoreCutoff clamps invalid values safely', () => {
+  const specs = [];
+  for (let i = 0; i < 6; i++) specs.push({ root: 'src/hot',  tok: 18000 + i * 200 });
+  for (let i = 0; i < 6; i++) specs.push({ root: 'src/mid',  tok: 13500 + i * 150 });
+  specs.sort((a, b) => a.tok - b.tok);
+  const entries = specs.map((s) => ({
+    t: Date.now(), tok: s.tok, tool: 'Read', root: s.root, file: null, event: null,
+  }));
+
+  // Negative / >= HOT_CUTOFF must NOT make HOT or WARM disappear entirely.
+  const tooLow = analyzeShape(entries, { scoring: 'recency', warmScoreCutoff: -1 });
+  const tooHigh = analyzeShape(entries, { scoring: 'recency', warmScoreCutoff: 2 });
+  assert.ok(tooLow && Array.isArray(tooLow.hot));
+  assert.ok(tooHigh && Array.isArray(tooHigh.hot));
+  // tooHigh clamps just below HOT_CUTOFF (0.80) → everything below HOT
+  // becomes COLD; mid (~0.70) must not be WARM anymore.
+  assert.ok(!tooHigh.warm.map((x) => x.root).includes('src/mid'));
+});
+
 test('rollupShape with canonicalCwd persists reclassified roots', () => {
   const sid = 'rolluprecl';
   cleanupRollup(sid);

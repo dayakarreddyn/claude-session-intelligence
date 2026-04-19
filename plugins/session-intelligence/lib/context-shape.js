@@ -564,6 +564,10 @@ function reclassifyEntries(entries, opts) {
  *     rootDirOf(file, depth, {cwd: canonicalCwd}) before banding. Heals
  *     legacy entries that landed with root=/Users/<name> because the hook
  *     ran without a usable cwd.
+ *   - warmScoreCutoff: override the default WARM_SCORE_CUTOFF (0.40).
+ *     Raising it narrows the WARM band toward HOT so mid-recency dirs fall
+ *     to COLD/DROP instead — useful for per-project tuning when WARM is
+ *     producing no signal. Clamped to (0, HOT_SCORE_CUTOFF).
  */
 function analyzeShape(entries, opts) {
   if (!Array.isArray(entries) || entries.length < 5) return null;
@@ -587,6 +591,13 @@ function analyzeShape(entries, opts) {
   const scoring = normalizeScoring(opts && opts.scoring);
   const persist = !!(opts && opts.persistAcrossCompacts && opts.sessionId);
   const sessionId = persist ? opts.sessionId : null;
+
+  // Per-project WARM cutoff override. Clamped to (0, HOT_SCORE_CUTOFF) so a
+  // misconfigured value can never swallow HOT or produce a negative band.
+  const rawWarmCutoff = opts && opts.warmScoreCutoff;
+  const warmCutoff = Number.isFinite(rawWarmCutoff)
+    ? Math.min(HOT_SCORE_CUTOFF - 0.001, Math.max(0.01, rawWarmCutoff))
+    : WARM_SCORE_CUTOFF;
 
   // Rollup snapshot read once; its rolledThroughTok tells us which live
   // entries are already counted in rollup (skip them to prevent double-count).
@@ -671,7 +682,7 @@ function analyzeShape(entries, opts) {
   for (const info of rootsArr) {
     if (info.allowlisted)                     hot.push(info);
     else if (info.score >= HOT_SCORE_CUTOFF)  hot.push(info);
-    else if (info.score >= WARM_SCORE_CUTOFF) warm.push(info);
+    else if (info.score >= warmCutoff)        warm.push(info);
     else                                      cold.push(info);
   }
 

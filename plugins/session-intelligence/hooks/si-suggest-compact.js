@@ -291,7 +291,23 @@ async function main() {
           canonicalCwd = state.cwd;
         }
       } catch { /* best effort */ }
-      const shape = analyzeShape(readShape(sessionId), { preserveGlobs, canonicalCwd });
+      // Apply per-project shape overrides (warmScoreCutoff) so the suggest
+      // diagnosis bands the same way the next /compact will. Without this,
+      // the user would see different hot/warm/cold in the zone-crossover
+      // hint vs the actual pre-compact summary.
+      let warmScoreCutoff;
+      try {
+        const cfgMod = require(path.join(SI_LIB, 'config'));
+        const resolved = cfgMod.resolveShapeForCwd
+          ? cfgMod.resolveShapeForCwd(fullCfg, canonicalCwd)
+          : null;
+        if (resolved && Number.isFinite(resolved.warmScoreCutoff)) {
+          warmScoreCutoff = resolved.warmScoreCutoff;
+        }
+      } catch { /* fall through to default */ }
+      const shape = analyzeShape(readShape(sessionId), {
+        preserveGlobs, canonicalCwd, warmScoreCutoff,
+      });
       const diagnosis = draftMessage(shape);
 
       const header = zone === 'red' ? 'High-risk zone' : 'Drift zone';
