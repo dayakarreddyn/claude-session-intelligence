@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .zone-label { font-size: 28px; font-weight: 700; }
+      .tick { fill: #888; font-size: 18px; }
+      .big-tick { fill: #d0d0d0; font-size: 22px; font-weight: 700; }
+      .desc { fill: #bbb; font-size: 19px; }
+      .desc-muted { fill: #777; font-size: 17px; }
+      .caption { fill: #888; font-size: 22px; font-style: italic; }
+      .footer { fill: #555; font-size: 16px; }
+      .gauge-outline { fill: none; stroke: #2a2a2a; stroke-width: 1; }
+      .divider { stroke: #444; stroke-width: 1; stroke-dasharray: 4 4; }
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">zones — empirical inflection points, not failure points</text>
+  <text class="sub" x="80" y="125">the default thresholds session-intelligence surfaces on your statusline</text>
+
+  <!-- Gauge: spans 80 → 1520 across 0–500k -->
+  <!-- px per k = 1440 / 500 = 2.88 -->
+  <!-- green 0-200k → 80 to 656 (width 576) -->
+  <!-- yellow 200-300k → 656 to 944 (width 288) -->
+  <!-- orange 300-400k → 944 to 1232 (width 288) -->
+  <!-- red 400-500k → 1232 to 1520 (width 288) -->
+
+  <g>
+    <rect x="80" y="240" width="576" height="80" fill="#1a3a1a" stroke="#5cb85c" stroke-width="2" rx="4"/>
+    <rect x="656" y="240" width="288" height="80" fill="#3a3a1a" stroke="#e8c547" stroke-width="2"/>
+    <rect x="944" y="240" width="288" height="80" fill="#3a2a1a" stroke="#ff8c42" stroke-width="2"/>
+    <rect x="1232" y="240" width="288" height="80" fill="#3a1a1a" stroke="#ff5555" stroke-width="2" rx="4"/>
+  </g>
+
+  <!-- Zone labels inside bars -->
+  <text class="zone-label" x="368" y="290" text-anchor="middle" fill="#5cb85c">GREEN</text>
+  <text class="zone-label" x="800" y="290" text-anchor="middle" fill="#e8c547">YELLOW</text>
+  <text class="zone-label" x="1088" y="290" text-anchor="middle" fill="#ff8c42">ORANGE</text>
+  <text class="zone-label" x="1376" y="290" text-anchor="middle" fill="#ff5555">RED</text>
+
+  <!-- Token ticks -->
+  <line class="divider" x1="656" y1="240" x2="656" y2="360"/>
+  <line class="divider" x1="944" y1="240" x2="944" y2="360"/>
+  <line class="divider" x1="1232" y1="240" x2="1232" y2="360"/>
+
+  <text class="tick" x="80" y="355" text-anchor="middle">0</text>
+  <text class="big-tick" x="656" y="355" text-anchor="middle">200k</text>
+  <text class="big-tick" x="944" y="355" text-anchor="middle">300k</text>
+  <text class="big-tick" x="1232" y="355" text-anchor="middle">400k</text>
+  <text class="tick" x="1520" y="355" text-anchor="middle">500k+</text>
+
+  <!-- Zone descriptions -->
+  <g>
+    <text class="desc" x="368" y="430" text-anchor="middle" fill="#5cb85c">no intervention value</text>
+    <text class="desc-muted" x="368" y="460" text-anchor="middle">keep shipping</text>
+    <text class="desc-muted" x="368" y="485" text-anchor="middle">below here, compacting</text>
+    <text class="desc-muted" x="368" y="510" text-anchor="middle">costs more than it saves</text>
+  </g>
+
+  <g>
+    <text class="desc" x="800" y="430" text-anchor="middle" fill="#e8c547">drift starts</text>
+    <text class="desc-muted" x="800" y="460" text-anchor="middle">compacting between</text>
+    <text class="desc-muted" x="800" y="485" text-anchor="middle">natural tasks starts</text>
+    <text class="desc-muted" x="800" y="510" text-anchor="middle">paying off</text>
+  </g>
+
+  <g>
+    <text class="desc" x="1088" y="430" text-anchor="middle" fill="#ff8c42">coding degrades</text>
+    <text class="desc-muted" x="1088" y="460" text-anchor="middle">empirical inflection</text>
+    <text class="desc-muted" x="1088" y="485" text-anchor="middle">for multi-step coding</text>
+    <text class="desc-muted" x="1088" y="510" text-anchor="middle">with dependent decisions</text>
+  </g>
+
+  <g>
+    <text class="desc" x="1376" y="430" text-anchor="middle" fill="#ff5555">almost certainly compact</text>
+    <text class="desc-muted" x="1376" y="460" text-anchor="middle">cost is ~5× 80k-baseline</text>
+    <text class="desc-muted" x="1376" y="485" text-anchor="middle">and every stale choice</text>
+    <text class="desc-muted" x="1376" y="510" text-anchor="middle">distorts the next one</text>
+  </g>
+
+  <!-- Adaptive note -->
+  <rect x="80" y="600" width="1440" height="130" rx="8" fill="#121212" stroke="#2a2a2a"/>
+  <text class="desc" x="110" y="640" fill="#d0d0d0" font-weight="700">adaptive zones · after 5 compacts, these drift to YOUR pattern</text>
+  <text class="desc-muted" x="110" y="672">ship fine at 450k?  orange drifts out to ~400k.</text>
+  <text class="desc-muted" x="110" y="700">drift at 250k?  orange tightens to ~280k.</text>
+  <text class="desc-muted" x="800" y="672">high regret rate?  thresholds push outward (be more conservative).</text>
+  <text class="desc-muted" x="800" y="700">high session cost?  thresholds tighten inward (warn earlier).</text>
+
+  <text class="caption" x="800" y="790" text-anchor="middle">the model doesn't break at 300k.  it just makes slightly worse choices that compound.</text>
+
+  <text class="footer" x="80" y="870">session-intelligence · defaults ground in Thariq's research + Anthropic guidance · recalibrated per user</text>
+  <g opacity="0.9">
+    <text x="1520" y="845" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="870" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>

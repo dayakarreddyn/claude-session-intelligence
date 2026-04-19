@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .turn { fill: #1a1a1a; stroke: #2a2a2a; }
+      .turn-label { fill: #888; font-size: 14px; }
+      .kept { fill: #2a4a6a; stroke: #4a7aaa; }
+      .section { fill: #1a1a1a; stroke: #3a3a3a; }
+      .section-label { fill: #d0d0d0; font-size: 16px; }
+      .funnel { fill: none; stroke: #555; stroke-width: 2; stroke-dasharray: 6 4; }
+      .claude-label { fill: #e8c547; font-size: 18px; font-style: italic; }
+      .lost-arrow { stroke: #ff5555; stroke-width: 2; fill: none; stroke-dasharray: 4 4; marker-end: url(#arrow-r); }
+      .lost-label { fill: #ff5555; font-size: 18px; font-weight: 600; }
+      .caption { fill: #e8c547; font-size: 24px; font-weight: 600; }
+      .footer { fill: #555; font-size: 16px; }
+      .small { fill: #666; font-size: 14px; }
+    </style>
+    <marker id="arrow-r" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ff5555"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">auto-compact is summarization, not compression</text>
+  <text class="sub" x="80" y="125">claude reads its own conversation and produces a 9-section summary. lossy.</text>
+
+  <!-- LEFT: long conversation timeline -->
+  <text class="section-label" x="100" y="200" fill="#888">long conversation</text>
+  <g transform="translate(80, 220)">
+    <!-- 20 turn blocks -->
+    <g>
+      <rect class="turn" x="0" y="0" width="30" height="60"/>
+      <rect class="turn" x="34" y="0" width="30" height="60"/>
+      <rect class="turn" x="68" y="0" width="30" height="60"/>
+      <rect class="turn" x="102" y="0" width="30" height="60"/>
+      <rect class="turn" x="136" y="0" width="30" height="60"/>
+      <rect class="turn" x="170" y="0" width="30" height="60"/>
+      <rect class="turn" x="204" y="0" width="30" height="60"/>
+      <rect class="turn" x="238" y="0" width="30" height="60"/>
+      <rect class="turn" x="272" y="0" width="30" height="60"/>
+      <rect class="turn" x="306" y="0" width="30" height="60"/>
+      <rect class="turn" x="340" y="0" width="30" height="60"/>
+      <rect class="turn" x="374" y="0" width="30" height="60"/>
+      <rect class="turn" x="408" y="0" width="30" height="60"/>
+      <!-- recent turns kept verbatim -->
+      <rect class="kept" x="442" y="0" width="30" height="60"/>
+      <rect class="kept" x="476" y="0" width="30" height="60"/>
+      <rect class="kept" x="510" y="0" width="30" height="60"/>
+    </g>
+    <text class="small" x="200" y="85" text-anchor="middle">older turns · collapse into summary</text>
+    <text class="small" x="474" y="85" text-anchor="middle" fill="#4a7aaa">recent · kept verbatim</text>
+  </g>
+
+  <!-- Funnel -->
+  <g transform="translate(80, 330)">
+    <polygon class="funnel" points="0,0 540,0 430,140 110,140"/>
+    <text class="claude-label" x="270" y="85" text-anchor="middle">claude summarizes itself</text>
+  </g>
+
+  <!-- RIGHT: 9-section summary output -->
+  <g transform="translate(720, 180)">
+    <text class="section-label" x="380" y="20" fill="#888" text-anchor="middle">structured 9-section output</text>
+    <rect x="0" y="40" width="760" height="500" rx="8" fill="#121212" stroke="#2a2a2a"/>
+
+    <!-- 9 sections -->
+    <g font-size="16">
+      <rect class="section" x="20" y="60" width="230" height="60" rx="4"/>
+      <text class="section-label" x="135" y="95" text-anchor="middle">primary request</text>
+      <rect class="section" x="265" y="60" width="230" height="60" rx="4"/>
+      <text class="section-label" x="380" y="95" text-anchor="middle">technical concepts</text>
+      <rect class="section" x="510" y="60" width="230" height="60" rx="4"/>
+      <text class="section-label" x="625" y="95" text-anchor="middle">files</text>
+
+      <rect class="section" x="20" y="135" width="230" height="60" rx="4"/>
+      <text class="section-label" x="135" y="170" text-anchor="middle">errors / fixes</text>
+      <rect class="section" x="265" y="135" width="230" height="60" rx="4"/>
+      <text class="section-label" x="380" y="170" text-anchor="middle">problem solving</text>
+      <rect class="section" x="510" y="135" width="230" height="60" rx="4"/>
+      <text class="section-label" x="625" y="170" text-anchor="middle">user messages</text>
+
+      <rect class="section" x="20" y="210" width="230" height="60" rx="4"/>
+      <text class="section-label" x="135" y="245" text-anchor="middle">pending tasks</text>
+      <rect class="section" x="265" y="210" width="230" height="60" rx="4"/>
+      <text class="section-label" x="380" y="245" text-anchor="middle">current work</text>
+      <rect class="section" x="510" y="210" width="230" height="60" rx="4"/>
+      <text class="section-label" x="625" y="245" text-anchor="middle">next step</text>
+    </g>
+
+    <!-- no slot for -->
+    <text class="lost-label" x="380" y="320" text-anchor="middle">no slot for:</text>
+    <text class="small" x="380" y="350" text-anchor="middle" fill="#999">· which detail was load-bearing for *this* refactor</text>
+    <text class="small" x="380" y="372" text-anchor="middle" fill="#999">· the pattern established in turn 12</text>
+    <text class="small" x="380" y="394" text-anchor="middle" fill="#999">· the file you touched three turns ago</text>
+    <text class="small" x="380" y="416" text-anchor="middle" fill="#999">· the constraint the user mentioned once, in passing</text>
+    <text class="small" x="380" y="460" text-anchor="middle" fill="#ff8c42">it guesses from recency + structure. that guess is where your afternoon goes.</text>
+  </g>
+
+  <!-- Lost detail arrow -->
+  <path class="lost-arrow" d="M 620 400 Q 700 480 760 500"/>
+  <text class="lost-label" x="500" y="530">load-bearing detail · dropped</text>
+
+  <text class="caption" x="800" y="790" text-anchor="middle">smart in shape. lossy in substance.</text>
+
+  <text class="footer" x="80" y="870">session-intelligence · why a ground-truth resume banner matters more than clever summarization</text>
+  <g opacity="0.9">
+    <text x="1520" y="845" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="870" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .axis { stroke: #3a3a3a; stroke-width: 1; }
+      .bar-label { fill: #d0d0d0; font-size: 20px; font-weight: 700; }
+      .bar-cost { fill: #fff; font-size: 22px; font-weight: 700; }
+      .tick { fill: #666; font-size: 14px; }
+      .caption { fill: #e8c547; font-size: 22px; font-style: italic; }
+      .note { fill: #888; font-size: 18px; }
+      .footer { fill: #555; font-size: 16px; }
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">compacting is a cost habit, not just a quality habit</text>
+  <text class="sub" x="80" y="125">relative cost per conversational turn as context grows — attention compute doesn't cache</text>
+
+  <!-- Axis -->
+  <line class="axis" x1="180" y1="620" x2="1500" y2="620"/>
+  <line class="axis" x1="180" y1="180" x2="180" y2="620"/>
+
+  <!-- Y gridlines -->
+  <line class="axis" x1="180" y1="540" x2="1500" y2="540" stroke-dasharray="4 6"/>
+  <line class="axis" x1="180" y1="460" x2="1500" y2="460" stroke-dasharray="4 6"/>
+  <line class="axis" x1="180" y1="380" x2="1500" y2="380" stroke-dasharray="4 6"/>
+  <line class="axis" x1="180" y1="300" x2="1500" y2="300" stroke-dasharray="4 6"/>
+  <line class="axis" x1="180" y1="220" x2="1500" y2="220" stroke-dasharray="4 6"/>
+
+  <text class="tick" x="165" y="625" text-anchor="end">0×</text>
+  <text class="tick" x="165" y="545" text-anchor="end">1×</text>
+  <text class="tick" x="165" y="465" text-anchor="end">2×</text>
+  <text class="tick" x="165" y="385" text-anchor="end">3×</text>
+  <text class="tick" x="165" y="305" text-anchor="end">4×</text>
+  <text class="tick" x="165" y="225" text-anchor="end">5×</text>
+  <text class="tick" x="100" y="400" text-anchor="middle" transform="rotate(-90 100 400)" fill="#888" font-size="16">relative cost per turn</text>
+
+  <!-- Bars: baseline is 80k → 1× (height 80px at y=540) -->
+  <!-- 80k:  1.0× → y=540, h=80 -->
+  <!-- 200k: 1.8× → y=476, h=144 -->
+  <!-- 300k: 2.8× → y=396, h=224 -->
+  <!-- 400k: 5.0× → y=220, h=400 -->
+
+  <!-- 80k bar -->
+  <rect x="300" y="540" width="180" height="80" fill="#2a5a2a" stroke="#5cb85c" stroke-width="2" rx="3"/>
+  <text class="bar-cost" x="390" y="520" text-anchor="middle" fill="#5cb85c">1×</text>
+  <text class="bar-label" x="390" y="655" text-anchor="middle">80k</text>
+
+  <!-- 200k bar -->
+  <rect x="580" y="476" width="180" height="144" fill="#3a3a1a" stroke="#e8c547" stroke-width="2" rx="3"/>
+  <text class="bar-cost" x="670" y="456" text-anchor="middle" fill="#e8c547">~1.8×</text>
+  <text class="bar-label" x="670" y="655" text-anchor="middle">200k</text>
+
+  <!-- 300k bar -->
+  <rect x="860" y="396" width="180" height="224" fill="#3a2a1a" stroke="#ff8c42" stroke-width="2" rx="3"/>
+  <text class="bar-cost" x="950" y="376" text-anchor="middle" fill="#ff8c42">~2.8×</text>
+  <text class="bar-label" x="950" y="655" text-anchor="middle">300k</text>
+
+  <!-- 400k bar -->
+  <rect x="1140" y="220" width="180" height="400" fill="#3a1a1a" stroke="#ff5555" stroke-width="2" rx="3"/>
+  <text class="bar-cost" x="1230" y="200" text-anchor="middle" fill="#ff5555">~5×</text>
+  <text class="bar-label" x="1230" y="655" text-anchor="middle">400k</text>
+
+  <text class="tick" x="820" y="695" text-anchor="middle" fill="#888" font-size="16">context size (tokens)</text>
+
+  <!-- Notes panel -->
+  <rect x="80" y="730" width="1440" height="130" rx="8" fill="#121212" stroke="#2a2a2a"/>
+  <text class="note" x="110" y="762" fill="#d0d0d0" font-weight="700">prompt cache helps on re-reads.</text>
+  <text class="note" x="520" y="762">it does NOT cache attention compute against the blob.</text>
+  <text class="note" x="110" y="796">a 4-hour refactor at 400k costs ~5× the same work at 80k — every turn.</text>
+  <text class="note" x="110" y="830" fill="#ff8c42">SI's cost-band tightening pushes thresholds inward on expensive sessions — warn earlier, save money.</text>
+
+  <text class="footer" x="80" y="880">session-intelligence · compaction is cost discipline as much as quality discipline</text>
+  <g opacity="0.9">
+    <text x="1520" y="855" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="880" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>

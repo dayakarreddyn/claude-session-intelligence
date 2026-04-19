@@ -1,0 +1,33 @@
+# Tweet 1/11  (379 chars)
+https://x.com/intent/tweet?text=shipped%20a%20Claude%20Code%20plugin%20after%20weeks%20of%20dogfooding%3A%20session-intelligence.%0A%0Abuilt%20it%20because%20i%20lost%20sleep.%20literal%203am%20sessions%20watching%20%2Fcompact%20nuke%20the%20exact%20file%20tree%20claude%20needed%2020%20minutes%20later%2C%20then%20re-read%2C%20re-guess%2C%20re-drift.%0A%0A1M%20context%20is%20a%20big%20room.%20doesn't%20stop%20it%20getting%20messy.%0A%0Agrounded%20in%20%40trq212's%20research%20%E2%86%92%20https%3A%2F%2Fx.com%2Ftrq212%2Fstatus%2F2044548257058328723
+
+# Tweet 2/11  (286 chars)
+https://x.com/intent/tweet?text=the%20myth%20of%20'just%20use%20a%20bigger%20context'%3A%0A%0AAnthropic%20shipped%201M.%20great.%20but%20context%20is%20the%20model's%20working%20memory%2C%20not%20a%20database.%0A%0Aevery%20token%20re-processed%20every%20turn.%20empty%20space%20isn't%20free%20%E2%80%94%20used%20context%20shapes%20every%20decision%2C%20even%20the%20parts%20that%20stopped%20being%20load-bearing%20hours%20ago.
+
+# Tweet 3/11  (280 chars)
+https://x.com/intent/tweet?text=rot%20is%20task-dependent%2C%20not%20a%20cliff%3A%0A%0A%E2%80%A2%20needle-in-haystack%3A%20near-perfect%20to%201M%0A%E2%80%A2%20single-doc%20QA%3A%20strong%20to%20500k%2B%0A%E2%80%A2%20multi-step%20coding%20(dependent%20decisions)%3A%20~150%E2%80%93250k%0A%E2%80%A2%20voice%2Fstyle%3A%20~200k%0A%E2%80%A2%20scattered%20requirements%3A%20~250%E2%80%93350k%0A%E2%80%A2%20complex%20synthesis%3A%20~300k%0A%0Acoding%20hits%20the%20sharpest%20curve.
+
+# Tweet 4/11  (314 chars)
+https://x.com/intent/tweet?text=the%20sleepless-nights%20version%3A%0A%0A%E2%86%92%20claude%20cites%20a%20decision%20from%2080k%20tokens%20ago%20that%20no%20longer%20applies%0A%E2%86%92%20it%20re-reads%20a%20file%20it%20wrote%20itself%0A%E2%86%92%20it%20'forgets'%20the%20pattern%20it%20established%20in%20turn%2012%0A%E2%86%92%20auto-compact%20fires%20and%20the%20resume%20feels%20like%20a%20stranger%20wrote%20your%20code%0A%0Aattention%20economics%20meeting%20your%204-hour%20refactor.
+
+# Tweet 5/11  (319 chars)
+https://x.com/intent/tweet?text=auto-compact%20isn't%20raw%20compression%20%E2%80%94%20it's%20LLM%20summarization.%0A%0Aclaude%20reads%20its%20own%20conversation%2C%20produces%20a%209-section%20structured%20summary.%20recent%20turns%20kept%20verbatim.%20older%20turns%20collapse.%0A%0Aintelligent%20in%20shape.%20still%20lossy.%20no%20awareness%20of%20which%20details%20were%20load-bearing.%20that%20guess%20is%20where%20your%20afternoon%20disappears.
+
+# Tweet 6/11  (355 chars)
+https://x.com/intent/tweet?text=the%20USP%3A%20longer%20sessions%20without%20rot.%20SI%20makes%20compaction%20intelligent.%0A%0A%E2%80%A2%20statusline%20zones%3A%20yellow%20200k%20%2F%20orange%20300k%20%2F%20red%20400k%20%E2%80%94%20empirical%20inflection%20points%0A%E2%80%A2%20post-compact%20resume%20banner%20%E2%80%94%20ground-truth%20map%20so%20the%20summarizer%20doesn't%20have%20to%20guess%0A%E2%80%A2%20regret%20detection%20%E2%80%94%20three-band%20scoring%20post-compact%0A%E2%80%A2%20adaptive%20zones%20%E2%80%94%20learns%20YOUR%20pattern%20after%205%20compacts
+
+# Tweet 7/11  (284 chars)
+https://x.com/intent/tweet?text=why%20it%20matters%20even%20with%201M%3A%0A%0Aa%20400k%20context%20costs%20~5%C3%97%20more%20per%20turn%20than%2080k.%20prompt%20cache%20helps%20on%20re-reads%2C%20not%20on%20attention%20compute%20against%20the%20blob.%0A%0Acompacting%20at%20300k%20is%20a%20quality%20habit%20AND%20a%20cost%20habit.%20SI%20watches%20both.%20expensive%20session%3F%20warnings%20tighten.%20stable%3F%20they%20relax.
+
+# Tweet 8/11  (324 chars)
+https://x.com/intent/tweet?text=regret%2C%20actually%20measured.%0A%0Aafter%20every%20compact%20SI%20snapshots%20hot%2Fwarm%2Fdropped%20dirs.%20every%20post-compact%20tool%20call%20is%20scored%3A%0A%0A%F0%9F%94%B4%20hard%20regret%20%E2%80%94%20reopened%20a%20dropped%20dir%0A%F0%9F%9F%A2%20positive%20hit%20%E2%80%94%20hot%20dirs%20still%20in%20play%0A%F0%9F%9F%A1%20soft%20regret%20%E2%80%94%20warm%20dir%20pulled%20back%0A%0Athe%20plugin%20learns%20from%20itself.%20today's%20warnings%20informed%20by%20yesterday's%20regret.
+
+# Tweet 9/11  (268 chars)
+https://x.com/intent/tweet?text=the%20boring%20plumbing%20nobody%20tweets%20about%3A%0A%0A%E2%80%A2%20SessionStart%20stdout%20is%20model-only.%20stderr%20is%20your%20only%20user-visible%20channel.%20compact%20suppresses%20stderr.%20so%20the%20resume%20banner%20has%20to%20ride%20systemMessage%20via%20hookSpecificOutput%20JSON.%0A%0Atook%20a%20week%20to%20figure%20out.%20one%20line%20now.%20%F0%9F%AB%A1
+
+# Tweet 10/11  (287 chars)
+https://x.com/intent/tweet?text=what%20this%20buys%20you%3A%0A%0A%E2%86%92%204-hour%20refactors%20that%20don't%20forget%20their%20own%20decisions%0A%E2%86%92%20resumed%20context%20that%20actually%20resumes%0A%E2%86%92%20a%20statusline%20that%20tells%20you%20WHEN%20to%20compact%2C%20not%20after%0A%E2%86%92%20thresholds%20that%20adapt%20to%20your%20workflow%20instead%20of%20fighting%20it%0A%0Anot%20magic.%20just%20signals%20that%20were%20always%20there.
+
+# Tweet 11/11  (246 chars)
+https://x.com/intent/tweet?text=%2Fplugin%20install%20session-intelligence%0A%0Aor%20clone%20%2B%20.%2Finstall.sh.%20MIT.%20dogfooded%20through%20writing%20this%20very%20thread.%0A%0Aif%20you've%20lost%20an%20evening%20to%20post-compact%20amnesia%20even%20once%20%E2%80%94%20try%20it%20for%20a%20day.%0A%0Agithub.com%2Fdayakarreddyn%2Fclaude-session-intelligence
+

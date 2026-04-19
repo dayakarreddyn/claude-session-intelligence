@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .row-label { fill: #d0d0d0; font-size: 22px; }
+      .tick { fill: #555; font-size: 16px; }
+      .axis { stroke: #2a2a2a; stroke-width: 1; }
+      .bar-g { fill: #5cb85c; }
+      .bar-y { fill: #e8c547; }
+      .bar-o { fill: #ff8c42; }
+      .bar-r { fill: #ff5555; }
+      .caption { fill: #888; font-size: 22px; font-style: italic; }
+      .footer { fill: #555; font-size: 16px; }
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">rot is task-dependent, not a cliff</text>
+  <text class="sub" x="80" y="125">where Claude's output quality starts slipping, by task type</text>
+
+  <!-- axis reference lines (bars start at x=580, 940px wide span for 1M, scale 940/1000) -->
+  <line class="axis" x1="580" y1="170" x2="580" y2="720"/>
+  <line class="axis" x1="768" y1="170" x2="768" y2="720"/>
+  <line class="axis" x1="956" y1="170" x2="956" y2="720"/>
+  <line class="axis" x1="1144" y1="170" x2="1144" y2="720"/>
+  <line class="axis" x1="1332" y1="170" x2="1332" y2="720"/>
+  <line class="axis" x1="1520" y1="170" x2="1520" y2="720"/>
+
+  <!-- bars: scale 0.940 px per 1k tokens; 940px = 1M -->
+  <!-- label anchor right edge at x=560, gives 560px of label width -->
+
+  <!-- needle-in-haystack: 1M -->
+  <rect class="bar-g" x="580" y="185" width="940" height="48" rx="4"/>
+  <text class="row-label" x="560" y="216" text-anchor="end">needle-in-haystack retrieval</text>
+
+  <!-- single-doc QA: 550k -->
+  <rect class="bar-g" x="580" y="255" width="517" height="48" rx="4"/>
+  <text class="row-label" x="560" y="286" text-anchor="end">single-doc QA</text>
+
+  <!-- scattered requirements: 300k -->
+  <rect class="bar-y" x="580" y="325" width="282" height="48" rx="4"/>
+  <text class="row-label" x="560" y="356" text-anchor="end">scattered requirements</text>
+
+  <!-- complex synthesis: 300k -->
+  <rect class="bar-o" x="580" y="395" width="282" height="48" rx="4"/>
+  <text class="row-label" x="560" y="426" text-anchor="end">complex synthesis</text>
+
+  <!-- voice / style: 200k -->
+  <rect class="bar-o" x="580" y="465" width="188" height="48" rx="4"/>
+  <text class="row-label" x="560" y="496" text-anchor="end">maintaining voice / style</text>
+
+  <!-- multi-step coding: 200k (highlighted, longest label) -->
+  <rect class="bar-r" x="580" y="535" width="188" height="48" rx="4"/>
+  <text class="row-label" x="560" y="562" text-anchor="end" font-weight="700" fill="#ff5555">multi-step coding</text>
+  <text class="row-label" x="560" y="586" text-anchor="end" font-size="16" fill="#ff8888">dependent decisions</text>
+
+  <!-- x-axis ticks -->
+  <line class="axis" x1="580" y1="640" x2="1520" y2="640" stroke="#444"/>
+  <text class="tick" x="580" y="670" text-anchor="middle">0</text>
+  <text class="tick" x="768" y="670" text-anchor="middle">200k</text>
+  <text class="tick" x="956" y="670" text-anchor="middle">400k</text>
+  <text class="tick" x="1144" y="670" text-anchor="middle">600k</text>
+  <text class="tick" x="1332" y="670" text-anchor="middle">800k</text>
+  <text class="tick" x="1520" y="670" text-anchor="middle">1M</text>
+  <text class="tick" x="1050" y="700" text-anchor="middle" fill="#666">tokens until quality slips</text>
+
+  <!-- Caption -->
+  <text class="caption" x="80" y="790">coding sessions hit the cliff first — every stale decision becomes</text>
+  <text class="caption" x="80" y="820">a distractor for the next one.</text>
+
+  <text class="footer" x="80" y="870">based on Thariq's research (x.com/trq212) + dogfood observations · session-intelligence</text>
+  <g opacity="0.9">
+    <text x="1520" y="845" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="870" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>

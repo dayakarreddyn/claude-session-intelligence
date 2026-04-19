@@ -59,6 +59,8 @@ Cache reads are a **billing and latency** optimization. The model's output still
 
 This is why the plugin's learning loop cares about cost-band (`expensive` vs `cheap`) as **telemetry**, not as a reason to skip compacting. A 400k cache-heavy context is cheap per turn but just as prone to rot as a 400k uncached context.
 
+![Context is working memory, not a database — unused context isn't free because every token is re-processed every turn](assets/launch/B-working-memory-not-database.svg)
+
 ### 1.4 The context window is shared across turns
 
 Every message in a Claude Code conversation sits in the same window:
@@ -101,6 +103,8 @@ Claude Code sessions are a worst-case profile for long-context performance becau
 
 Empirically (Thariq's research on 1M Claude, public observations, and internal Anthropic guidance): instruction-following in coding sessions visibly degrades from ~150-250k tokens and becomes unreliable past ~400k for sessions with heavy tool use. This is why "auto-compact fires at 1M" is the wrong place — it fires after the damage is done.
 
+![Rot is task-dependent: retrieval near-perfect to 1M, QA strong to 500k, but multi-step coding with dependent decisions starts slipping at 150-250k](assets/launch/A-rot-is-task-dependent.svg)
+
 ### 2.3 "Context rot" as a user-facing phenomenon
 
 What the engineer actually experiences as degradation:
@@ -122,6 +126,8 @@ None of these are "the model is broken." They are the statistical consequence of
 
 The 200k / 300k / 400k bands match the empirical inflection for the workload the plugin targets. They aren't sacred — the adaptive zones feature (Part 6) recalibrates them to your actual pattern.
 
+![Zones: GREEN below 200k (no intervention value), YELLOW 200-300k (drift starts), ORANGE 300-400k (coding degrades), RED 400k+ (almost certainly compact). Adaptive after 5 compacts.](assets/launch/D-zones.svg)
+
 ---
 
 ## Part 3 — The intervention problem
@@ -139,6 +145,10 @@ Naïve approaches and why they fail:
 | "Compact on Nth tool call" | N is arbitrary. Ten big Reads ≠ fifty Grep lookups. |
 
 What actually works: **compact at natural phase boundaries, guided by what the context currently contains.**
+
+Claude Code's own auto-compact is not raw compression — it's LLM summarization. Claude reads its own conversation and produces a structured 9-section summary (Primary Request, Technical Concepts, Files, Errors/Fixes, Problem Solving, User Messages, Pending Tasks, Current Work, Next Step). Recent turns are kept verbatim; older turns collapse into that summary. Intelligent in shape, still lossy — there's no awareness of which details were load-bearing. It guesses from recency and structure. That guess is where the plugin's injected ground-truth signals (shape tracker, hot/warm/dropped bands, in-flight git state) earn their keep.
+
+![Auto-compact is summarization, not compression. A 9-section structured output with no slot for "which detail was load-bearing for THIS refactor."](assets/launch/C-compact-is-summarization.svg)
 
 A phase boundary is typically:
 
@@ -417,6 +427,9 @@ This is deliberate. Users should know when the thresholds they're reacting to ca
 
 ## Part 7 — Post-compact regret detection
 
+![Three-band regret: HOT dirs hit post-compact = positive signal (green), WARM dirs hit = soft regret (yellow), DROPPED dirs hit = hard regret (red). Feeds the learning loop.](assets/launch/E-three-band-regret.svg)
+
+
 ### 7.1 The feedback loop problem
 
 Zones adapt to *when* you compact. But there's a second signal that matters: whether the compact was **good** (flow resumed seamlessly) or **bad** (you had to re-explain / re-read dropped content).
@@ -497,6 +510,8 @@ The design assumption is that the user doesn't need to think about regret tracki
 ### 8.1 Cost as a decision input
 
 Compaction trades a one-time compaction cost (the model summarizing 300k tokens ≈ $5-$10) against reduced per-turn cost across the next N turns (cheaper input + fewer cache reads if the summary is substantially smaller). Whether this trade is positive depends on the cost band of the current context.
+
+![Relative cost per turn: 80k = 1x baseline, 200k ≈ 1.8x, 300k ≈ 2.8x, 400k ≈ 5x. Prompt cache helps on re-reads, not on attention compute against the blob.](assets/launch/F-cost-dimension.svg)
 
 ### 8.2 The banding
 

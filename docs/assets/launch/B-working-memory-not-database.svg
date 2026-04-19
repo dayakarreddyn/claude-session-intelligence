@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .panel { fill: #121212; stroke: #2a2a2a; stroke-width: 1; }
+      .panel-label { fill: #d0d0d0; font-size: 26px; font-weight: 700; }
+      .muted { fill: #777; font-size: 18px; }
+      .x { fill: #ff5555; font-size: 48px; font-weight: 700; }
+      .check { fill: #5cb85c; font-size: 48px; font-weight: 700; }
+      .ram-cell { fill: #1a1a1a; stroke: #3a3a3a; }
+      .ram-used { fill: #2a4a6a; stroke: #4a7aaa; }
+      .token-used { fill: #6ab0f3; }
+      .token-stale { fill: #ff8c42; }
+      .brain-stroke { fill: none; stroke: #e8c547; stroke-width: 3; }
+      .arrow { stroke: #888; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .caption { fill: #e8c547; font-size: 24px; font-weight: 600; }
+      .footer { fill: #555; font-size: 16px; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">context is working memory — not a database</text>
+  <text class="sub" x="80" y="125">unused context isn't free. it shapes every decision.</text>
+
+  <!-- LEFT panel: wrong mental model -->
+  <rect class="panel" x="80" y="180" width="680" height="520" rx="8"/>
+  <text class="panel-label" x="420" y="225" text-anchor="middle">the wrong mental model</text>
+  <text class="muted" x="420" y="255" text-anchor="middle">"it's like RAM — empty space is free"</text>
+  <text class="x" x="420" y="305" text-anchor="middle">✗</text>
+
+  <!-- RAM stick illustration: rectangle with cells, some filled, some empty -->
+  <rect x="150" y="370" width="540" height="120" rx="6" fill="#151515" stroke="#3a3a3a"/>
+  <!-- cells -->
+  <g>
+    <rect class="ram-used" x="165" y="385" width="40" height="90"/>
+    <rect class="ram-used" x="210" y="385" width="40" height="90"/>
+    <rect class="ram-used" x="255" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="300" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="345" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="390" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="435" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="480" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="525" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="570" y="385" width="40" height="90"/>
+    <rect class="ram-cell" x="615" y="385" width="40" height="90"/>
+  </g>
+  <text class="muted" x="420" y="525" text-anchor="middle">3 filled · 8 empty · cost = 3 cells</text>
+  <text class="muted" x="420" y="585" text-anchor="middle" fill="#555">empty bytes do no work and cost nothing.</text>
+  <text class="muted" x="420" y="615" text-anchor="middle" fill="#555">this is how RAM behaves.</text>
+  <text class="muted" x="420" y="665" text-anchor="middle" fill="#ff5555">the context window does not behave like this.</text>
+
+  <!-- RIGHT panel: how it actually works -->
+  <rect class="panel" x="840" y="180" width="680" height="520" rx="8"/>
+  <text class="panel-label" x="1180" y="225" text-anchor="middle">how attention actually works</text>
+  <text class="muted" x="1180" y="255" text-anchor="middle">every token is re-processed every turn</text>
+  <text class="check" x="1180" y="305" text-anchor="middle">✓</text>
+
+  <!-- Brain circle with tokens flowing in -->
+  <circle cx="1180" cy="480" r="110" class="brain-stroke"/>
+  <text x="1180" y="490" text-anchor="middle" fill="#e8c547" font-size="22" font-weight="700">attention</text>
+
+  <!-- incoming tokens -->
+  <g>
+    <circle class="token-used" cx="920" cy="400" r="10"/>
+    <circle class="token-used" cx="920" cy="440" r="10"/>
+    <circle class="token-used" cx="920" cy="480" r="10"/>
+    <circle class="token-stale" cx="920" cy="520" r="10"/>
+    <circle class="token-stale" cx="920" cy="560" r="10"/>
+    <line class="arrow" x1="935" y1="400" x2="1065" y2="450"/>
+    <line class="arrow" x1="935" y1="440" x2="1065" y2="465"/>
+    <line class="arrow" x1="935" y1="480" x2="1065" y2="480"/>
+    <line class="arrow" x1="935" y1="520" x2="1065" y2="500"/>
+    <line class="arrow" x1="935" y1="560" x2="1065" y2="515"/>
+  </g>
+
+  <!-- Legend -->
+  <circle class="token-used" cx="870" cy="635" r="8"/>
+  <text class="muted" x="890" y="640" fill="#6ab0f3">load-bearing</text>
+  <circle class="token-stale" cx="1050" cy="635" r="8"/>
+  <text class="muted" x="1070" y="640" fill="#ff8c42">stale · still processed · still shapes output</text>
+
+  <text class="muted" x="1180" y="675" text-anchor="middle" fill="#ff5555">signal-to-noise degrades whether you like it or not.</text>
+
+  <text class="caption" x="800" y="780" text-anchor="middle">the room is big.  that doesn't stop it from getting messy.</text>
+
+  <text class="footer" x="80" y="870">session-intelligence · context is finite working memory, not free storage</text>
+  <g opacity="0.9">
+    <text x="1520" y="845" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="870" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>

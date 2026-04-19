@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <style>
+      .bg { fill: #0a0a0a; }
+      .title { fill: #f5f5f5; font-size: 42px; font-weight: 700; }
+      .sub { fill: #888; font-size: 20px; }
+      .lane-label { font-size: 22px; font-weight: 700; }
+      .lane-desc { fill: #888; font-size: 16px; }
+      .tick { fill: #666; font-size: 16px; }
+      .compact-label { fill: #e8c547; font-size: 20px; font-weight: 700; }
+      .caption { fill: #e8c547; font-size: 24px; font-weight: 600; }
+      .legend-text { fill: #d0d0d0; font-size: 18px; }
+      .footer { fill: #555; font-size: 16px; }
+      .lane { stroke: #2a2a2a; stroke-width: 1; }
+      .compact-line { stroke: #e8c547; stroke-width: 2; stroke-dasharray: 6 6; }
+    </style>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+
+  <text class="title" x="80" y="90">three-band regret · is compact actually working?</text>
+  <text class="sub" x="80" y="125">SI snapshots hot/warm/dropped dirs at compact. every tool call after gets scored.</text>
+
+  <!-- Timeline layout: lanes from x=340 to x=1500 -->
+  <!-- compact divider at x=700 -->
+
+  <!-- Lane backgrounds -->
+  <rect class="lane" x="340" y="200" width="1160" height="90" fill="#1a2a1a" rx="4"/>
+  <rect class="lane" x="340" y="310" width="1160" height="90" fill="#2a251a" rx="4"/>
+  <rect class="lane" x="340" y="420" width="1160" height="90" fill="#2a1a1a" rx="4"/>
+
+  <!-- Lane labels -->
+  <text class="lane-label" x="320" y="235" text-anchor="end" fill="#5cb85c">HOT</text>
+  <text class="lane-desc" x="320" y="260" text-anchor="end">top recency dirs</text>
+  <text class="lane-desc" x="320" y="280" text-anchor="end">(kept in snapshot)</text>
+
+  <text class="lane-label" x="320" y="345" text-anchor="end" fill="#e8c547">WARM</text>
+  <text class="lane-desc" x="320" y="370" text-anchor="end">mid-recency dirs</text>
+  <text class="lane-desc" x="320" y="390" text-anchor="end">(partially preserved)</text>
+
+  <text class="lane-label" x="320" y="455" text-anchor="end" fill="#ff5555">DROPPED</text>
+  <text class="lane-desc" x="320" y="480" text-anchor="end">paged out by compact</text>
+  <text class="lane-desc" x="320" y="500" text-anchor="end">(summary's guess)</text>
+
+  <!-- Compact divider -->
+  <line class="compact-line" x1="700" y1="180" x2="700" y2="540"/>
+  <text class="compact-label" x="700" y="170" text-anchor="middle">↓  /compact  ↓</text>
+
+  <!-- Pre-compact side: grey filler dots to show there was activity -->
+  <g fill="#3a3a3a">
+    <circle cx="400" cy="245" r="8"/>
+    <circle cx="450" cy="245" r="8"/>
+    <circle cx="500" cy="245" r="8"/>
+    <circle cx="550" cy="245" r="8"/>
+    <circle cx="600" cy="245" r="8"/>
+    <circle cx="650" cy="245" r="8"/>
+    <circle cx="420" cy="355" r="8"/>
+    <circle cx="480" cy="355" r="8"/>
+    <circle cx="560" cy="355" r="8"/>
+    <circle cx="630" cy="355" r="8"/>
+    <circle cx="410" cy="465" r="8"/>
+    <circle cx="470" cy="465" r="8"/>
+    <circle cx="540" cy="465" r="8"/>
+    <circle cx="610" cy="465" r="8"/>
+    <circle cx="670" cy="465" r="8"/>
+  </g>
+  <text class="tick" x="520" y="560" text-anchor="middle">pre-compact activity</text>
+
+  <!-- Post-compact dots: HOT lane → positive hits (green) -->
+  <g fill="#5cb85c">
+    <circle cx="740" cy="245" r="10"/>
+    <circle cx="790" cy="245" r="10"/>
+    <circle cx="850" cy="245" r="10"/>
+    <circle cx="920" cy="245" r="10"/>
+    <circle cx="980" cy="245" r="10"/>
+    <circle cx="1060" cy="245" r="10"/>
+    <circle cx="1130" cy="245" r="10"/>
+    <circle cx="1220" cy="245" r="10"/>
+    <circle cx="1320" cy="245" r="10"/>
+    <circle cx="1420" cy="245" r="10"/>
+  </g>
+
+  <!-- Post-compact dots: WARM lane → soft regret (yellow) -->
+  <g fill="#e8c547">
+    <circle cx="820" cy="355" r="10"/>
+    <circle cx="1050" cy="355" r="10"/>
+    <circle cx="1280" cy="355" r="10"/>
+  </g>
+
+  <!-- Post-compact dots: DROPPED lane → hard regret (red) -->
+  <g fill="#ff5555">
+    <circle cx="890" cy="465" r="10"/>
+    <circle cx="1180" cy="465" r="10"/>
+  </g>
+
+  <text class="tick" x="1100" y="560" text-anchor="middle">post-compact tool calls</text>
+
+  <!-- Legend -->
+  <rect x="80" y="620" width="1440" height="180" rx="8" fill="#121212" stroke="#2a2a2a"/>
+
+  <!-- Col 1: positive hit -->
+  <circle cx="130" cy="670" r="12" fill="#5cb85c"/>
+  <text class="legend-text" x="160" y="676" fill="#5cb85c" font-weight="700">positive hit</text>
+  <text class="legend-text" x="160" y="704" fill="#888" font-size="15">hot dirs still in play ·</text>
+  <text class="legend-text" x="160" y="724" fill="#888" font-size="15">compact succeeded</text>
+
+  <!-- Col 2: soft regret -->
+  <circle cx="560" cy="670" r="12" fill="#e8c547"/>
+  <text class="legend-text" x="590" y="676" fill="#e8c547" font-weight="700">soft regret · warm dir pulled back</text>
+  <text class="legend-text" x="590" y="704" fill="#888" font-size="15">weaker signal · often means</text>
+  <text class="legend-text" x="590" y="724" fill="#888" font-size="15">you compacted too early</text>
+
+  <!-- Col 3 (top row): hard regret -->
+  <circle cx="1100" cy="670" r="12" fill="#ff5555"/>
+  <text class="legend-text" x="1130" y="676" fill="#ff5555" font-weight="700">hard regret</text>
+  <text class="legend-text" x="1130" y="704" fill="#888" font-size="15">dropped dir reopened ·</text>
+  <text class="legend-text" x="1130" y="724" fill="#888" font-size="15">compact threw away signal</text>
+
+  <!-- Learning loop band across bottom -->
+  <line class="divider" x1="110" y1="745" x2="1490" y2="745" stroke="#2a2a2a" stroke-dasharray="4 4"/>
+  <text class="legend-text" x="130" y="775" fill="#d0d0d0" font-weight="700">learning loop →</text>
+  <text class="legend-text" x="310" y="775" fill="#888" font-size="15">high regret rate across recent compacts pushes thresholds outward. tomorrow's warning is informed by today's regret.</text>
+
+  <text class="footer" x="80" y="870">session-intelligence · compact either worked or it didn't. finally measurable.</text>
+  <g opacity="0.9">
+    <text x="1520" y="845" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="18" fill="#e8c547" font-weight="700">@0xCosmician</text>
+    <text x="1520" y="870" text-anchor="end" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#777">github.com/dayakarreddyn/claude-session-intelligence</text>
+  </g>
+</svg>
