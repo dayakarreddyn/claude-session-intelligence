@@ -16,7 +16,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si set <key> <value>                     # stage a change, show diff, wait for YES
 /si reset <key|*>                         # reset a key (or all) to default
 /si explain <key>                         # describe what a key does
-/si configure                             # walk every key one at a time, review combined diff, confirm
+/si config                                # show all keys in one table, edit any subset, review combined diff, confirm
 /si migrate                               # import legacy ~/.claude/statusline-intel.json
 /si tail                                  # show latest intel log + shape log for this session
 ```
@@ -72,7 +72,7 @@ Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's std
 
 **`explain <key>`** — Describe what the key controls, its type, its default, and its effect on which hook. Keep it under 60 words. Do not modify anything.
 
-**`configure`** — Interactive per-key wizard. See the dedicated section below.
+**`config`** — Show-all config form. See the dedicated section below.
 
 **`migrate`** — If `~/.claude/statusline-intel.json` exists, read it, nest its keys under `"statusline"`, merge into the unified config, show the diff, and wait for YES before writing. Keep the legacy file on disk as a backup.
 
@@ -84,68 +84,111 @@ Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's std
 
 No diff, no config write, no subagents. This is a "what is the plugin doing right now" view. Emit three clear section headers (`INTEL LOG`, `SHAPE LOG`, `ADAPTIVE ZONES`) so the user can navigate the output quickly.
 
-### `configure` — interactive per-key wizard
+### `config` — show-all form
 
-Walks every tunable key in order, **one at a time**, using the `AskUserQuestion` tool. For each key, stage the user's selection in an in-memory patch; after the last key (or when the user picks **Quit wizard**), fall through to Step 3's write protocol so the combined change is previewed and confirmed in a single diff.
+Print **every tunable key in one table**, then accept a bulk edit block from the user. Same vibe as `claude config`: everything visible, edit whatever you care about, submit once, review a combined diff, confirm.
 
-**Loop invariants**
-- Never write to disk inside the loop. Only Step 3 writes.
-- Never ask more than one `AskUserQuestion` at a time. Do not batch multiple keys into a single prompt.
-- Preserve the current value when the user picks **Keep**, **Skip**, or **Quit**. Only mutate the staged config on explicit selection.
-- If the user picks **Custom…**, immediately follow up with a second `AskUserQuestion` (or plain message) that accepts a free-form value. Parse numbers with `parseInt` / `parseFloat`; refuse and re-ask on parse failure — never silently skip.
+**Step A — Print the form**
 
-**Prompt shape (per key)**
-
-Every question header must include: dotted key, current value, default value, one-sentence description. Example:
+One fenced block mimicking the look of Claude Code's built-in `/config`: **friendly label on the left, current value right-aligned**. Group rows under section headers. Row order is fixed; do not reorder. Flag values that diverge from default by appending ` *` after the value. Render booleans as `true` / `false`, numbers ≥1000 as `Nk` (e.g. `200k`), everything else verbatim.
 
 ```
-statusline.zones.orange — caution zone where compact is strongly suggested
-  current: 300000   default: 300000
+Session Intelligence — Config                    (~/.claude/session-intelligence.json)
+
+Statusline
+  Preset                                           verbose
+  Token source                                     auto
+  Caution zone (yellow)                            200k
+  Compact-now zone (orange)                        300k
+  Urgent zone (red)                                400k
+  Task text max length                             35 *
+  ANSI colors                                      true
+
+Compact
+  Advisory threshold (tool calls)                  50
+  Show compact suggestion in-tool                  true
+  Pre-compact memory offload                       true
+
+Continue
+  Resume task after /compact                       true
+
+Task change detection
+  Enabled                                          true
+  Minimum tokens to detect                         150k *
+
+Shape tracker
+  Root dir depth                                   2
+  Git Nexus — enabled                              true
+  Git Nexus — inject at SessionStart               false
+
+Learning
+  Announce zone shifts                             false
+
+Debug
+  Verbose logs                                     true *
+  Quiet mode                                       false
+
+* = differs from default
 ```
 
-Then `AskUserQuestion` with 3–5 short options. Always include **Keep current**, **Custom…**, **Skip**, and **Quit wizard** in addition to the named presets. Do not invent options outside the table below.
+Resolve current values from the on-disk config (empty-object fallback → default), and defaults from `DEFAULTS` in `lib/config.js`. Do **not** invent keys absent from this list. The friendly label → dotted key mapping is fixed:
 
-**Keys to walk, in order**
+| Label | Dotted key |
+|---|---|
+| Preset | `statusline.preset` |
+| Token source | `statusline.tokenSource` |
+| Caution zone (yellow) | `statusline.zones.yellow` |
+| Compact-now zone (orange) | `statusline.zones.orange` |
+| Urgent zone (red) | `statusline.zones.red` |
+| Task text max length | `statusline.maxTaskLength` |
+| ANSI colors | `statusline.colors` |
+| Advisory threshold (tool calls) | `compact.threshold` |
+| Show compact suggestion in-tool | `compact.autoblock` |
+| Pre-compact memory offload | `compact.memoryOffload` |
+| Resume task after /compact | `continue.afterCompact` |
+| Enabled *(under Task change detection)* | `taskChange.enabled` |
+| Minimum tokens to detect | `taskChange.minTokens` |
+| Root dir depth | `shape.rootDirDepth` |
+| Git Nexus — enabled | `shape.gitNexus.enabled` |
+| Git Nexus — inject at SessionStart | `shape.gitNexus.injectAtStart` |
+| Announce zone shifts | `learn.announce` |
+| Verbose logs | `debug.enabled` |
+| Quiet mode | `debug.quiet` |
 
-| # | Key | Type | Description (≤12 words) | Named options |
-|---|-----|------|-------------------------|---------------|
-| 1 | `statusline.preset` | enum | Line shape preset | `minimal`, `standard`, `verbose` |
-| 2 | `statusline.tokenSource` | enum | How token count is read | `auto`, `transcript`, `estimate` |
-| 3 | `statusline.zones.yellow` | number | Tokens → caution zone | `150000`, `200000`, `250000` |
-| 4 | `statusline.zones.orange` | number | Tokens → compact-now zone | `250000`, `300000`, `350000` |
-| 5 | `statusline.zones.red` | number | Tokens → urgent zone | `350000`, `400000`, `450000` |
-| 6 | `statusline.maxTaskLength` | number | Line-2 task text truncation | `25`, `35`, `50`, `70` |
-| 7 | `statusline.colors` | bool | ANSI colors in statusline | `true`, `false` |
-| 8 | `compact.threshold` | number | Tool calls before first advisory | `50`, `75`, `100` |
-| 9 | `compact.autoblock` | bool | Surface compact suggestion as tool feedback | `true`, `false` |
-| 10 | `compact.memoryOffload` | bool | Pre-compact memory-offload directive | `true`, `false` |
-| 11 | `continue.afterCompact` | bool | Replay task + in-flight state after /compact | `true`, `false` |
-| 12 | `taskChange.enabled` | bool | Detect task-domain changes | `true`, `false` |
-| 13 | `taskChange.minTokens` | number | Skip detection below this many tokens | `50000`, `100000`, `150000` |
-| 14 | `shape.rootDirDepth` | number | Path segments to group tool calls by (monorepo knob) | `1`, `2`, `3` |
-| 15 | `shape.gitNexus.enabled` | bool | Auto-derive preserveGlobs from git commit frequency | `true`, `false` |
-| 16 | `shape.gitNexus.injectAtStart` | bool | Emit top anchor files as SessionStart context | `true`, `false` |
-| 17 | `learn.announce` | bool | Emit one-line zone-shift summary when adaptive zones change | `true`, `false` |
-| 18 | `debug.enabled` | bool | Verbose debug logs | `true`, `false` |
-| 19 | `debug.quiet` | bool | Suppress non-error output | `true`, `false` |
+**Step B — Collect edits**
 
-Walk this list top-to-bottom. Do not reorder. Do not insert keys that are not in this table (service health, prices, individual fields array — those are covered by `/si set`).
+Directly after the form, print exactly:
 
-**Selection handling**
-- `Keep current` → no change staged, advance.
-- A named option → stage `config[key] = option` on the in-memory copy, advance.
-- `Custom…` → ask for a free-form value, validate against the type column, stage, advance. On repeated invalid input (twice), treat as `Skip`.
-- `Skip` → no change staged, advance.
-- `Quit wizard` → stop immediately, jump to Step 3.
+> Reply with one `key=value` per line for any keys you want to change. Accepted forms: the friendly label (case-insensitive, punctuation-insensitive) OR the dotted key. Values accept `true` / `false`, `Nk` for thousands, or a raw number / string. Reply `NONE` to finish with no changes, or `QUIT` to abort. Unlisted keys keep their current value.
+>
+> Example:
+> ```
+> Show compact suggestion in-tool=false
+> statusline.zones.orange=350k
+> verbose logs=false
+> ```
 
-**After the loop**
+Wait for the user's next message. Parse it line by line:
 
-If zero keys were staged, print *"No changes — wizard finished with current config intact."* and stop. Otherwise:
-1. Compute the new config (= current deep-merged with the staged patch).
-2. Enter Step 3's write protocol verbatim: show the combined diff, then ask for `YES`.
-3. On `YES`, write once; on anything else, discard the staged patch.
+- Blank lines and lines starting with `#` → ignore.
+- `NONE` (case-insensitive, trimmed) → no patch; print *"No changes — form finished with current config intact."* and stop.
+- `QUIT` (case-insensitive, trimmed) → abort; print *"Cancelled — no changes staged."* and stop.
+- `key=value` — resolve the key:
+  1. If it matches a dotted path in the table above, use that.
+  2. Otherwise normalize the left side (lowercase, strip punctuation/whitespace) and match against the normalized friendly labels. First-match wins. Error on ambiguity.
+  3. Parse the value: accept `Nk` / `Nm` for thousands/millions, then `JSON.parse`, then raw string. Type-check against the key's type (`bool`, `number`, `enum`).
+- On any validation failure: report the offending line, list what you expected, and ask the user to resubmit the whole block — do not silently drop lines or write a partial patch.
 
-No mid-wizard writes. No partial saves. One diff, one confirmation.
+Stage valid edits into an in-memory patch. Do not mutate the file.
+
+**Step C — Diff and confirm**
+
+Enter Step 3's write protocol verbatim with the staged patch: show the combined diff once, ask for `YES`, write on confirmation, discard on anything else.
+
+**Invariants**
+- One form, one submission, one diff, one confirmation. No per-key prompting.
+- Never write to disk outside Step 3.
+- Never accept a key not in the table without warning (same edge case as `/si set` — warn once, then proceed if the user resubmits).
 
 ### Step 3 — Write protocol (for `set` / `reset` / `migrate`)
 

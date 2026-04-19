@@ -394,19 +394,19 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 /si reset taskChange                # restore one section to defaults
 /si reset *                         # restore everything
 /si explain taskChange.minTokens    # describe what a key does
-/si configure                       # interactive per-key wizard — one prompt per setting
+/si config                          # show all settings in one /config-style form
 /si migrate                         # fold legacy statusline-intel.json in
 ```
 
 Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
 
-### `/si configure` — interactive wizard
+### `/si config` — show-all form
 
-For users who'd rather not memorize dotted keys. The wizard walks the user-facing tunables one prompt at a time via `AskUserQuestion`: statusline preset, token source, all three zone thresholds, task-length truncation, colours, compact threshold, autoblock, memory-offload, task-change on/off and min-tokens, `shape.rootDirDepth` (monorepo knob), `learn.announce` (opt-in zone-shift summary), and debug on/quiet. Each prompt shows **current value · default value · one-line description** and 3–4 named choices; "Other" lets you type a custom value, `skip`, or `quit`.
+For users who'd rather not memorize dotted keys. Prints every user-facing tunable in one labeled, `/config`-style block — grouped by section (`Statusline`, `Compact`, `Continue`, `Task change detection`, `Shape tracker`, `Learning`, `Debug`), current value right-aligned, values that diverge from default marked with `*`.
 
-Selections stage into an in-memory patch — nothing is written until the very end, when the combined diff is previewed and the standard **YES** gate runs once. One confirmation regardless of how many keys changed.
+Edit any subset in one reply: one `key=value` per line, using either the friendly label (case-insensitive) or the dotted key. Values accept `true`/`false`, `Nk`/`Nm` for thousands/millions, or a raw JSON value. Reply `NONE` to exit cleanly or `QUIT` to abort.
 
-Complex fields (`statusline.fields` array, `serviceHealth` URL list, `prices` overrides) stay under `/si set` because they're too freeform for 4-option prompts.
+One combined diff, one **YES** confirmation, one write. Complex fields (`statusline.fields` array, `serviceHealth` URL list, `prices` overrides) stay under `/si set` because they're too freeform for the form.
 
 ## Auto-Compact Suggestions
 
