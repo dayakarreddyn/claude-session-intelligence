@@ -155,39 +155,54 @@ Resolve current values from the on-disk config (empty-object fallback → defaul
 | Verbose logs | `debug.enabled` |
 | Quiet mode | `debug.quiet` |
 
-**Step B — Collect edits**
+**Step B — Pick a setting to change (interactive)**
 
-Directly after the form, print exactly:
+After the overview, call `AskUserQuestion` **once** with a single question:
 
-> Reply with one `key=value` per line for any keys you want to change. Accepted forms: the friendly label (case-insensitive, punctuation-insensitive) OR the dotted key. Values accept `true` / `false`, `Nk` for thousands, or a raw number / string. Reply `NONE` to finish with no changes, or `QUIT` to abort. Unlisted keys keep their current value.
+> *Question:* `Which setting do you want to change?`
+> *Header:* `Setting`
+> *Options (up to 4 per call — divergent-from-default first):*
+>   - one option per key that diverges from default, labeled with the friendly label
+>   - a trailing option: `Something else…`
+>   - a trailing option: `Done — review diff`
+
+If there are more than 3 divergent keys, group the rest under `Something else…` and re-prompt by section next turn.
+
+On selection:
+- `Done — review diff` → go to Step C.
+- `Something else…` → call `AskUserQuestion` again with question `Which section?`, options = the section headers (`Statusline`, `Compact`, `Continue`, `Task change detection`, `Shape tracker`, `Learning`, `Debug`). On pick, call `AskUserQuestion` a third time listing the keys in that section (≤4 at a time; paginate via `More…` if needed).
+- Any specific key → jump to Step B2.
+
+**Step B2 — Pick the new value**
+
+Call `AskUserQuestion` with:
+
+> *Question:* `<friendly label> — current: <current>   default: <default>`
+> *Header:* short key name (≤12 chars)
+> *Options:*
+>   - For bools: `true`, `false`, `Keep current`
+>   - For enums: each enum value + `Keep current`
+>   - For numbers: three sensible presets from the key's range + `Custom…` + `Keep current`
 >
-> Example:
-> ```
-> Show compact suggestion in-tool=false
-> statusline.zones.orange=350k
-> verbose logs=false
-> ```
+> Always include `Keep current` as one of the options. Never include `Skip` / `Quit` — use the back-loop to "Done" for exit.
 
-Wait for the user's next message. Parse it line by line:
+On pick:
+- `Keep current` → stage nothing, return to Step B.
+- A preset value → stage the key→value on the in-memory patch, return to Step B.
+- `Custom…` → ask a follow-up `AskUserQuestion` (or plain text prompt) for a free-form value; parse with `Nk`/`Nm`/`JSON.parse`; type-check. On parse/type failure, re-prompt once; on second failure, treat as `Keep current` and return to Step B.
 
-- Blank lines and lines starting with `#` → ignore.
-- `NONE` (case-insensitive, trimmed) → no patch; print *"No changes — form finished with current config intact."* and stop.
-- `QUIT` (case-insensitive, trimmed) → abort; print *"Cancelled — no changes staged."* and stop.
-- `key=value` — resolve the key:
-  1. If it matches a dotted path in the table above, use that.
-  2. Otherwise normalize the left side (lowercase, strip punctuation/whitespace) and match against the normalized friendly labels. First-match wins. Error on ambiguity.
-  3. Parse the value: accept `Nk` / `Nm` for thousands/millions, then `JSON.parse`, then raw string. Type-check against the key's type (`bool`, `number`, `enum`).
-- On any validation failure: report the offending line, list what you expected, and ask the user to resubmit the whole block — do not silently drop lines or write a partial patch.
-
-Stage valid edits into an in-memory patch. Do not mutate the file.
+Loop Step B ↔ Step B2 until the user picks `Done — review diff`.
 
 **Step C — Diff and confirm**
 
-Enter Step 3's write protocol verbatim with the staged patch: show the combined diff once, ask for `YES`, write on confirmation, discard on anything else.
+If zero edits are staged, print *"No changes — form finished with current config intact."* and stop.
+
+Otherwise enter Step 3's write protocol verbatim with the staged patch: show the combined diff once, ask for `YES`, write on confirmation, discard on anything else.
 
 **Invariants**
-- One form, one submission, one diff, one confirmation. No per-key prompting.
-- Never write to disk outside Step 3.
+- All interaction goes through `AskUserQuestion`. Never ask the user to type `key=value` in chat.
+- Never write to disk outside Step 3. No per-key writes.
+- Surface divergent-from-default keys first so the common case (tweak one thing) is one click.
 - Never accept a key not in the table without warning (same edge case as `/si set` — warn once, then proceed if the user resubmits).
 
 ### Step 3 — Write protocol (for `set` / `reset` / `migrate`)
