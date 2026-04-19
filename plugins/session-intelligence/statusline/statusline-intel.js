@@ -425,6 +425,51 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 
+/**
+ * Claude's effective context cap for the active model. Opus with the `[1m]`
+ * context tag reports it in `model.id` or `display_name`; everything else
+ * defaults to the 200k cap. We don't need perfect model detection — a cap
+ * that's too small just means the bar saturates faster, which is a harmless
+ * visual nudge.
+ */
+function contextCap(input) {
+  const id = String(
+    (input && input.model && (input.model.id || input.model.display_name)) || ''
+  ).toLowerCase();
+  if (/\[1m\]|-1m|\b1m\b|1000k|1000000/.test(id)) return 1000000;
+  return 200000;
+}
+
+/**
+ * Render a Unicode progress bar with zone threshold markers.
+ *
+ *   fill is colored by current zone
+ *   empty slots are dim
+ *   yellow / orange / red threshold positions are marked with a thin
+ *     vertical bar (│) so the user can see distance-to-next-zone at a glance
+ *
+ * Returns an ANSI-colored string of visible width `width`.
+ */
+function renderContextBar(used, cap, zones, C, zoneColorName, width) {
+  const w = Math.max(8, Math.min(40, width || 20));
+  const ratio = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
+  const filled = Math.round(ratio * w);
+  const zoneColor = C[zoneColorName] || C.reset;
+  const thresholds = new Set();
+  for (const t of [zones.yellow, zones.orange, zones.red]) {
+    if (t > 0 && t < cap) thresholds.add(Math.max(1, Math.min(w - 1, Math.round((t / cap) * w))));
+  }
+  let out = '';
+  for (let i = 0; i < w; i++) {
+    const isThreshold = thresholds.has(i);
+    const ch = i < filled ? '▰' : (isThreshold ? '│' : '▱');
+    if (i < filled) out += `${zoneColor}${ch}${C.reset}`;
+    else if (isThreshold) out += `${C.dim}${ch}${C.reset}`;
+    else out += `${C.dim}${ch}${C.reset}`;
+  }
+  return out;
+}
+
 function zoneFor(tokens, zones) {
   if (tokens >= zones.red)    return { name: 'red',    color: 'red',    icon: '▰▰▰▰' };
   if (tokens >= zones.orange) return { name: 'orange', color: 'orange', icon: '▰▰▰▱' };
@@ -643,10 +688,17 @@ function buildRenderers(C) {
       const t = ctx.tokens;
       const zone = zoneFor(t, ctx.cfg.zones);
       const color = C[zone.color] || C.reset;
-      const label = t > 0 ? `${zone.icon} ${fmtTokens(t)}` : `${zone.icon} idle`;
       const sourceTag = ctx.cfg.tokenSource === 'estimate' || !ctx.usedTranscript
         ? `${C.dim}~${C.reset}` : '';
-      return `${color}${sourceTag}${label}${C.reset}`;
+      // Idle bar: skip the fill bar entirely, just show the zone icon.
+      if (t <= 0) {
+        return `${color}${sourceTag}${zone.icon} idle${C.reset}`;
+      }
+      const cap = contextCap(input);
+      const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, 20);
+      const used = fmtTokens(t);
+      const total = cap >= 1000000 ? '1M' : fmtTokens(cap);
+      return `${bar}${C.reset} ${color}${sourceTag}${used}${C.reset}${C.dim}/${total}${C.reset}`;
     },
 
     zone: (input, ctx) => {
