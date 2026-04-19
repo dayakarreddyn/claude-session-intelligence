@@ -16,6 +16,14 @@ LOGS_DIR="${CLAUDE_DIR}/logs"
 COMMANDS_DIR="${CLAUDE_DIR}/commands"
 SETTINGS="${CLAUDE_DIR}/settings.json"
 UNIFIED_CONFIG="${CLAUDE_DIR}/session-intelligence.json"
+INSTALLED_PLUGINS_JSON="${CLAUDE_DIR}/plugins/installed_plugins.json"
+
+FORCE_LEGACY=false
+for arg in "$@"; do
+  case "$arg" in
+    --force-legacy) FORCE_LEGACY=true ;;
+  esac
+done
 
 if [ ! -d "$PLUGIN_SRC" ]; then
   echo "[SI] expected plugin source at $PLUGIN_SRC — repo layout may be out of date" >&2
@@ -47,6 +55,44 @@ fi
 
 info "Installing Session Intelligence for Claude Code..."
 echo ""
+
+# ─── Detect plugin install ──────────────────────────
+#
+# If the user installed session-intelligence via Claude Code's plugin
+# marketplace, the plugin-cache hooks.json already registers every SI hook
+# via ${CLAUDE_PLUGIN_ROOT}/hooks/si-*.js. Running this script's legacy path
+# on top of that writes a second registration into settings.json, so every
+# hook fires twice (duplicate /compact blocks, 2× shape observations, 2×
+# token-budget writes).
+#
+# Behavior when plugin is detected:
+#   - skip hook-file copy into ~/.claude/scripts/hooks/ (plugin cache owns them)
+#   - skip hook upsert in settings.json (plugin manifest owns registration)
+#   - PURGE any pre-existing SI entries from settings.json (cleanup for users
+#     who ran both paths historically — the "Bucket 3" case)
+#   - statusline, unified config, /si command, session-context template still
+#     install (none of those are auto-registered by the plugin system)
+#
+# Escape hatch: --force-legacy skips detection (for dev loops where you
+# want edits in ~/.claude/scripts/hooks/ to override the plugin cache).
+PLUGIN_INSTALLED=false
+if [ "$FORCE_LEGACY" = false ] && [ -f "$INSTALLED_PLUGINS_JSON" ]; then
+  if node -e "
+    try {
+      const j = JSON.parse(require('fs').readFileSync('${INSTALLED_PLUGINS_JSON}', 'utf8'));
+      const entries = j && j.plugins && j.plugins['session-intelligence@session-intelligence'];
+      process.exit(Array.isArray(entries) && entries.length > 0 ? 0 : 1);
+    } catch { process.exit(1); }
+  " 2>/dev/null; then
+    PLUGIN_INSTALLED=true
+    info "Detected session-intelligence plugin in installed_plugins.json"
+    info "  → plugin manifest handles hook registration; this script will"
+    info "    skip hook copy + settings.json upsert, and purge any legacy"
+    info "    SI entries that would fire duplicates."
+    info "  (Pass --force-legacy to override and re-run the pre-plugin path.)"
+    echo ""
+  fi
+fi
 
 # ─── 1. Install hooks + shared lib ──────────────────
 
@@ -82,33 +128,42 @@ fi
 
 # New install path (all hooks carry the si- prefix for discoverability in
 # shared hook directories).
-for hook in si-bootstrap.js si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
-  if [ -f "${HOOKS_DIR}/${hook}" ]; then
-    if grep -q "Session Intelligence" "${HOOKS_DIR}/${hook}" 2>/dev/null; then
-      info "  ${hook} already installed, updating..."
-    else
-      cp "${HOOKS_DIR}/${hook}" "${HOOKS_DIR}/${hook}.bak"
-      warn "  Backed up existing ${hook} → ${hook}.bak"
+#
+# When the plugin is installed, we skip this block entirely — the plugin
+# cache owns canonical copies at ${CLAUDE_PLUGIN_ROOT}/hooks/si-*.js and
+# writing a second copy into ${HOOKS_DIR} that's never registered just
+# creates drift (stale copies that can confuse `tail -f` debugging).
+if [ "$PLUGIN_INSTALLED" = false ]; then
+  for hook in si-bootstrap.js si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
+    if [ -f "${HOOKS_DIR}/${hook}" ]; then
+      if grep -q "Session Intelligence" "${HOOKS_DIR}/${hook}" 2>/dev/null; then
+        info "  ${hook} already installed, updating..."
+      else
+        cp "${HOOKS_DIR}/${hook}" "${HOOKS_DIR}/${hook}.bak"
+        warn "  Backed up existing ${hook} → ${hook}.bak"
+      fi
     fi
-  fi
-done
+  done
 
-cp "${PLUGIN_SRC}/hooks/si-bootstrap.js"       "${HOOKS_DIR}/si-bootstrap.js"
-cp "${PLUGIN_SRC}/hooks/si-pre-compact.js"     "${HOOKS_DIR}/si-pre-compact.js"
-cp "${PLUGIN_SRC}/hooks/si-suggest-compact.js" "${HOOKS_DIR}/si-suggest-compact.js"
-cp "${PLUGIN_SRC}/hooks/si-token-budget.js"    "${HOOKS_DIR}/si-token-budget.js"
-cp "${PLUGIN_SRC}/hooks/si-task-change.js"     "${HOOKS_DIR}/si-task-change.js"
-cp "${PLUGIN_SRC}/hooks/si-status-report.js"   "${HOOKS_DIR}/si-status-report.js"
-# Copy every .js in plugins/session-intelligence/lib/ so new modules
-# (thinking.js, phase-events.js, git-nexus.js, …) land automatically
-# without touching the installer each time. Pre-existing installs may
-# have stale copies from earlier cherry-picked `cp` lines; this loop
-# overwrites them all.
-for _lib in "${PLUGIN_SRC}/lib"/*.js; do
-  [ -f "$_lib" ] || continue
-  cp "$_lib" "${LIB_DIR}/$(basename "$_lib")"
-done
-unset _lib
+  cp "${PLUGIN_SRC}/hooks/si-bootstrap.js"       "${HOOKS_DIR}/si-bootstrap.js"
+  cp "${PLUGIN_SRC}/hooks/si-pre-compact.js"     "${HOOKS_DIR}/si-pre-compact.js"
+  cp "${PLUGIN_SRC}/hooks/si-suggest-compact.js" "${HOOKS_DIR}/si-suggest-compact.js"
+  cp "${PLUGIN_SRC}/hooks/si-token-budget.js"    "${HOOKS_DIR}/si-token-budget.js"
+  cp "${PLUGIN_SRC}/hooks/si-task-change.js"     "${HOOKS_DIR}/si-task-change.js"
+  cp "${PLUGIN_SRC}/hooks/si-status-report.js"   "${HOOKS_DIR}/si-status-report.js"
+  # Copy every .js in plugins/session-intelligence/lib/ so new modules
+  # (thinking.js, phase-events.js, git-nexus.js, …) land automatically
+  # without touching the installer each time. Pre-existing installs may
+  # have stale copies from earlier cherry-picked `cp` lines; this loop
+  # overwrites them all.
+  for _lib in "${PLUGIN_SRC}/lib"/*.js; do
+    [ -f "$_lib" ] || continue
+    cp "$_lib" "${LIB_DIR}/$(basename "$_lib")"
+  done
+  unset _lib
+else
+  info "Plugin install detected — skipping hook copy to ${HOOKS_DIR}/"
+fi
 
 # Repair ECC-owned lib dir if an older SI install clobbered it.
 #
@@ -169,14 +224,16 @@ if [ -f "${PLUGIN_SRC}/commands/si.md" ]; then
   ok "Installed /si slash command → ${COMMANDS_DIR}/si.md"
 fi
 
-chmod +x "${HOOKS_DIR}/si-bootstrap.js"
-chmod +x "${HOOKS_DIR}/si-pre-compact.js"
-chmod +x "${HOOKS_DIR}/si-suggest-compact.js"
-chmod +x "${HOOKS_DIR}/si-token-budget.js"
-chmod +x "${HOOKS_DIR}/si-task-change.js"
-chmod +x "${HOOKS_DIR}/si-status-report.js"
+if [ "$PLUGIN_INSTALLED" = false ]; then
+  chmod +x "${HOOKS_DIR}/si-bootstrap.js"
+  chmod +x "${HOOKS_DIR}/si-pre-compact.js"
+  chmod +x "${HOOKS_DIR}/si-suggest-compact.js"
+  chmod +x "${HOOKS_DIR}/si-token-budget.js"
+  chmod +x "${HOOKS_DIR}/si-task-change.js"
+  chmod +x "${HOOKS_DIR}/si-status-report.js"
 
-ok "Hooks + lib installed to ${HOOKS_DIR}/"
+  ok "Hooks + lib installed to ${HOOKS_DIR}/"
+fi
 
 # ─── 2. Register hooks in settings.json ─────────────
 
@@ -184,6 +241,65 @@ if [ ! -f "$SETTINGS" ]; then
   warn "No settings.json found — creating minimal one"
   echo '{}' > "$SETTINGS"
 fi
+
+# Plugin path: purge SI hook entries from settings.json (plugin manifest
+# registers them; any duplicate here fires twice). This runs in place of
+# the upsert block below — still need to keep legacy-path cleanup and
+# the PreToolUse→PostToolUse migration, so we share both as helpers.
+if [ "$PLUGIN_INSTALLED" = true ]; then
+  node -e "
+  const fs = require('fs');
+  const settingsPath = '${SETTINGS}';
+  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  if (!settings.hooks) { process.exit(0); }
+
+  // Match any entry whose command mentions one of our hook basenames OR
+  // whose id is a known SI id. Both checks needed: legacy entries from
+  // the pre-id era have no id, and entries written by older installers
+  // may carry different ids than we use today.
+  const SI_HOOK_BASENAMES = [
+    'si-pre-compact.js', 'si-bootstrap.js', 'si-token-budget.js',
+    'si-suggest-compact.js', 'si-task-change.js',
+    // pre-rename legacy:
+    'pre-compact.js', 'bootstrap.js', 'token-budget-tracker.js',
+    'suggest-compact.js', 'task-change-detector.js',
+  ];
+  const SI_IDS = new Set([
+    'si:pre-compact', 'si:bootstrap', 'si:token-budget',
+    'si:token-budget-tracker', 'si:suggest-compact', 'si:task-change',
+    'si:task-change-detector',
+    'pre:compact', 'pre:edit-write:suggest-compact',
+    'post:token-budget-tracker',
+  ]);
+  function isSiEntry(entry) {
+    if (!entry) return false;
+    if (entry.id && SI_IDS.has(entry.id)) return true;
+    const hooks = entry.hooks || [];
+    return hooks.some(h => {
+      if (typeof h.command !== 'string') return false;
+      // Never strip ECC's run-with-flags wrapper — that's a separate hook.
+      if (h.command.includes('run-with-flags')) return false;
+      return SI_HOOK_BASENAMES.some(b => h.command.includes('/' + b));
+    });
+  }
+
+  let removed = 0;
+  for (const event of Object.keys(settings.hooks)) {
+    if (!Array.isArray(settings.hooks[event])) continue;
+    const before = settings.hooks[event].length;
+    settings.hooks[event] = settings.hooks[event].filter(e => !isSiEntry(e));
+    removed += before - settings.hooks[event].length;
+    if (settings.hooks[event].length === 0) delete settings.hooks[event];
+  }
+
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+  console.log('PURGED ' + removed);
+  " 2>/dev/null && ok "Purged legacy SI hook entries from settings.json (plugin manifest is canonical)" \
+    || err "Failed to purge settings.json"
+
+  # Still run the statusline install path below — plugin system doesn't
+  # auto-configure the global statusLine, only hooks.
+else
 
 node -e "
 const fs = require('fs');
@@ -301,6 +417,8 @@ fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
 console.log('OK');
 " >/dev/null && ok "Hooks registered in settings.json" || err "Failed to register hooks"
 
+fi  # end PLUGIN_INSTALLED branching for hook registration
+
 # ─── 3. Install status line (append, do not replace) ─
 
 # Read any existing statusLine.command so we can chain it. If the user had
@@ -381,20 +499,24 @@ echo ""
 info "Validating installation..."
 
 PASS=true
-for f in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
-  if node -c "${HOOKS_DIR}/${f}" 2>/dev/null; then
-    ok "  ${f} — syntax OK"
+if [ "$PLUGIN_INSTALLED" = false ]; then
+  for f in si-pre-compact.js si-suggest-compact.js si-token-budget.js si-task-change.js; do
+    if node -c "${HOOKS_DIR}/${f}" 2>/dev/null; then
+      ok "  ${f} — syntax OK"
+    else
+      err "  ${f} — syntax ERROR"
+      PASS=false
+    fi
+  done
+
+  if node -c "${LIB_DIR}/config.js" 2>/dev/null; then
+    ok "  lib/config.js — syntax OK"
   else
-    err "  ${f} — syntax ERROR"
+    err "  lib/config.js — syntax ERROR"
     PASS=false
   fi
-done
-
-if node -c "${LIB_DIR}/config.js" 2>/dev/null; then
-  ok "  lib/config.js — syntax OK"
 else
-  err "  lib/config.js — syntax ERROR"
-  PASS=false
+  info "  hooks validated via plugin cache (skipped — owned by plugin manifest)"
 fi
 
 if node -c "${SCRIPTS_DIR}/statusline-intel.js" 2>/dev/null; then
