@@ -490,6 +490,19 @@ Phase events flagged automatically: `git commit`, `git push`, `gh pr create`, `g
 | WARM | 20–60% | keep one-line summary |
 | COLD | only in first 40%, untouched since | safe to drop |
 
+**Tuning the WARM band.** The WARM cutoff is exposed as `shape.warmScoreCutoff` (default `0.40`, meaning "score ≥ 0.40 → WARM"). Raise it toward `0.80` to tighten WARM so mid-recency dirs fall into COLD instead. Per-project overrides go under `shape.perProject`, keyed by canonical project cwd, e.g.:
+
+```json
+"shape": {
+  "warmScoreCutoff": 0.40,
+  "perProject": {
+    "/Users/me/DWS/CSM": { "warmScoreCutoff": 0.65 }
+  }
+}
+```
+
+Useful when one repo's post-compact data shows WARM producing no soft-regret signal — tighten its cutoff without affecting other projects. `shape.perProject[cwd]` may also override `scoring`, `rootDirDepth`, and add to (unions) `preserveGlobs`; unknown keys are ignored.
+
 **Domain shift** — Jaccard overlap of the first-N vs last-N rootDir sets. < 0.3 = pivot detected.
 
 **Stale tokens** — rough estimate of how much of the context is spent in COLD dirs.

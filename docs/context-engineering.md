@@ -254,6 +254,27 @@ These get stored in the log and surfaced in the pre-compact injection as "PHASE 
 
 Bands are computed per compaction, not maintained as state. This matters: a rootDir that was COLD at one compact and then gets heavily touched post-compact will be HOT at the next compact. No state carries across.
 
+#### 4.5.1 Tuning the WARM band per project
+
+The HOT cutoff is fixed at 0.80 (top 20% of span) because "currently touching" is the unambiguous signal the compact hints need to protect. The WARM cutoff is configurable:
+
+```json
+"shape": {
+  "warmScoreCutoff": 0.40,
+  "perProject": {
+    "/Users/me/DWS/CSM": { "warmScoreCutoff": 0.65 }
+  }
+}
+```
+
+`shape.warmScoreCutoff` sets the global default; `shape.perProject[cwd]` overrides it for one project (keyed on the canonical cwd written at SessionStart). The same `perProject` block can override `scoring` and `rootDirDepth`, and union-add to `preserveGlobs`.
+
+**When to raise it.** The post-compact regret loop (Part 5) logs `softRegretCount` on WARM-band dirs the user re-touches within 30 calls of compaction. If WARM is dead — dozens of classifications producing zero soft-regret — the band is labelling dirs the user has already left behind. Tightening WARM from 0.40 toward the HOT boundary reclassifies those mid-recency dirs as COLD (drop candidates). If hard-regret then starts firing, WARM was real and 0.40 was simply too loose; back off. If nothing changes, WARM as a concept isn't pulling its weight on that project.
+
+**Why it's not one-cutoff-fits-all.** Short-session repos (median ~100k tokens between compacts) rarely let any dir age into WARM territory — the signal is noise. Long-session monorepos (200k+ tokens) accumulate real middle-tier dirs worth summarising. Per-project overrides let you calibrate without making the global default worse for the other direction.
+
+Values are clamped to `(0, 0.80)` at read time. A misconfigured value cannot swallow the HOT band or invert ordering.
+
 ### 4.6 Domain shift detection (Jaccard)
 
 In addition to banding, the analyzer checks whether you've **pivoted domains** over the observed window:
