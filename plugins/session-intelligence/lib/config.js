@@ -28,7 +28,7 @@ const STATUSLINE_PRESETS = {
   verbose:  [
     'model', 'project', 'branch', 'diffstat', 'tokens',
     'newline',
-    'tools', 'session', 'cost', 'task',
+    'session', 'tools', 'cost', 'task',
   ],
 };
 
