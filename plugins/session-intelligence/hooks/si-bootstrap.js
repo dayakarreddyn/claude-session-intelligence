@@ -715,6 +715,32 @@ function main() {
   const input = readStdinJsonOrEmpty();
   const cwd = input.cwd || input.workspace?.current_dir || process.cwd();
 
+  // Pin the session cwd + project root to a sibling of the shape file so
+  // every later hook (PostToolUse, PreCompact, SessionStart on compact)
+  // can resolve a stable anchor regardless of how cwd arrives in its own
+  // payload. Subagent tool calls — where cwd may be a worktree path that
+  // doesn't contain the file being read — are the motivating case.
+  const rawSid = (input && (input.session_id || input.sessionId))
+    || process.env.CLAUDE_SESSION_ID || '';
+  const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '');
+  if (sessionId && typeof cwd === 'string' && cwd.startsWith('/')) {
+    try {
+      const { writeSessionState, projectRootOf } = require(path.join(SI_LIB, 'context-shape'));
+      const projectRoot = projectRootOf(cwd);
+      writeSessionState(sessionId, {
+        sessionId,
+        cwd,
+        projectRoot: projectRoot || cwd,
+        startedAt: new Date().toISOString(),
+        pid: process.pid,
+      });
+    } catch (err) {
+      intelLog('bootstrap', errLogLevel(err), 'session-state pin failed', {
+        err: err && err.message, sessionId,
+      });
+    }
+  }
+
   // Ensure ~/.claude/ exists before we try to drop a lock file into it.
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
   const locked = acquireStateLock();

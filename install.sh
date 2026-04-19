@@ -217,82 +217,85 @@ for (const event of Object.keys(settings.hooks)) {
   });
 }
 
+// Upsert a single hook entry, deduping by BOTH id and command-basename.
+// The legacy findIndex-by-id upsert missed idless entries left behind by
+// earlier installs / plugin-cache rsyncs — those accumulated as duplicates
+// and caused every PostToolUse call to fire the same tracker twice. Dedupe
+// by command-basename catches anything that points at our hook regardless
+// of whether it was registered with an id.
+function upsertSiHook(arr, hookBasename, ids, entry) {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const item = arr[i];
+    if (!item) continue;
+    const matchesId = ids.some(id => item.id === id);
+    const matchesCmd = (item.hooks || []).some(h =>
+      typeof h.command === 'string' && h.command.includes(hookBasename)
+    );
+    if (matchesId || matchesCmd) arr.splice(i, 1);
+  }
+  arr.push(entry);
+}
+
 if (!settings.hooks.PreCompact) settings.hooks.PreCompact = [];
-const preCompactIdx = settings.hooks.PreCompact.findIndex(h =>
-  h.id === 'pre:compact' || h.id === 'si:pre-compact'
-);
-const preCompactEntry = {
-  matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-pre-compact.js\"' }],
-  description: 'Session Intelligence: inject compaction hints from session-context.md',
-  id: 'si:pre-compact'
-};
-if (preCompactIdx >= 0) settings.hooks.PreCompact[preCompactIdx] = preCompactEntry;
-else settings.hooks.PreCompact.push(preCompactEntry);
+upsertSiHook(settings.hooks.PreCompact, 'si-pre-compact.js',
+  ['pre:compact', 'si:pre-compact'], {
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-pre-compact.js\"' }],
+    description: 'Session Intelligence: inject compaction hints from session-context.md',
+    id: 'si:pre-compact'
+  });
 
 // SessionStart: bootstrap (seeds config, autofills session-context, consumes
 // one-shot .si-handoff.json written by pre-compact and emits the resume
 // banner). Without this, /compact resume silently drops on every project
 // that runs install.sh (plugin-based projects wire it via hooks.json).
 if (!settings.hooks.SessionStart) settings.hooks.SessionStart = [];
-const bootIdx = settings.hooks.SessionStart.findIndex(h =>
-  h.id === 'si:bootstrap'
-);
-const bootEntry = {
-  matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-bootstrap.js\"', timeout: 5 }],
-  description: 'Session Intelligence: seed config + consume post-compact handoff',
-  id: 'si:bootstrap'
-};
-if (bootIdx >= 0) settings.hooks.SessionStart[bootIdx] = bootEntry;
-else settings.hooks.SessionStart.push(bootEntry);
+upsertSiHook(settings.hooks.SessionStart, 'si-bootstrap.js',
+  ['si:bootstrap'], {
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-bootstrap.js\"', timeout: 5 }],
+    description: 'Session Intelligence: seed config + consume post-compact handoff',
+    id: 'si:bootstrap'
+  });
 
 if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
-const budgetIdx = settings.hooks.PostToolUse.findIndex(h =>
-  h.id === 'post:token-budget-tracker' || h.id === 'si:token-budget-tracker' || h.id === 'si:token-budget'
-);
-const budgetEntry = {
-  matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-token-budget.js\"', async: true, timeout: 5 }],
-  description: 'Session Intelligence: track token usage + unified tool count across ALL tools',
-  id: 'si:token-budget'
-};
-if (budgetIdx >= 0) settings.hooks.PostToolUse[budgetIdx] = budgetEntry;
-else settings.hooks.PostToolUse.push(budgetEntry);
+upsertSiHook(settings.hooks.PostToolUse, 'si-token-budget.js',
+  ['post:token-budget-tracker', 'si:token-budget-tracker', 'si:token-budget'], {
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-token-budget.js\"', async: true, timeout: 5 }],
+    description: 'Session Intelligence: track token usage + unified tool count across ALL tools',
+    id: 'si:token-budget'
+  });
 
 // suggest-compact moved from PreToolUse (blocking) to PostToolUse (feedback-only).
 // Strip any stale PreToolUse entry from older installs so we don't double-fire.
 if (settings.hooks.PreToolUse) {
-  settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(h =>
-    h.id !== 'pre:edit-write:suggest-compact' && h.id !== 'si:suggest-compact'
-  );
+  settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(h => {
+    const cmdMatches = (h.hooks || []).some(hh =>
+      typeof hh.command === 'string' && hh.command.includes('si-suggest-compact.js'));
+    return !cmdMatches
+      && h.id !== 'pre:edit-write:suggest-compact'
+      && h.id !== 'si:suggest-compact';
+  });
   if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
 }
 
-const suggestIdx = settings.hooks.PostToolUse.findIndex(h =>
-  h.id === 'si:suggest-compact'
-);
-const suggestEntry = {
-  matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-suggest-compact.js\"', timeout: 10 }],
-  description: 'Session Intelligence: token-aware compaction suggestions (PostToolUse, non-blocking)',
-  id: 'si:suggest-compact'
-};
-if (suggestIdx >= 0) settings.hooks.PostToolUse[suggestIdx] = suggestEntry;
-else settings.hooks.PostToolUse.push(suggestEntry);
+upsertSiHook(settings.hooks.PostToolUse, 'si-suggest-compact.js',
+  ['si:suggest-compact'], {
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-suggest-compact.js\"', timeout: 10 }],
+    description: 'Session Intelligence: token-aware compaction suggestions (PostToolUse, non-blocking)',
+    id: 'si:suggest-compact'
+  });
 
 if (!settings.hooks.UserPromptSubmit) settings.hooks.UserPromptSubmit = [];
-const taskIdx = settings.hooks.UserPromptSubmit.findIndex(h =>
-  h.id === 'si:task-change-detector' || h.id === 'si:task-change'
-);
-const taskEntry = {
-  matcher: '*',
-  hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-task-change.js\"' }],
-  description: 'Session Intelligence: detect task-domain changes at prompt submit',
-  id: 'si:task-change'
-};
-if (taskIdx >= 0) settings.hooks.UserPromptSubmit[taskIdx] = taskEntry;
-else settings.hooks.UserPromptSubmit.push(taskEntry);
+upsertSiHook(settings.hooks.UserPromptSubmit, 'si-task-change.js',
+  ['si:task-change-detector', 'si:task-change'], {
+    matcher: '*',
+    hooks: [{ type: 'command', command: 'node \"${HOOKS_DIR}/si-task-change.js\"' }],
+    description: 'Session Intelligence: detect task-domain changes at prompt submit',
+    id: 'si:task-change'
+  });
 
 fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
 console.log('OK');

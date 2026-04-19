@@ -125,6 +125,181 @@ function rollupFilePath(sessionId) {
   return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.rollup.json`);
 }
 
+// Session state is the per-session anchor that survives subagent/worktree
+// cwd drift. Written by si-bootstrap at SessionStart and refreshed by
+// si-token-budget whenever it observes a non-home absolute cwd. Every later
+// hook reads rootDirOf with this cwd instead of trusting per-call payloads,
+// so entries like /Users/0xd/DWS/CSM/services/auth bucket to services/auth
+// even when the PostToolUse payload arrives without a cwd field or with a
+// subagent's worktree cwd that doesn't contain the file being read.
+function sessionStatePath(sessionId) {
+  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.session.json`);
+}
+
+// Markers we trust as "this is a project root". Ordered roughly by how
+// unambiguous they are — .git is definitive; language manifests are nearly
+// as good. If any of these sit in a directory, that directory is the root.
+const PROJECT_ROOT_MARKERS = [
+  '.git',          // any VCS'd repo — catches everything else
+  'package.json',  // Node
+  'pyproject.toml',// Python (PEP 518)
+  'Cargo.toml',    // Rust
+  'go.mod',        // Go modules
+  'deno.json',     // Deno
+  'pom.xml',       // Maven
+  'build.gradle',  // Gradle
+  'Gemfile',       // Ruby
+];
+
+// Directories we will not walk above — prevents projectRootOf from returning
+// $HOME or /. Having `/Users/<name>/.git` for a dotfiles repo is the classic
+// failure mode that would poison every shape entry.
+function isSystemBoundary(dir) {
+  if (!dir || dir === '/' || dir === '.') return true;
+  if (dir === os.homedir()) return true;
+  // /Users, /home, /root, /tmp, /var, /etc, /usr, /opt — top-level system dirs.
+  const parts = dir.split('/').filter(Boolean);
+  if (parts.length <= 1) return true;
+  return false;
+}
+
+// Memoized per-directory cache for projectRootOf. Process-scoped, which is
+// fine for hook invocations (each hook is a short-lived subprocess). For
+// long-running callers (tests) the cache is bounded by unique directories
+// seen; soft-capped to avoid unbounded growth in pathological workloads.
+const _projectRootCache = new Map();
+const PROJECT_ROOT_CACHE_CAP = 2048;
+
+function cacheProjectRoot(dir, value) {
+  if (_projectRootCache.size >= PROJECT_ROOT_CACHE_CAP) {
+    // Drop the oldest entry — Map preserves insertion order.
+    const firstKey = _projectRootCache.keys().next().value;
+    if (firstKey !== undefined) _projectRootCache.delete(firstKey);
+  }
+  _projectRootCache.set(dir, value);
+  return value;
+}
+
+/**
+ * Walk up from filePath looking for a project-root marker. Returns the
+ * discovered root path, or null when no marker is found before the system
+ * boundary. Memoized per directory so repeated lookups on files in the same
+ * tree do one fs.existsSync per new level only.
+ *
+ * Works independently of cwd — this is the fallback that keeps shape
+ * classification stable when si-token-budget's cwd resolution fails (missing
+ * payload.cwd, subagent worktree cwd, etc).
+ *
+ * @param {string} filePath — absolute path to a file (or any dir under the root)
+ * @returns {string|null}
+ */
+function projectRootOf(filePath) {
+  if (!filePath || typeof filePath !== 'string') return null;
+  const norm = filePath.replace(/\\/g, '/').trim();
+  if (!norm.startsWith('/')) return null;
+
+  let dir;
+  try {
+    const stat = fs.statSync(norm);
+    dir = stat.isDirectory() ? norm : path.dirname(norm);
+  } catch {
+    // File may have been deleted since the tool call — walk from its parent.
+    dir = path.dirname(norm);
+  }
+
+  // Collect the chain so one discovery caches for every ancestor.
+  const chain = [];
+  while (dir && !isSystemBoundary(dir)) {
+    if (_projectRootCache.has(dir)) {
+      const hit = _projectRootCache.get(dir);
+      for (const d of chain) cacheProjectRoot(d, hit);
+      return hit;
+    }
+    for (const marker of PROJECT_ROOT_MARKERS) {
+      try {
+        if (fs.existsSync(path.join(dir, marker))) {
+          for (const d of chain) cacheProjectRoot(d, dir);
+          cacheProjectRoot(dir, dir);
+          return dir;
+        }
+      } catch { /* permission denied — keep walking */ }
+    }
+    chain.push(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const d of chain) cacheProjectRoot(d, null);
+  return null;
+}
+
+/** Test-only. Clear the projectRootOf memoization cache. */
+function _resetProjectRootCache() { _projectRootCache.clear(); }
+
+/**
+ * Read the session-state file. Returns an empty object on missing / malformed.
+ * Shape: { cwd, sessionId, projectRoot, startedAt, lastPayloadCwd }
+ */
+function readSessionState(sessionId) {
+  if (!sessionId) return {};
+  try {
+    const data = JSON.parse(fs.readFileSync(sessionStatePath(sessionId), 'utf8'));
+    if (!data || typeof data !== 'object') return {};
+    return data;
+  } catch { return {}; }
+}
+
+/**
+ * Write the session-state file atomically via tempfile + rename. Atomic
+ * against concurrent readers — a half-written session-state.json would be
+ * worse than none since resolveSessionCwd trusts the first thing it reads.
+ */
+function writeSessionState(sessionId, data) {
+  if (!sessionId || !data || typeof data !== 'object') return;
+  const file = sessionStatePath(sessionId);
+  const tmp = file + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch { /* tmp may not exist */ }
+  }
+}
+
+/**
+ * Resolve the best available cwd anchor for rootDirOf. Priority chain:
+ *
+ *   1. Session state (captured at SessionStart, survives subagent cwd drift)
+ *   2. Payload cwd (current PostToolUse call's reported cwd)
+ *   3. projectRootOf walk-up from filePath (works even for cross-repo reads)
+ *   4. process.cwd() fallback
+ *
+ * Returns { cwd, source } where source is one of
+ * 'session' | 'payload' | 'projectRoot' | 'processCwd' | 'none'. Never
+ * returns an empty cwd — at minimum process.cwd() is reported.
+ *
+ * @param {object} opts
+ * @param {string} opts.sessionId
+ * @param {string} [opts.payloadCwd]
+ * @param {string} [opts.filePath]
+ */
+function resolveSessionCwd(opts) {
+  const { sessionId, payloadCwd, filePath } = opts || {};
+  const state = readSessionState(sessionId);
+  if (state && typeof state.cwd === 'string' && state.cwd.startsWith('/')) {
+    return { cwd: state.cwd, source: 'session' };
+  }
+  if (typeof payloadCwd === 'string' && payloadCwd.startsWith('/')) {
+    return { cwd: payloadCwd, source: 'payload' };
+  }
+  if (filePath) {
+    const root = projectRootOf(filePath);
+    if (root) return { cwd: root, source: 'projectRoot' };
+  }
+  return { cwd: process.cwd(), source: 'processCwd' };
+}
+
 /**
  * Reduce an arbitrary file path to a stable "rootDir" signature.
  *
@@ -274,11 +449,21 @@ function writeRollup(sessionId, data) {
  * token position are skipped. Evicts least-frequent roots when the rollup
  * exceeds ROLLUP_MAX_ROOTS (scoped per session so this is a soft cap).
  *
+ * When `opts.canonicalCwd` is provided, entries are rebucketed through
+ * rootDirOf with that cwd before merging. Ensures the persisted rollup
+ * stays consistent with the session's true project root even when some
+ * entries were written with a bad cwd (legacy or subagent drift).
+ *
  * Returns the updated rollup object (or null on missing sessionId).
  */
-function rollupShape(sessionId) {
+function rollupShape(sessionId, opts) {
   if (!sessionId) return null;
-  const entries = readShape(sessionId);
+  const rawEntries = readShape(sessionId);
+  const canonicalCwd = opts && typeof opts.canonicalCwd === 'string' ? opts.canonicalCwd : '';
+  const depth = Number.isFinite(opts && opts.rootDirDepth) ? opts.rootDirDepth : 2;
+  const entries = canonicalCwd
+    ? reclassifyEntries(rawEntries, { cwd: canonicalCwd, depth })
+    : rawEntries;
   const rollup = readRollup(sessionId) || { rolledThroughTok: 0, roots: {} };
   const threshold = rollup.rolledThroughTok || 0;
   let maxTok = threshold;
@@ -319,12 +504,50 @@ function rollupShape(sessionId) {
 }
 
 /**
+ * Rebucket each entry's `root` by re-running rootDirOf against a canonical
+ * cwd (and falling back to projectRootOf when the file sits outside it).
+ * Heals entries written when the PostToolUse hook had no usable cwd — those
+ * land with root=/Users/<name> and would otherwise remain a useless blob on
+ * every subsequent analyze pass.
+ *
+ * Pure: returns new entry objects; never mutates the input array.
+ *
+ * @param {Array} entries
+ * @param {{ cwd: string, depth?: number }} opts
+ */
+function reclassifyEntries(entries, opts) {
+  if (!Array.isArray(entries)) return [];
+  const cwd = opts && typeof opts.cwd === 'string' ? opts.cwd : '';
+  if (!cwd.startsWith('/')) return entries;
+  const depth = Number.isFinite(opts && opts.depth) ? opts.depth : 2;
+
+  return entries.map((e) => {
+    if (!e || !e.file) return e;
+    const file = String(e.file);
+    if (!file.startsWith('/')) return e;
+    let next = rootDirOf(file, depth, { cwd });
+    // File outside session cwd — fall back to its own project root so a
+    // cross-repo Read still classifies somewhere useful.
+    if (next && /^\/Users\/[^/]+$/.test(next)) {
+      const pr = projectRootOf(file);
+      if (pr && pr !== cwd) {
+        const alt = rootDirOf(file, depth, { cwd: pr });
+        if (alt && !/^\/Users\/[^/]+$/.test(alt)) next = alt;
+      }
+    }
+    if (!next || next === e.root) return e;
+    return { ...e, root: next };
+  });
+}
+
+/**
  * Classify observation history into HOT / WARM / COLD bands and detect a
  * domain shift. Returns `null` when there isn't enough signal to bother.
  *
  * @param {Array} entries — output of readShape()
  * @param {{ preserveGlobs?: string[], scoring?: 'recency'|'frequency'|'hybrid',
- *           persistAcrossCompacts?: boolean, sessionId?: string }} [opts]
+ *           persistAcrossCompacts?: boolean, sessionId?: string,
+ *           canonicalCwd?: string, rootDirDepth?: number }} [opts]
  *
  *   - preserveGlobs: user-configured allowlist. Any root or any of its
  *     sample files matching one of these globs force-promotes the root to
@@ -337,12 +560,22 @@ function rollupShape(sessionId) {
  *     session's persistent rollup into the roots map so history across
  *     compacts influences banding. Requires sessionId so the rollup file
  *     can be located.
+ *   - canonicalCwd: when provided, every entry's root is re-derived using
+ *     rootDirOf(file, depth, {cwd: canonicalCwd}) before banding. Heals
+ *     legacy entries that landed with root=/Users/<name> because the hook
+ *     ran without a usable cwd.
  */
 function analyzeShape(entries, opts) {
   if (!Array.isArray(entries) || entries.length < 5) return null;
 
+  const canonicalCwd = opts && typeof opts.canonicalCwd === 'string' ? opts.canonicalCwd : '';
+  const depth = Number.isFinite(opts && opts.rootDirDepth) ? opts.rootDirDepth : 2;
+  const working = canonicalCwd
+    ? reclassifyEntries(entries, { cwd: canonicalCwd, depth })
+    : entries;
+
   // Only entries with a usable rootDir contribute to banding.
-  const withRoot = entries.filter((e) => e && e.root);
+  const withRoot = working.filter((e) => e && e.root);
   if (withRoot.length < 5) return null;
 
   const firstTok = withRoot[0].tok || 0;
@@ -527,50 +760,50 @@ function draftMessage(analysis) {
 function formatCompactInjection(analysis) {
   if (!analysis) return '';
 
-  const lines = [];
-  lines.push('');
-  lines.push('OBSERVED CONTEXT SHAPE (auto-generated from tool usage):');
-  lines.push('\u2501'.repeat(50));
+  // Plain markdown headings — render cleanly on both the CLI terminal and
+  // the Claude mobile client. The earlier 50×━ divider bars wrapped to
+  // multiple lines on narrow screens and leaked ANSI dim codes as visible
+  // "[2m"/"[22m" text, so we drop bars and rely on ## headings + single
+  // blank lines for structure.
+  const lines = [''];
+  lines.push('## OBSERVED CONTEXT SHAPE (auto-generated from tool usage)');
 
   if (analysis.shift) {
     const from = analysis.shift.from.join(', ') || '(earlier context)';
     const to = analysis.shift.to.join(', ') || '(current)';
     lines.push('');
-    lines.push(`DOMAIN SHIFT DETECTED: ${from} \u2192 ${to}`);
-    lines.push(`(Jaccard overlap ${analysis.shift.jaccard} across recent tool calls)`);
+    lines.push(`**Domain shift:** ${from} \u2192 ${to} (Jaccard ${analysis.shift.jaccard})`);
   }
 
   if (analysis.hot.length) {
     lines.push('');
-    lines.push('PRESERVE (recently active, still in use):');
+    lines.push('**Preserve** (recently active, still in use):');
     for (const h of analysis.hot) {
-      const files = h.samples.length ? ` — e.g. ${h.samples.slice(0, 2).join(', ')}` : '';
+      const files = h.samples.length ? ` \u2014 e.g. ${h.samples.slice(0, 2).join(', ')}` : '';
       const tag = h.allowlisted ? ' [allowlisted]' : '';
-      lines.push(`  - ${h.root} (${h.count} calls)${tag}${files}`);
+      lines.push(`- ${h.root} (${h.count} calls)${tag}${files}`);
     }
   }
 
   if (analysis.cold.length && analysis.staleTokens >= MIN_STALE_TO_MENTION) {
     lines.push('');
-    lines.push(`SAFE TO DROP (untouched for most of the session, ~${Math.round(analysis.staleTokens / 1000)}k tokens):`);
+    lines.push(`**Safe to drop** (~${Math.round(analysis.staleTokens / 1000)}k stale tokens):`);
     for (const c of analysis.cold) {
-      const files = c.samples.length ? ` — e.g. ${c.samples.slice(0, 2).join(', ')}` : '';
-      lines.push(`  - ${c.root} (${c.count} calls earlier)${files}`);
+      const files = c.samples.length ? ` \u2014 e.g. ${c.samples.slice(0, 2).join(', ')}` : '';
+      lines.push(`- ${c.root} (${c.count} calls earlier)${files}`);
     }
     lines.push('');
-    lines.push('Keep only one-line summaries of what happened in the DROP section — the detail is no longer load-bearing.');
+    lines.push('Keep only one-line summaries in the DROP section \u2014 detail is no longer load-bearing.');
   }
 
   if (analysis.events && analysis.events.length) {
     lines.push('');
-    lines.push('PHASE MARKERS OBSERVED:');
+    lines.push('**Phase markers:**');
     for (const ev of analysis.events) {
-      lines.push(`  - ${ev.event} at ~${Math.round((ev.tok || 0) / 1000)}k tokens`);
+      lines.push(`- ${ev.event} at ~${Math.round((ev.tok || 0) / 1000)}k tokens`);
     }
   }
 
-  lines.push('');
-  lines.push('\u2501'.repeat(50));
   lines.push('');
   return lines.join('\n');
 }
@@ -587,11 +820,18 @@ module.exports = {
   rollupShape,    // exported for pre-compact hook
   readRollup,     // exported for tests
   compileGlob,    // exported for tests
+  projectRootOf,
+  sessionStatePath,
+  readSessionState,
+  writeSessionState,
+  resolveSessionCwd,
+  _resetProjectRootCache, // test-only
   _thresholds: {
     HOT_FRACTION, WARM_FRACTION, SHIFT_JACCARD_THRESHOLD, MIN_STALE_TO_MENTION,
     DEFAULT_MAX_ENTRIES, MAX_ENTRIES_FLOOR, MAX_ENTRIES_HARD_CEILING,
     HOT_SCORE_CUTOFF, WARM_SCORE_CUTOFF,
     HYBRID_RECENCY_WEIGHT, HYBRID_FREQUENCY_WEIGHT,
     ROLLUP_MAX_ROOTS,
+    PROJECT_ROOT_MARKERS,
   },
 };

@@ -58,7 +58,7 @@ const {
   resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
-const { readShape, analyzeShape, draftMessage } = require(path.join(SI_LIB, 'context-shape'));
+const { readShape, analyzeShape, draftMessage, readSessionState } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 let costEst = null;
@@ -282,7 +282,16 @@ async function main() {
       // token-budget-tracker has been writing observation entries per tool
       // call. analyzeShape returns null when there isn't enough signal to
       // bother (short sessions, no file paths), which we handle below.
-      const shape = analyzeShape(readShape(sessionId), { preserveGlobs });
+      // Reclassify against the session-pinned cwd so subagent/payload drift
+      // doesn't poison the shape diagnosis with /Users/<name> blobs.
+      let canonicalCwd = '';
+      try {
+        const state = readSessionState(sessionId);
+        if (state && typeof state.cwd === 'string' && state.cwd.startsWith('/')) {
+          canonicalCwd = state.cwd;
+        }
+      } catch { /* best effort */ }
+      const shape = analyzeShape(readShape(sessionId), { preserveGlobs, canonicalCwd });
       const diagnosis = draftMessage(shape);
 
       const header = zone === 'red' ? 'High-risk zone' : 'Drift zone';

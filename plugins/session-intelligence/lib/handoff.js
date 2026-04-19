@@ -334,14 +334,14 @@ function readAndRenderHandoff(projectDir) {
 // print it verbatim at the start of its reply).
 function renderHandoffStderr(block) {
   if (!block) return '';
-  const div = '\u2501'.repeat(51);
+  // Plain markdown heading — narrow screens (Claude mobile) wrap the old
+  // 51×━ divider to 3 lines and surface the ANSI dim codes as visible
+  // "[2m"/"[22m" noise. A single H1 + blank line gives the model a clear
+  // boundary without visual damage on either surface.
   return [
-    div,
-    '  SESSION INTELLIGENCE \u2014 post-compact resume',
-    div,
+    '# Session Intelligence \u2014 post-compact resume',
     '',
     block,
-    div,
     '',
   ].join('\n');
 }
@@ -356,7 +356,7 @@ function wrapHandoffForModelEcho(block) {
   return [
     'SESSION RESUME — display to user:',
     '',
-    'At the START of your next reply, print the block between the markers below VERBATIM (preserve the \u2501 dividers and line breaks exactly). Do not paraphrase, summarise, or wrap in code fences.',
+    'At the START of your next reply, print the block between the markers below VERBATIM (preserve line breaks exactly). Do not paraphrase, summarise, or wrap in code fences.',
     '',
     'After printing the block, DO NOT idle or wait. Immediately continue working:',
     '  1. If "Current task" names a concrete in-flight task, resume that task now — read the relevant files, make the next edit, run the next check.',

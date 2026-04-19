@@ -207,8 +207,9 @@ test('wrapHandoffForModelEcho wraps block with echo directive + markers', () => 
   // Markers delimit the echo region
   assert.match(wrapped, /---BEGIN RESUME BLOCK---/);
   assert.match(wrapped, /---END RESUME BLOCK---/);
-  // Banner dividers are present inside the markers
-  assert.match(wrapped, /\u2501{10,}/);
+  // Banner heading appears inside the markers (mobile-clean: plain H1,
+  // no wide ━ dividers which wrap badly on narrow screens).
+  assert.match(wrapped, /# Session Intelligence/);
   // Original block content is carried through
   assert.match(wrapped, /Work on auth/);
 });

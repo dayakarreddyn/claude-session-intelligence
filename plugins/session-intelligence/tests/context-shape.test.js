@@ -16,10 +16,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
+const path = require('node:path');
+const os = require('node:os');
+
 const {
   analyzeShape, rootDirOf,
   rollupShape, readRollup, rollupFilePath,
   shapeFilePath, appendShape,
+  projectRootOf, _resetProjectRootCache,
+  sessionStatePath, readSessionState, writeSessionState, resolveSessionCwd,
 } = require('../lib/context-shape');
 
 // Build entries(n, pattern): tokens monotonically increasing, root chosen
@@ -364,5 +369,209 @@ test('analyzeShape with persistence skips entries already rolled up (no double c
   const xRoot = [...result.hot, ...result.warm, ...result.cold].find((r) => r.root === 'src/x');
   assert.ok(xRoot, 'src/x present in classification');
   assert.equal(xRoot.count, 20, 'src/x counted exactly once (rollup, not live+rollup)');
+  cleanupRollup(sid);
+});
+
+// ─── projectRootOf walk-up tests ──────────────────────────────────────────
+//
+// Walk up from a file toward the filesystem root, stopping at the first
+// project-marker or system boundary. Independent of cwd — this is the
+// fallback anchor when si-token-budget's cwd resolution fails.
+
+function mkTempDir(prefix) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+}
+function rmRf(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } }
+
+test('projectRootOf returns the first ancestor with a marker', () => {
+  _resetProjectRootCache();
+  const base = mkTempDir('ctx-shape-pr1');
+  try {
+    fs.mkdirSync(path.join(base, 'repo', 'src', 'auth'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'repo', '.git'), 'gitdir: ignored\n');
+    const file = path.join(base, 'repo', 'src', 'auth', 'login.ts');
+    fs.writeFileSync(file, '// test\n');
+    assert.equal(projectRootOf(file), path.join(base, 'repo'));
+  } finally { rmRf(base); }
+});
+
+test('projectRootOf stops at system boundaries (never returns $HOME)', () => {
+  _resetProjectRootCache();
+  // No marker anywhere — walking up should return null rather than bubble
+  // to $HOME or /. Use a nonexistent path so stat fails, forcing the
+  // walk-up branch.
+  const nowhere = '/definitely/not/a/real/path/foo.ts';
+  assert.equal(projectRootOf(nowhere), null);
+});
+
+test('projectRootOf caches per directory — second lookup skips fs walk', () => {
+  _resetProjectRootCache();
+  const base = mkTempDir('ctx-shape-pr2');
+  try {
+    fs.mkdirSync(path.join(base, 'a', 'b', 'c'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'a', 'package.json'), '{}\n');
+    const f1 = path.join(base, 'a', 'b', 'c', 'x.ts');
+    const f2 = path.join(base, 'a', 'b', 'c', 'y.ts');
+    fs.writeFileSync(f1, '');
+    fs.writeFileSync(f2, '');
+
+    const root1 = projectRootOf(f1);
+    assert.equal(root1, path.join(base, 'a'));
+
+    // Rip the marker out; cached result should still win.
+    fs.unlinkSync(path.join(base, 'a', 'package.json'));
+    const root2 = projectRootOf(f2);
+    assert.equal(root2, path.join(base, 'a'), 'cached from f1 walk');
+  } finally { rmRf(base); }
+});
+
+test('projectRootOf returns null for relative paths', () => {
+  assert.equal(projectRootOf('relative/path.ts'), null);
+  assert.equal(projectRootOf(''), null);
+  assert.equal(projectRootOf(null), null);
+});
+
+// ─── session-state round-trip ─────────────────────────────────────────────
+
+test('writeSessionState + readSessionState round-trip', () => {
+  const sid = 'sessiontest1';
+  try { fs.unlinkSync(sessionStatePath(sid)); } catch { /* not present */ }
+
+  writeSessionState(sid, { sessionId: sid, cwd: '/tmp/proj', pid: 1234 });
+  const state = readSessionState(sid);
+  assert.equal(state.cwd, '/tmp/proj');
+  assert.equal(state.pid, 1234);
+
+  fs.unlinkSync(sessionStatePath(sid));
+});
+
+test('readSessionState returns {} when missing / malformed', () => {
+  assert.deepEqual(readSessionState('nonexistentSID1234'), {});
+
+  const sid = 'sessiontest2';
+  fs.writeFileSync(sessionStatePath(sid), 'not json');
+  assert.deepEqual(readSessionState(sid), {});
+  fs.unlinkSync(sessionStatePath(sid));
+});
+
+// ─── resolveSessionCwd priority chain ────────────────────────────────────
+
+test('resolveSessionCwd prefers session state over payload', () => {
+  const sid = 'resolvetest1';
+  writeSessionState(sid, { sessionId: sid, cwd: '/pinned/by/bootstrap' });
+  try {
+    const got = resolveSessionCwd({
+      sessionId: sid, payloadCwd: '/some/other', filePath: '/unrelated/file.ts',
+    });
+    assert.equal(got.cwd, '/pinned/by/bootstrap');
+    assert.equal(got.source, 'session');
+  } finally { fs.unlinkSync(sessionStatePath(sid)); }
+});
+
+test('resolveSessionCwd falls back to payload when no session state', () => {
+  const sid = 'resolvetest2';
+  try { fs.unlinkSync(sessionStatePath(sid)); } catch { /* not present */ }
+  const got = resolveSessionCwd({
+    sessionId: sid, payloadCwd: '/payload/cwd', filePath: '/file.ts',
+  });
+  assert.equal(got.cwd, '/payload/cwd');
+  assert.equal(got.source, 'payload');
+});
+
+test('resolveSessionCwd walks up to projectRoot when cwd unavailable', () => {
+  _resetProjectRootCache();
+  const base = mkTempDir('ctx-shape-resolve3');
+  try {
+    fs.mkdirSync(path.join(base, 'repo', 'src'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'repo', '.git'), 'gitdir: x\n');
+    const f = path.join(base, 'repo', 'src', 'a.ts');
+    fs.writeFileSync(f, '');
+
+    const got = resolveSessionCwd({
+      sessionId: 'resolvetest3',
+      payloadCwd: '',
+      filePath: f,
+    });
+    assert.equal(got.cwd, path.join(base, 'repo'));
+    assert.equal(got.source, 'projectRoot');
+  } finally { rmRf(base); }
+});
+
+test('resolveSessionCwd last-resort is process.cwd() — never empty', () => {
+  _resetProjectRootCache();
+  const got = resolveSessionCwd({
+    sessionId: 'resolvetest4',
+    payloadCwd: 'not-absolute',  // ignored (doesn't start with /)
+    filePath: '/nowhere/real/file.ts',
+  });
+  assert.ok(got.cwd.startsWith('/'), 'falls back to process.cwd()');
+  assert.equal(got.source, 'processCwd');
+});
+
+// ─── analyzeShape canonicalCwd reclassification ──────────────────────────
+
+test('analyzeShape with canonicalCwd rebuckets legacy /Users/<name> roots', () => {
+  // Legacy entries written when the hook had no cwd — root=/Users/alex for
+  // files that actually live under /Users/alex/DWS/proj.
+  const legacy = [];
+  for (let i = 0; i < 10; i++) {
+    legacy.push({
+      t: i, tok: (i + 1) * 1000, tool: 'Read',
+      root: '/Users/alex',
+      file: `/Users/alex/DWS/proj/services/auth/file${i}.ts`,
+      event: null,
+    });
+  }
+  for (let i = 0; i < 5; i++) {
+    legacy.push({
+      t: 10 + i, tok: (11 + i) * 1000, tool: 'Read',
+      root: '/Users/alex',
+      file: `/Users/alex/DWS/proj/services/billing/b${i}.ts`,
+      event: null,
+    });
+  }
+
+  const withCanon = analyzeShape(legacy, { canonicalCwd: '/Users/alex/DWS/proj' });
+  assert.ok(withCanon, 'analysis produced');
+  const allRoots = [...withCanon.hot, ...withCanon.warm, ...withCanon.cold].map((r) => r.root);
+  assert.ok(allRoots.includes('services/auth'), 'services/auth emerges after reclassification');
+  assert.ok(allRoots.includes('services/billing'), 'services/billing emerges after reclassification');
+  assert.ok(!allRoots.includes('/Users/alex'), 'legacy /Users/alex blob is gone');
+});
+
+test('analyzeShape without canonicalCwd preserves original roots', () => {
+  const legacy = [];
+  for (let i = 0; i < 10; i++) {
+    legacy.push({
+      t: i, tok: (i + 1) * 1000, tool: 'Read',
+      root: '/Users/alex',
+      file: `/Users/alex/DWS/proj/services/auth/file${i}.ts`,
+      event: null,
+    });
+  }
+  const untouched = analyzeShape(legacy);
+  assert.ok(untouched);
+  const allRoots = [...untouched.hot, ...untouched.warm, ...untouched.cold].map((r) => r.root);
+  assert.ok(allRoots.includes('/Users/alex'), 'opt-in gate — legacy root unchanged');
+});
+
+test('rollupShape with canonicalCwd persists reclassified roots', () => {
+  const sid = 'rolluprecl';
+  cleanupRollup(sid);
+
+  // Write legacy-shape entries via appendShape.
+  for (let i = 0; i < 8; i++) {
+    appendShape(sid, {
+      t: i, tok: (i + 1) * 1000, tool: 'Read',
+      root: '/Users/alex',
+      file: `/Users/alex/DWS/proj/lib/helpers/utils${i}.ts`,
+    });
+  }
+
+  const rollup = rollupShape(sid, { canonicalCwd: '/Users/alex/DWS/proj' });
+  assert.ok(rollup);
+  const keys = Object.keys(rollup.roots);
+  assert.ok(keys.includes('lib/helpers'), 'reclassified root persisted');
+  assert.ok(!keys.includes('/Users/alex'), 'legacy blob not persisted');
   cleanupRollup(sid);
 });

@@ -89,11 +89,8 @@ function buildMemoryOffloadBlock(projectDir, sessionId) {
 
   return [
     '',
-    'MEMORY OFFLOAD (pre-compact):',
-    `  Before detail collapses, persist non-obvious findings to ${memoryDir}/`,
-    `  using the frontmatter + MEMORY.md convention from your system prompt.`,
-    `  Extend ${projectFilename} (project) if new; add reference_<slug>.md only`,
-    `  for reusable recipes. Skip if nothing new is worth keeping.`,
+    '## MEMORY OFFLOAD (pre-compact)',
+    `Before detail collapses, persist non-obvious findings to \`${memoryDir}/\` using the frontmatter + MEMORY.md convention from your system prompt. Extend \`${projectFilename}\` (project) if new; add \`reference_<slug>.md\` only for reusable recipes. Skip if nothing new is worth keeping.`,
     '',
   ].join('\n');
 }
@@ -116,15 +113,12 @@ function formatCompactionHints(sections) {
   }
   if (body.length === 0) return '';
 
-  return [
-    '',
-    'COMPACTION GUIDANCE (from session-context.md):',
-    '\u2501'.repeat(50),
-    ...body,
-    '',
-    '\u2501'.repeat(50),
-    '',
-  ].join('\n');
+  // Plain ASCII headers and no heavy-rule bars — both the CLI terminal and
+  // the Claude mobile client render this block. Mobile wraps the old 50×━
+  // divider across 3 lines and surfaces the surrounding ANSI dim codes as
+  // literal "[2m"/"[22m" noise, so we drop bars entirely and rely on
+  // section labels + single blank lines for structure.
+  return ['', '## COMPACTION GUIDANCE (from session-context.md)', ...body, ''].join('\n');
 }
 
 async function main() {
@@ -198,11 +192,28 @@ async function main() {
   // would produce different hotDirs in the injected hints vs. the history
   // entry — silent but confusing.
   const shapeCfg = (siCfg && siCfg.shape) || {};
+  // Canonical cwd: prefer the session-state pin (written by si-bootstrap at
+  // SessionStart), fall back to the hook's own stdin cwd. Passed to
+  // analyzeShape + rollupShape so entries written with a missing/drifted cwd
+  // (subagent worktrees, payloadless calls) get rebucketed at read time
+  // against the project's true root.
+  let canonicalCwd = cwd;
+  if (ctxShape && ctxShape.readSessionState) {
+    try {
+      const state = ctxShape.readSessionState(sessionId);
+      if (state && typeof state.cwd === 'string' && state.cwd.startsWith('/')) {
+        canonicalCwd = state.cwd;
+      }
+    } catch { /* fall back to payload cwd */ }
+  }
+  const rootDirDepth = Number.isFinite(shapeCfg.rootDirDepth) ? shapeCfg.rootDirDepth : 2;
   const analyzeOpts = {
     preserveGlobs,
     scoring: shapeCfg.scoring || 'hybrid',
     persistAcrossCompacts: shapeCfg.persistAcrossCompacts !== false,
     sessionId,
+    canonicalCwd,
+    rootDirDepth,
   };
 
   let shapeInjection = '';
@@ -267,13 +278,11 @@ async function main() {
     memoryOffload = buildMemoryOffloadBlock(projectDir, sessionId);
   }
 
-  // Emit a single top-level "Session Intelligence" heading so the model
-  // knows this structured block came from the plugin (vs. arbitrary user
-  // text). Only when at least one sub-block has content — a lonely heading
-  // with no guidance under it wastes tokens and confuses the summariser.
+  // Single top-level heading so the model knows this block came from the
+  // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
+  // mobile render it cleanly, no wide bars that wrap on narrow screens.
   if (hints || shapeInjection || memoryOffload) {
-    const bar = '\u2501'.repeat(50);
-    process.stdout.write(`\n${bar}\n  SESSION INTELLIGENCE \u2014 compaction guidance\n${bar}\n`);
+    process.stdout.write(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
   // User-authored session-context.md hints first (manual curation, stronger
@@ -302,13 +311,11 @@ async function main() {
   // END of the pre-compact block — it becomes the last thing the user sees
   // before the input prompt, which is exactly when they need it.
   if (hints || shapeInjection || memoryOffload) {
-    const bar = '\u2501'.repeat(50);
     process.stdout.write(
-      '\nNEXT (to resume):\n'
-      + '  Send any short message (e.g. `c` or `continue`) to show the post-compact\n'
-      + '  resume banner and auto-continue the last task. Claude Code pauses for\n'
-      + '  input after /compact, so the banner only fires on your next turn.\n'
-      + `\n${bar}\n`
+      '\n## NEXT (to resume)\n'
+      + 'Send any short message (e.g. `c` or `continue`) to show the post-compact '
+      + 'resume banner and auto-continue the last task. Claude Code pauses for '
+      + 'input after /compact, so the banner only fires on your next turn.\n'
     );
   }
 
@@ -397,7 +404,7 @@ async function main() {
   // entries. Gated by config; failures are logged but never fatal.
   if (ctxShape && ctxShape.rollupShape && analyzeOpts.persistAcrossCompacts) {
     try {
-      const rollup = ctxShape.rollupShape(sessionId);
+      const rollup = ctxShape.rollupShape(sessionId, { canonicalCwd, rootDirDepth });
       intelLog('pre-compact', 'info', 'shape rollup updated', {
         roots: rollup ? Object.keys(rollup.roots || {}).length : 0,
         rolledThroughTok: rollup ? rollup.rolledThroughTok : 0,

@@ -38,7 +38,13 @@ const {
   log
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
-const { rootDirOf, appendShape } = require(path.join(SI_LIB, 'context-shape'));
+const {
+  rootDirOf,
+  appendShape,
+  resolveSessionCwd,
+  writeSessionState,
+  readSessionState,
+} = require(path.join(SI_LIB, 'context-shape'));
 // Phase-event detection is optional — fall back to the legacy inline regex
 // if the module is not on disk yet (mixed-version install, e.g. during a
 // plugin upgrade).
@@ -149,12 +155,41 @@ async function main() {
     const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
     const depth = (cfg && cfg.shape && Number.isFinite(cfg.shape.rootDirDepth))
       ? cfg.shape.rootDirDepth : 2;
-    // Pass cwd so absolute paths under the project don't burn two depth
-    // slots on /Users/<name>/ — with cwd stripping, depth=2 on
-    // /Users/alex/DWS/CSM/frontend/dashboard/App.tsx yields
-    // `frontend/dashboard` instead of the useless `/Users/alex`.
-    const cwd = (parsedInput && (parsedInput.cwd || (parsedInput.workspace && parsedInput.workspace.current_dir))) || process.cwd();
+    // Resolve cwd through the session anchor chain:
+    //   1. session-state file written by si-bootstrap (stable across subagent
+    //      cwd drift — the motivating case for this design)
+    //   2. payload.cwd / workspace.current_dir
+    //   3. projectRootOf walk-up from filePath (handles cross-repo reads)
+    //   4. process.cwd() as last resort
+    // Without this chain, depth=2 on /Users/alex/DWS/CSM/frontend/dashboard/...
+    // collapses to /Users/alex whenever the payload arrives without a cwd,
+    // poisoning HOT/WARM/COLD banding and silencing the regret signal.
+    const payloadCwd = (parsedInput && (parsedInput.cwd
+      || (parsedInput.workspace && parsedInput.workspace.current_dir))) || '';
+    const { cwd, source: cwdSource } = resolveSessionCwd({
+      sessionId, payloadCwd, filePath,
+    });
     const root = rootDirOf(filePath, depth, { cwd });
+
+    // Self-heal: if bootstrap didn't run (fresh install, cache drift) and the
+    // payload carries a good absolute cwd, pin it now so the next call uses
+    // the session source instead of falling through the chain every time.
+    if (cwdSource !== 'session' && typeof payloadCwd === 'string' && payloadCwd.startsWith('/')) {
+      try {
+        const existing = readSessionState(sessionId);
+        if (!existing || existing.cwd !== payloadCwd) {
+          writeSessionState(sessionId, {
+            ...existing,
+            sessionId,
+            cwd: payloadCwd,
+            pinnedBy: 'token-budget',
+            updatedAt: new Date().toISOString(),
+          });
+          intelLog('token-budget', 'debug', 'pinned session cwd from payload',
+            { sessionId, cwd: payloadCwd, prevSource: cwdSource });
+        }
+      } catch { /* best-effort — never break the hook */ }
+    }
     const cmd = toolInput.command || '';
     const toolOutput = (parsedInput && (parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
     let event = null;
