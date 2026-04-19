@@ -193,11 +193,23 @@ async function main() {
     || process.env.CLAUDE_SESSION_ID
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  // Scoring + persistence come from siCfg.shape. Destructure once so both
+  // analyzeShape calls below pass identical options; drift between the two
+  // would produce different hotDirs in the injected hints vs. the history
+  // entry — silent but confusing.
+  const shapeCfg = (siCfg && siCfg.shape) || {};
+  const analyzeOpts = {
+    preserveGlobs,
+    scoring: shapeCfg.scoring || 'hybrid',
+    persistAcrossCompacts: shapeCfg.persistAcrossCompacts !== false,
+    sessionId,
+  };
+
   let shapeInjection = '';
   if (ctxShape) {
     try {
       const entries = ctxShape.readShape(sessionId);
-      const analysis = ctxShape.analyzeShape(entries, { preserveGlobs });
+      const analysis = ctxShape.analyzeShape(entries, analyzeOpts);
       if (analysis) {
         shapeInjection = ctxShape.formatCompactInjection(analysis);
       }
@@ -209,6 +221,8 @@ async function main() {
         cold: analysis ? analysis.cold.length : 0,
         staleTokens: analysis ? analysis.staleTokens : 0,
         allowlisted: analysis ? analysis.hot.filter((h) => h.allowlisted).length : 0,
+        scoring: analyzeOpts.scoring,
+        persist: analyzeOpts.persistAcrossCompacts,
       });
     } catch (err) {
       intelLog('pre-compact', 'warn', 'shape analysis failed', { err: err && err.message });
@@ -305,7 +319,7 @@ async function main() {
   if (compactHistory && ctxShape) {
     try {
       const entries = ctxShape.readShape(sessionId);
-      const analysis = ctxShape.analyzeShape(entries, { preserveGlobs });
+      const analysis = ctxShape.analyzeShape(entries, analyzeOpts);
 
       // tokens-at-compact = last observed cumulative budget, fallback to 0.
       // cost-at-compact  = same, best-effort from transcript.
@@ -374,6 +388,22 @@ async function main() {
       }
     } catch (err) {
       intelLog('pre-compact', 'warn', 'history/snapshot failed', { err: err && err.message });
+    }
+  }
+
+  // Persist this session's shape into the rollup AFTER both analyses have
+  // read their data. rolledThroughTok advances to the latest observed token
+  // position so the next compact's analyzeShape skips already-counted
+  // entries. Gated by config; failures are logged but never fatal.
+  if (ctxShape && ctxShape.rollupShape && analyzeOpts.persistAcrossCompacts) {
+    try {
+      const rollup = ctxShape.rollupShape(sessionId);
+      intelLog('pre-compact', 'info', 'shape rollup updated', {
+        roots: rollup ? Object.keys(rollup.roots || {}).length : 0,
+        rolledThroughTok: rollup ? rollup.rolledThroughTok : 0,
+      });
+    } catch (err) {
+      intelLog('pre-compact', 'warn', 'rollup failed', { err: err && err.message });
     }
   }
 

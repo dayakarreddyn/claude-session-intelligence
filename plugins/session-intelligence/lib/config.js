@@ -84,6 +84,23 @@ const DEFAULTS = {
     // field of each shape entry and against the `root` itself. Empty by
     // default — opt in per-repo.
     preserveGlobs: [],
+    // How HOT/WARM/COLD bands are assigned.
+    //   'recency'   → last-touch position (legacy behaviour: last 20% HOT)
+    //   'frequency' → log-normalized call count
+    //   'hybrid'    → weighted combination (default). Recency dominates so
+    //                 active focus still wins, but heavy-hitters like
+    //                 auth/billing stop falling into COLD the moment they
+    //                 go quiet mid-session.
+    // See lib/context-shape.js::combineScore for weights. Invalid values
+    // are silently coerced to 'hybrid'.
+    scoring: 'hybrid',
+    // Accumulate per-root tallies across compacts in a session-scoped
+    // rollup file at /tmp/claude-ctx-shape-<sid>.rollup.json. analyzeShape
+    // merges the rollup with the current shape log so long-running heavy-
+    // hitters keep their frequency signal even after the shape file
+    // rotates or the working window shifts. Opt-out if you want pure
+    // current-window classification with no historical carry.
+    persistAcrossCompacts: true,
     // Git Nexus — derive preserveGlobs automatically from repo commit
     // frequency. Top-N most-touched files in the last `sinceDays` become
     // an implicit allowlist, unioned with user-set `preserveGlobs`. Cheap
@@ -202,6 +219,14 @@ function applyEnvOverrides(cfg) {
     const n = parseInt(env.CLAUDE_SHAPE_ROOT_DIR_DEPTH, 10);
     if (Number.isFinite(n) && n >= 1 && n <= 5) cfg.shape.rootDirDepth = n;
   }
+  if (env.CLAUDE_SHAPE_SCORING) {
+    const v = env.CLAUDE_SHAPE_SCORING;
+    if (v === 'recency' || v === 'frequency' || v === 'hybrid') {
+      cfg.shape.scoring = v;
+    }
+  }
+  if (env.CLAUDE_SHAPE_PERSIST === '0') cfg.shape.persistAcrossCompacts = false;
+  if (env.CLAUDE_SHAPE_PERSIST === '1') cfg.shape.persistAcrossCompacts = true;
   if (env.CLAUDE_LEARN_ANNOUNCE === '1') cfg.learn.announce = true;
   if (env.CLAUDE_LEARN_ANNOUNCE === '0') cfg.learn.announce = false;
 
@@ -240,6 +265,12 @@ function loadConfig() {
   const preset = cfg.statusline && cfg.statusline.preset;
   if (!userSetFields && preset && STATUSLINE_PRESETS[preset]) {
     cfg.statusline.fields = STATUSLINE_PRESETS[preset].slice();
+  }
+
+  // Coerce typo'd shape.scoring back to hybrid (silent — a warning here
+  // would spam the user's status/suggest output on every hook fire).
+  if (cfg.shape && !['recency','frequency','hybrid'].includes(cfg.shape.scoring)) {
+    cfg.shape.scoring = 'hybrid';
   }
 
   return applyEnvOverrides(cfg);

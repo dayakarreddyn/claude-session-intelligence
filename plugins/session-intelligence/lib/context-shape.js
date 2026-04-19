@@ -38,6 +38,26 @@ const HOT_FRACTION = 0.2;   // last 20% of token-span → HOT
 const WARM_FRACTION = 0.6;  // last 60% → WARM (else COLD)
 const MIN_STALE_TO_MENTION = 20000; // don't cite stale bands smaller than this
 
+// Score-based banding for scoring != 'recency'. Cutoffs are intentionally
+// mirrors of (1 - HOT_FRACTION) / (1 - WARM_FRACTION) so 'recency' mode
+// produces identical HOT/WARM/COLD splits as the legacy last-20% / last-60%
+// rule. Changing HOT_FRACTION keeps both pathways aligned.
+const HOT_SCORE_CUTOFF = 1 - HOT_FRACTION;   // 0.80
+const WARM_SCORE_CUTOFF = 1 - WARM_FRACTION; // 0.40
+
+// Hybrid scoring weights. Tilted toward recency because "what is Claude
+// touching NOW" still dominates compaction priority; frequency just lifts
+// long-term heavy-hitters (auth, billing, core modules) out of COLD/WARM
+// when they aren't in the current 20% tail but have carried the session.
+const HYBRID_RECENCY_WEIGHT = 0.6;
+const HYBRID_FREQUENCY_WEIGHT = 0.4;
+
+// Rollup caps. 100 roots handles even deep monorepos; above that we evict
+// least-frequent. The rollup is an aggregate map (not an entry log), so
+// byte growth is linear in unique rootDirs, not tool calls.
+const ROLLUP_MAX_ROOTS = 100;
+const ROLLUP_SAMPLE_LIMIT = 3;
+
 // Minimal glob → regex. Supports:
 //   **       — zero or more path segments (incl. empty)
 //   *        — zero or more chars within a segment (no /)
@@ -94,6 +114,15 @@ function compilePreserveGlobs(globs) {
 function shapeFilePath(sessionId) {
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.jsonl`);
+}
+
+// Rollup is the session-scoped persistent tally that survives shape-file
+// byte-cap truncation. Same sid normalization; sibling file in /tmp so it
+// shares lifetime with the shape log (both die on OS /tmp rotation together,
+// which is correct — restarting the session invalidates both).
+function rollupFilePath(sessionId) {
+  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.rollup.json`);
 }
 
 /**
@@ -206,16 +235,108 @@ function readShape(sessionId, limit) {
   } catch { return []; }
 }
 
+function normalizeScoring(v) {
+  if (v === 'recency' || v === 'frequency' || v === 'hybrid') return v;
+  return 'hybrid';
+}
+
+function combineScore(recency, freq, mode) {
+  if (mode === 'recency') return recency;
+  if (mode === 'frequency') return freq;
+  return HYBRID_RECENCY_WEIGHT * recency + HYBRID_FREQUENCY_WEIGHT * freq;
+}
+
+/** Read the rollup file. Returns null on missing / malformed. */
+function readRollup(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(rollupFilePath(sessionId), 'utf8'));
+    if (!data || typeof data !== 'object') return null;
+    // Defensive: guarantee callers never hit undefined roots.
+    if (!data.roots || typeof data.roots !== 'object') data.roots = {};
+    if (!Number.isFinite(data.rolledThroughTok)) data.rolledThroughTok = 0;
+    return data;
+  } catch { return null; }
+}
+
+function writeRollup(sessionId, data) {
+  if (!sessionId || !data) return;
+  try { fs.writeFileSync(rollupFilePath(sessionId), JSON.stringify(data)); }
+  catch { /* best effort — tracker must not break the hook */ }
+}
+
+/**
+ * Merge the current shape log into the persistent rollup. Call after
+ * analyzeShape in pre-compact so this session's per-root tallies survive
+ * shape-file truncation and feed the NEXT compact's classification.
+ *
+ * Idempotent via `rolledThroughTok`: entries older than the last rolled
+ * token position are skipped. Evicts least-frequent roots when the rollup
+ * exceeds ROLLUP_MAX_ROOTS (scoped per session so this is a soft cap).
+ *
+ * Returns the updated rollup object (or null on missing sessionId).
+ */
+function rollupShape(sessionId) {
+  if (!sessionId) return null;
+  const entries = readShape(sessionId);
+  const rollup = readRollup(sessionId) || { rolledThroughTok: 0, roots: {} };
+  const threshold = rollup.rolledThroughTok || 0;
+  let maxTok = threshold;
+
+  for (const e of entries) {
+    if (!e || !e.root || !Number.isFinite(e.tok)) continue;
+    if (e.tok <= threshold) continue;
+    if (e.tok > maxTok) maxTok = e.tok;
+
+    const cur = rollup.roots[e.root] || {
+      count: 0, first: e.tok, last: e.tok, samples: [], allowlisted: false,
+    };
+    cur.count += 1;
+    cur.first = Math.min(cur.first, e.tok);
+    cur.last = Math.max(cur.last, e.tok);
+    if (cur.samples.length < ROLLUP_SAMPLE_LIMIT && e.file && !cur.samples.includes(e.file)) {
+      cur.samples.push(e.file);
+    }
+    rollup.roots[e.root] = cur;
+  }
+
+  // Evict when over cap — keep highest-count, tiebreak on most-recent.
+  const keys = Object.keys(rollup.roots);
+  if (keys.length > ROLLUP_MAX_ROOTS) {
+    const kept = keys
+      .map((k) => ({ k, c: rollup.roots[k].count, l: rollup.roots[k].last }))
+      .sort((a, b) => (b.c - a.c) || (b.l - a.l))
+      .slice(0, ROLLUP_MAX_ROOTS);
+    const next = {};
+    for (const { k } of kept) next[k] = rollup.roots[k];
+    rollup.roots = next;
+  }
+
+  rollup.rolledThroughTok = maxTok;
+  rollup.updatedAt = Date.now();
+  writeRollup(sessionId, rollup);
+  return rollup;
+}
+
 /**
  * Classify observation history into HOT / WARM / COLD bands and detect a
  * domain shift. Returns `null` when there isn't enough signal to bother.
  *
  * @param {Array} entries — output of readShape()
- * @param {{ preserveGlobs?: string[] }} [opts] — user-configured
- *   allowlist. Any root or any of its sample files matching one of these
- *   globs force-promotes the root to HOT (tagged `allowlisted: true`),
- *   regardless of recency banding. Intended for planning/docs/task dirs
- *   that get read heavily early and sit idle thereafter.
+ * @param {{ preserveGlobs?: string[], scoring?: 'recency'|'frequency'|'hybrid',
+ *           persistAcrossCompacts?: boolean, sessionId?: string }} [opts]
+ *
+ *   - preserveGlobs: user-configured allowlist. Any root or any of its
+ *     sample files matching one of these globs force-promotes the root to
+ *     HOT (tagged `allowlisted: true`), regardless of score banding.
+ *   - scoring: 'recency' (legacy: last touch within top 20% of span → HOT),
+ *     'frequency' (log-normalized call count), or 'hybrid' (default,
+ *     weighted combination). Hybrid lifts long-running heavy-hitters that
+ *     pure recency misclassifies as COLD the moment they're quiet.
+ *   - persistAcrossCompacts + sessionId: when both present, merge the
+ *     session's persistent rollup into the roots map so history across
+ *     compacts influences banding. Requires sessionId so the rollup file
+ *     can be located.
  */
 function analyzeShape(entries, opts) {
   if (!Array.isArray(entries) || entries.length < 5) return null;
@@ -229,14 +350,21 @@ function analyzeShape(entries, opts) {
   const span = lastTok - firstTok;
   if (span <= 0) return null;
 
-  const hotCutoff  = lastTok - span * HOT_FRACTION;
-  const warmCutoff = lastTok - span * WARM_FRACTION;
-
   const preserveRegexes = compilePreserveGlobs(opts && opts.preserveGlobs);
+  const scoring = normalizeScoring(opts && opts.scoring);
+  const persist = !!(opts && opts.persistAcrossCompacts && opts.sessionId);
+  const sessionId = persist ? opts.sessionId : null;
+
+  // Rollup snapshot read once; its rolledThroughTok tells us which live
+  // entries are already counted in rollup (skip them to prevent double-count).
+  const rollup = persist ? readRollup(sessionId) : null;
+  const rolledThroughTok = rollup ? (rollup.rolledThroughTok || 0) : 0;
 
   // Aggregate per rootDir: first/last token-offset, count, sample file paths.
   const roots = new Map();
   for (const e of withRoot) {
+    if (persist && e.tok <= rolledThroughTok) continue;
+
     const cur = roots.get(e.root) || {
       root: e.root, first: e.tok, last: e.tok, count: 0, samples: [],
       allowlisted: false,
@@ -258,19 +386,67 @@ function analyzeShape(entries, opts) {
     roots.set(e.root, cur);
   }
 
-  const hot = [], warm = [], cold = [];
-  for (const info of roots.values()) {
-    if (info.allowlisted)              hot.push(info);
-    else if (info.last >= hotCutoff)   hot.push(info);
-    else if (info.last >= warmCutoff)  warm.push(info);
-    else                               cold.push(info);
+  // Merge rollup history into the roots map. Roots that appear only in
+  // rollup (no current-session touches) still get classified — their
+  // recency will be low so frequency/hybrid is what surfaces them.
+  if (rollup && rollup.roots) {
+    for (const [root, info] of Object.entries(rollup.roots)) {
+      if (!info || !Number.isFinite(info.count)) continue;
+      const cur = roots.get(root) || {
+        root,
+        first: Number.isFinite(info.first) ? info.first : firstTok,
+        last: Number.isFinite(info.last) ? info.last : firstTok,
+        count: 0,
+        samples: [],
+        allowlisted: !!info.allowlisted,
+      };
+      if (Number.isFinite(info.first)) cur.first = Math.min(cur.first, info.first);
+      if (Number.isFinite(info.last))  cur.last  = Math.max(cur.last, info.last);
+      cur.count += info.count;
+      for (const s of (Array.isArray(info.samples) ? info.samples : [])) {
+        if (cur.samples.length < 3 && !cur.samples.includes(s)) cur.samples.push(s);
+      }
+      cur.allowlisted = cur.allowlisted || !!info.allowlisted;
+      // Re-check preserveGlobs against rollup-only roots too.
+      if (!cur.allowlisted && preserveRegexes.length && matchesAnyGlob(root, preserveRegexes)) {
+        cur.allowlisted = true;
+      }
+      roots.set(root, cur);
+    }
   }
 
-  // Sort within each band, most-recent-touched first.
-  const byLastDesc = (a, b) => b.last - a.last;
-  hot.sort(byLastDesc);
-  warm.sort(byLastDesc);
-  cold.sort(byLastDesc);
+  // Score every root. recencyScore normalizes last-touch position within
+  // the session's live span (rollup-only roots land near 0 here — they're
+  // old). freqScore is log-normalized against the winning count so a root
+  // with 100 calls doesn't drown out one with 20 (both score high).
+  const rootsArr = [...roots.values()];
+  let maxCount = 0;
+  for (const r of rootsArr) if (r.count > maxCount) maxCount = r.count;
+  const logMax = Math.log1p(maxCount);
+
+  for (const r of rootsArr) {
+    const recencyScore = span > 0
+      ? Math.max(0, Math.min(1, (r.last - firstTok) / span))
+      : 1;
+    const freqScore = logMax > 0 ? Math.log1p(r.count) / logMax : 0;
+    r.recencyScore = Number(recencyScore.toFixed(3));
+    r.freqScore = Number(freqScore.toFixed(3));
+    r.score = Number(combineScore(recencyScore, freqScore, scoring).toFixed(3));
+  }
+
+  const hot = [], warm = [], cold = [];
+  for (const info of rootsArr) {
+    if (info.allowlisted)                     hot.push(info);
+    else if (info.score >= HOT_SCORE_CUTOFF)  hot.push(info);
+    else if (info.score >= WARM_SCORE_CUTOFF) warm.push(info);
+    else                                      cold.push(info);
+  }
+
+  // Sort within each band by score desc, tiebreak on most-recent.
+  const byScoreDesc = (a, b) => (b.score - a.score) || (b.last - a.last);
+  hot.sort(byScoreDesc);
+  warm.sort(byScoreDesc);
+  cold.sort(byScoreDesc);
 
   // Domain shift — Jaccard of rootDir sets at the two ends of the window.
   // Requires withRoot.length >= 2 * SHIFT_WINDOW so head and tail don't
@@ -407,9 +583,15 @@ module.exports = {
   draftMessage,
   formatCompactInjection,
   shapeFilePath, // exported for tests / cleanup
-  compileGlob,   // exported for tests
+  rollupFilePath, // exported for tests / cleanup
+  rollupShape,    // exported for pre-compact hook
+  readRollup,     // exported for tests
+  compileGlob,    // exported for tests
   _thresholds: {
     HOT_FRACTION, WARM_FRACTION, SHIFT_JACCARD_THRESHOLD, MIN_STALE_TO_MENTION,
     DEFAULT_MAX_ENTRIES, MAX_ENTRIES_FLOOR, MAX_ENTRIES_HARD_CEILING,
+    HOT_SCORE_CUTOFF, WARM_SCORE_CUTOFF,
+    HYBRID_RECENCY_WEIGHT, HYBRID_FREQUENCY_WEIGHT,
+    ROLLUP_MAX_ROOTS,
   },
 };
