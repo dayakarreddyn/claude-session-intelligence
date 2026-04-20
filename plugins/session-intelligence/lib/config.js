@@ -169,6 +169,24 @@ const DEFAULTS = {
     // (fresh current-task or unresolved memory follow-up) exists.
     afterCompact: true,
   },
+  toolArchive: {
+    // PostToolUse hook writes tool_response payloads larger than
+    // `thresholdChars` to /tmp/claude-tool-archive-<sid>/<tool_use_id>.json.
+    // After /compact wipes them from context, `si expand <id>` (or
+    // `node tools/expand.js <id>`) replays the full body. Archive is
+    // observational — the model still sees the full result on the call
+    // itself; this is purely for retrieval after compaction.
+    enabled: true,
+    // Archive any tool_response whose string length is at/above this many
+    // characters. 4096 ≈ ~1k tokens — aligns with the `>4KB` convention
+    // used by alexgreensh/token-optimizer so the two tools don't duplicate
+    // archives on the same boundary.
+    thresholdChars: 4096,
+    // LRU ceiling per session. Older archives are evicted when exceeded.
+    maxPerSession: 200,
+    // Lazy GC: sweep archives older than this many days on each hook fire.
+    ttlDays: 7,
+  },
   learn: {
     // When true and adaptive zones (compact-history derived) materially
     // differ from the last time they were shown to the user, the next
@@ -277,6 +295,13 @@ function applyEnvOverrides(cfg) {
   if (env.CLAUDE_SHAPE_PERSIST === '1') cfg.shape.persistAcrossCompacts = true;
   if (env.CLAUDE_LEARN_ANNOUNCE === '1') cfg.learn.announce = true;
   if (env.CLAUDE_LEARN_ANNOUNCE === '0') cfg.learn.announce = false;
+
+  if (env.CLAUDE_TOOL_ARCHIVE === '0') cfg.toolArchive.enabled = false;
+  if (env.CLAUDE_TOOL_ARCHIVE === '1') cfg.toolArchive.enabled = true;
+  if (env.CLAUDE_TOOL_ARCHIVE_THRESHOLD) {
+    const n = parseInt(env.CLAUDE_TOOL_ARCHIVE_THRESHOLD, 10);
+    if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.toolArchive.thresholdChars = n;
+  }
 
   if (env.CLAUDE_INTEL_DEBUG === '1') cfg.debug.enabled = true;
   if (env.CLAUDE_INTEL_QUIET === '1') cfg.debug.quiet = true;

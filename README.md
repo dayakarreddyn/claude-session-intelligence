@@ -677,6 +677,38 @@ Everything is in `taskChange.*`:
 
 You don't *need* to fill `session-context.md` for the detector to work — the pooled baseline (recent commits + transcript file mentions + dirty tree) is usually enough. Filling it helps the pre-compact hint injection more than it helps the detector. No baseline at all (placeholder-only template + no recent git activity + no transcript file refs) = silent. Short conversational prompts (under `conversationalMaxLen` chars with no `@path` or backtick code references) also stay silent — they're follow-up talk, not task drift.
 
+## Tool-Response Archive
+
+Large tool responses (Read on a big file, Bash log dump, Grep with many hits) sit in the context window until `/compact` erases them. If the model later wants the detail back, re-running the tool re-pays tokens and wall time for data you already had.
+
+`si-tool-archive.js` is a **PostToolUse** hook that snapshots tool responses larger than `toolArchive.thresholdChars` (default 4096) to:
+
+```
+${TMPDIR}/claude-tool-archive-<sid>/<tool_use_id>.json
+```
+
+After `/compact` wipes the body from context, replay it with:
+
+```
+/si expand <tool_use_id>                  # slash command — dispatches to the CLI
+node tools/expand.js <tool_use_id>        # direct invocation (uses the latest session by default)
+node tools/expand.js --list               # index rows, oldest first, with previews
+node tools/expand.js --prune              # manual TTL sweep
+```
+
+**Observational only.** The hook does not truncate what the model sees on the tool call itself — the archive is purely a post-compact retrieval path. Enable/disable and tune via:
+
+| Key | Default | Effect |
+|---|---|---|
+| `toolArchive.enabled` | `true` | Master switch |
+| `toolArchive.thresholdChars` | `4096` | Skip bodies below this size (≈1k tokens) |
+| `toolArchive.maxPerSession` | `200` | LRU cap — oldest archives dropped on overflow |
+| `toolArchive.ttlDays` | `7` | Lazy-swept stale-archive cutoff |
+
+Env overrides: `CLAUDE_TOOL_ARCHIVE=0` (disable), `CLAUDE_TOOL_ARCHIVE_THRESHOLD=<chars>`.
+
+Coexists with [alexgreensh/token-optimizer](https://github.com/alexgreensh/token-optimizer): both archive on the same >4KB boundary but use different storage paths (`/tmp` here, `~/.claude/_backups/` there). Disable one side with `toolArchive.enabled=false` or the TO plugin's own opt-out if you prefer only one archiver running.
+
 ## Debug Log
 
 All three hooks (plus `intelLog` calls from your own scripts) write structured, timestamped lines to:
@@ -734,6 +766,7 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 | `si-bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules |
 | `si-pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
 | `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
+| `si-tool-archive.js` | PostToolUse | Archives tool responses above `toolArchive.thresholdChars` so `/si expand <tool_use_id>` can replay them after `/compact` |
 | `si-suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
 | `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; writes a one-line stderr hint (never blocks) when the task looks like it just shifted |
 
@@ -746,6 +779,7 @@ All emit structured entries to the debug log (see above).
 | `~/.claude/scripts/hooks/si-bootstrap.js` | `hooks/si-bootstrap.js` | SessionStart bootstrapper |
 | `~/.claude/scripts/hooks/si-pre-compact.js` | `hooks/si-pre-compact.js` | Compaction hint injector (session-context + shape + history logging) |
 | `~/.claude/scripts/hooks/si-token-budget.js` | `hooks/si-token-budget.js` | Token estimator + shape observer + regret detector |
+| `~/.claude/scripts/hooks/si-tool-archive.js` | `hooks/si-tool-archive.js` | Tool-response archive (PostToolUse) |
 | `~/.claude/scripts/hooks/si-suggest-compact.js` | `hooks/si-suggest-compact.js` | Grounded zone warnings with adaptive thresholds |
 | `~/.claude/scripts/hooks/si-task-change.js` | `hooks/si-task-change.js` | Task-domain change detector |
 | `~/.claude/scripts/hooks/session-intelligence/lib/config.js` | `lib/config.js` | Unified config loader + presets |

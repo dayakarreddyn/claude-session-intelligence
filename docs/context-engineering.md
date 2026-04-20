@@ -597,6 +597,7 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 |---|---|---|
 | `si-bootstrap.js` | SessionStart | Seed session-context.md from git; wire statusline chain; inject CLAUDE.md rules |
 | `si-token-budget.js` | PostToolUse | Sum tool I/O → `tokenBudget`; append shape entry; post-compact regret check |
+| `si-tool-archive.js` | PostToolUse | Archive tool responses over `toolArchive.thresholdChars` so `/si expand <tool_use_id>` can replay them after `/compact` |
 | `si-suggest-compact.js` | PostToolUse | Adaptive zones; grounded diagnosis; zone-crossover stderr message; memory-offload nudge at orange/red |
 | `si-pre-compact.js` | PreCompact | Inject session-context.md + observed shape + memory-offload checkpoint; log history entry; write post-compact snapshot |
 | `si-task-change.js` | UserPromptSubmit | Heuristic same-domain score + Haiku tie-breaker on domain shift |
@@ -608,6 +609,7 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 | `lib/context-shape.js` | `rootDirOf`, `appendShape`, `readShape`, `analyzeShape`, `draftMessage`, `formatCompactInjection` |
 | `lib/compact-history.js` | `appendHistory`, `readHistory`, `adaptiveZones`, `writeSnapshot`, `readSnapshot`, `checkPostCompactRegret` |
 | `lib/cost-estimation.js` | `costFromUsage`, `totalCostFromTranscript`, `costBand`, `formatUsd` |
+| `lib/tool-archive.js` | `writeArchive`, `readArchive`, `listArchives`, `extractFromPayload`, `enforceLruCap`, `sweepTtl` |
 | `lib/config.js` | `loadConfig`, `saveConfig`, `STATUSLINE_PRESETS`, dotted `get`/`set` |
 | `lib/utils.js` | `readStdinJson`, `readTranscriptTokens`, `resolveProjectDir`, fs helpers |
 | `lib/intel-debug.js` | `intelLog` — structured debug logging |
@@ -622,6 +624,7 @@ Colour in a status line is a decision-support tool. Every coloured field is sayi
 | `/tmp/claude-cost-<sid>` | Incremental cost-read cache | per-session |
 | `/tmp/claude-ctx-shape-<sid>.jsonl` | Shape observation log | per-session |
 | `/tmp/claude-compact-snapshot-<sid>.json` | Post-compact regret window state | 30 calls / 30 min |
+| `${TMPDIR}/claude-tool-archive-<sid>/*.json` | Per-tool-use archived responses (≥ `thresholdChars`) | per-session, LRU-capped, TTL-swept |
 | `~/.claude/logs/compact-history.jsonl` | Cross-session compact history | persistent, bounded |
 | `~/.claude/logs/session-intel-YYYY-MM-DD.log` | Structured debug log | daily, 5 MB rotation |
 

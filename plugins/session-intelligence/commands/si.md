@@ -19,6 +19,8 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si config                                # show all keys in one table, edit any subset, review combined diff, confirm
 /si migrate                               # import legacy ~/.claude/statusline-intel.json
 /si tail                                  # show latest intel log + shape log for this session
+/si expand <tool_use_id>                  # replay a tool response archived by the PostToolUse hook
+/si archive-list                          # list tool responses archived this session
 ```
 
 Keys use dotted paths. Values parse as JSON when possible, else plain string.
@@ -83,6 +85,17 @@ Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's std
 3. Last 10 adaptive-zones announcements (`~/.claude/logs/adaptive-zones-announced.json`) — a small JSON object keyed by cwd. Relevant when debugging why zones are or aren't adapting.
 
 No diff, no config write, no subagents. This is a "what is the plugin doing right now" view. Emit three clear section headers (`INTEL LOG`, `SHAPE LOG`, `ADAPTIVE ZONES`) so the user can navigate the output quickly.
+
+**`expand <tool_use_id>`** — Replay a tool response that the PostToolUse archive hook captured. Useful right after `/compact` when the body has been erased from context but the model (or you) wants the full payload back. Resolve the path to the CLI in this order and invoke the first that exists:
+
+```
+${CLAUDE_PLUGIN_ROOT}/tools/expand.js
+~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/tools/expand.js
+```
+
+Invoke as `node <path> <tool_use_id> --sid=<sid>` using the current session id. Relay stdout verbatim. If the body is huge, warn the user it will inflate context before printing. No diff, no config write.
+
+**`archive-list`** — Print the tool-archive index for this session. Invoke the same CLI with `--list --sid=<sid>` and relay stdout. Rows are sorted oldest-first; `(missing)` marks files the LRU cap evicted.
 
 ### `config` — show-all form
 
