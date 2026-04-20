@@ -26,24 +26,24 @@ const STATUSLINE_PRESETS = {
   minimal:  ['tokens'],
   standard: ['model', 'project', 'tokens', 'newline', 'task'],
   // 3-line layout:
-  //   Line 1: zone bar + compactAge — the two fields that ESCALATE colour,
-  //           both in one row so the "act now" signal is unified.
-  //   Line 2: identity / repo / task context — dim.
-  //   Line 3: session activity + token economics — dim.
+  //   Line 1: zone bar + compactAge — the two colour-escalating fields.
+  //   Line 2: session activity + token economics — the live "what's happening
+  //           right now" row at eye level, just below the warning bar.
+  //   Line 3: identity / repo / task — dim reference context at the bottom.
   verbose:  [
     'tokens', 'compactAge',
     'newline',
-    'model', 'project', 'branch', 'diffstat', 'task',
-    'newline',
     'session', 'tools', 'cost', 'tokenFlow', 'cacheHit', 'cacheSaved',
+    'newline',
+    'model', 'project', 'branch', 'diffstat', 'task',
   ],
   // Token-economics focus — same 3-line skeleton, adds cacheTokens.
   'verbose-cache':  [
     'tokens', 'compactAge',
     'newline',
-    'model', 'project', 'task',
-    'newline',
     'session', 'tools', 'cost', 'tokenFlow', 'cacheHit', 'cacheTokens', 'cacheSaved',
+    'newline',
+    'model', 'project', 'task',
   ],
 };
 

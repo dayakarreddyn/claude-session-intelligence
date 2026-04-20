@@ -253,8 +253,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 3 lines. Line 1: `tokens` + `compactAge` (the two colour-escalating fields together) · Line 2: `model`, `project`, `branch`, `diffstat`, `task` · Line 3: `session`, `tools`, `cost`, `tokenFlow`, `cacheHit`, `cacheSaved` |
-| `verbose-cache` | 3 lines, token-economics-focused. Line 2 trimmed, line 3 includes `cacheTokens` for per-turn prefix breakdown |
+| `verbose` (default) | 3 lines. Line 1: `tokens` + `compactAge` (colour-escalating fields) · Line 2: `session`, `tools`, `cost`, `tokenFlow`, `cacheHit`, `cacheSaved` (live activity at eye level) · Line 3: `model`, `project`, `branch`, `diffstat`, `task` (dim reference context) |
+| `verbose-cache` | 3 lines, token-economics-focused. Line 2 adds `cacheTokens`; line 3 trimmed to model/project/task |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
 

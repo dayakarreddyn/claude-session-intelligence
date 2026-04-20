@@ -105,9 +105,9 @@ function loadConfig() {
     fields: [
       'tokens', 'compactAge',
       'newline',
-      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'task',
-      'newline',
       'emoji2', 'session', 'tools', 'cost', 'deploy', 'tokenFlow', 'cacheHit', 'cacheSaved',
+      'newline',
+      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'task',
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
