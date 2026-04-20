@@ -38,35 +38,75 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
 }
 
 /**
+ * USD saved by prefix-cache hits on a single turn, vs. the counterfactual of
+ * paying the uncached input rate for those same tokens. Positive number when
+ * cache fired; 0 when no cache hits on that turn.
+ */
+function savedFromUsage(u, prices = DEFAULT_PRICES) {
+  if (!u) return 0;
+  const read = u.cache_read_input_tokens || 0;
+  if (read <= 0) return 0;
+  const delta = (prices.input || 0) - (prices.cache_read || 0);
+  if (delta <= 0) return 0;
+  return (read / 1_000_000) * delta;
+}
+
+/**
  * Sum cost across all assistant messages in the transcript. Uses the
  * incremental-offset cache so we don't re-read the whole file on every
  * call. Returns 0 for any failure so callers can degrade silently.
  */
 function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+  const r = totalsFromTranscript(transcriptPath, sessionId, prices);
+  return r ? r.cost : 0;
+}
+
+/**
+ * Cumulative dollars saved by cache hits across the entire session vs. the
+ * counterfactual of paying the full input rate. Incremental, shares the
+ * same offset cache as totalCostFromTranscript.
+ */
+function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  const r = totalsFromTranscript(transcriptPath, sessionId, prices);
+  return r ? r.saved : 0;
+}
+
+/**
+ * Single incremental pass that accumulates both {cost, saved} — callers pick
+ * whichever they need. One transcript read + one cache file per session.
+ * Falls back to {cost: 0, saved: 0} on any failure so callers can degrade
+ * silently. Cache file format is extended with `saved`; older caches without
+ * the field re-accumulate from saved=0, which is safe (the next incremental
+ * read picks up from the offset, so only tail-bytes get re-counted for saved).
+ */
+function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return { cost: 0, saved: 0 };
 
   let stat;
-  try { stat = fs.statSync(transcriptPath); } catch { return 0; }
+  try { stat = fs.statSync(transcriptPath); } catch { return { cost: 0, saved: 0 }; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
   const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
+  let cachedSaved = 0;
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
         && cached.offset >= 0 && cached.offset <= stat.size) {
       cachedOffset = cached.offset;
       cachedCost = cached.cost;
+      cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
 
   // File shrank (rotation / compact) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; }
-  if (stat.size === cachedOffset) return cachedCost;
+  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; cachedSaved = 0; }
+  if (stat.size === cachedOffset) return { cost: cachedCost, saved: cachedSaved };
 
   let newCost = cachedCost;
+  let newSaved = cachedSaved;
   let newOffset = cachedOffset;
   try {
     const fd = fs.openSync(transcriptPath, 'r');
@@ -82,20 +122,23 @@ function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRI
           try {
             const d = JSON.parse(line);
             const u = d && d.message && d.message.usage;
-            if (u) newCost += costFromUsage(u, prices);
+            if (u) {
+              newCost += costFromUsage(u, prices);
+              newSaved += savedFromUsage(u, prices);
+            }
           } catch { /* invalid line — skip */ }
         }
         newOffset = cachedOffset + lastNl + 1;
       }
     } finally { fs.closeSync(fd); }
-  } catch { return cachedCost; }
+  } catch { return { cost: cachedCost, saved: cachedSaved }; }
 
   try {
     fs.writeFileSync(cacheFile,
-      JSON.stringify({ offset: newOffset, cost: newCost }), 'utf8');
+      JSON.stringify({ offset: newOffset, cost: newCost, saved: newSaved }), 'utf8');
   } catch { /* best effort */ }
 
-  return newCost;
+  return { cost: newCost, saved: newSaved };
 }
 
 /**
@@ -178,7 +221,10 @@ function formatUsd(n) {
 module.exports = {
   DEFAULT_PRICES,
   costFromUsage,
+  savedFromUsage,
   totalCostFromTranscript,
+  totalCacheSavedFromTranscript,
+  totalsFromTranscript,
   costBand,
   firstAssistantUsageAfter,
   cacheHitRatio,

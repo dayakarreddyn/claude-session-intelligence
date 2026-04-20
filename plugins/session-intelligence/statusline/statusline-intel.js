@@ -105,7 +105,9 @@ function loadConfig() {
     fields: [
       'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'tokens',
       'newline',
-      'emoji2', 'session', 'tools', 'cost', 'deploy', 'task', 'compactAge',
+      'emoji2', 'session', 'tools', 'cost', 'deploy', 'task',
+      'newline',
+      'cacheHit', 'cacheTokens', 'cacheSaved', 'compactAge',
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
@@ -744,6 +746,57 @@ function buildRenderers(C) {
     },
 
     /**
+     * Live prompt-cache hit ratio from the latest assistant turn's usage
+     * block: cache_read / (cache_read + cache_creation). Shown as `cache:92%`.
+     * Colour-gated: dim green ≥70% (good hit rate), dim yellow 30-70%
+     * (mediocre), dim red <30% (cache mostly missing — the stablePrefix
+     * feature isn't paying off). Empty when there's no cacheable prefix on
+     * the latest turn (first turn of a session).
+     */
+    cacheHit: (_input, ctx) => {
+      const u = ctx.usage;
+      if (!u) return '';
+      const read = u.cache_read_input_tokens || 0;
+      const creation = u.cache_creation_input_tokens || 0;
+      const denom = read + creation;
+      if (denom <= 0) return '';
+      const ratio = read / denom;
+      const pct = Math.round(ratio * 100);
+      // Dim colour tier so line 3 stays visually quiet; just enough accent
+      // to catch a bad hit rate out of the corner of the eye.
+      let tier = C.dim;
+      if (ratio >= 0.7) tier = `${C.dim}${C.green}`;
+      else if (ratio < 0.3) tier = `${C.dim}${C.red}`;
+      else tier = `${C.dim}${C.yellow}`;
+      return `${tier}cache:${pct}%${C.reset}`;
+    },
+
+    /**
+     * Per-turn prefix breakdown: `prefix:<read>k/<creation>k` where read is
+     * served from cache and creation is the new-to-cache portion of this
+     * turn's prompt. A low read + high creation on a stable working set is
+     * the warning sign stablePrefix is leaking a volatile value somewhere.
+     */
+    cacheTokens: (_input, ctx) => {
+      const u = ctx.usage;
+      if (!u) return '';
+      const read = u.cache_read_input_tokens || 0;
+      const creation = u.cache_creation_input_tokens || 0;
+      if (read + creation <= 0) return '';
+      return `${C.dim}prefix:${fmtTokens(read)}/${fmtTokens(creation)}${C.reset}`;
+    },
+
+    /**
+     * Cumulative USD saved across the session by prefix-cache hits versus the
+     * counterfactual of paying the uncached input rate. Hidden when savings
+     * are trivially small — under $0.10 isn't worth a whole field.
+     */
+    cacheSaved: (_input, ctx) => {
+      if (!ctx.cacheSavedUsd || ctx.cacheSavedUsd < 0.1) return '';
+      return `${C.dim}saved:$${ctx.cacheSavedUsd.toFixed(2)}${C.reset}`;
+    },
+
+    /**
      * Git diff-stat: (+N,-M) across all uncommitted changes in HEAD + untracked.
      * Skipped silently when clean. All dim — see colour policy above.
      */
@@ -829,6 +882,20 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
        + per(u.output_tokens, prices.output);
 }
 
+// USD saved by a single turn's cache-read hits vs. paying the uncached input
+// rate for the same tokens. Used by the line-3 `cacheSaved` field + summed
+// incrementally by totalCostFromTranscript into the same /tmp/claude-cost
+// cache (extended with a `saved` property — older caches are backward-
+// compatible since the missing field is treated as 0).
+function savedFromUsage(u, prices = DEFAULT_PRICES) {
+  if (!u) return 0;
+  const read = u.cache_read_input_tokens || 0;
+  if (read <= 0) return 0;
+  const delta = (prices.input || 0) - (prices.cache_read || 0);
+  if (delta <= 0) return 0;
+  return (read / 1_000_000) * delta;
+}
+
 /**
  * Cumulative session cost: sum per-turn usage across every assistant message
  * in the transcript. Each turn's cache_read/cache_creation/input/output is
@@ -841,34 +908,49 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
  * active use, so it read and re-parsed the entire file on every keypress.
  */
 function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+  return totalsFromTranscript(transcriptPath, sessionId, prices).cost;
+}
+
+function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  return totalsFromTranscript(transcriptPath, sessionId, prices).saved;
+}
+
+/**
+ * Single incremental pass returning both {cost, saved}. Keeps one /tmp cache
+ * file per session keyed by sessionId. Shares the cache with the lib
+ * implementation so both renderers see the same offsets.
+ */
+function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  const empty = { cost: 0, saved: 0 };
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
   let stat;
-  try { stat = fs.statSync(transcriptPath); } catch { return 0; }
+  try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
   const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
+  let cachedSaved = 0;
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
         && cached.offset >= 0 && cached.offset <= stat.size) {
       cachedOffset = cached.offset;
       cachedCost = cached.cost;
+      cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
     }
-    // Older installs wrote {size, mtime, cost} — no `offset` field. We just
-    // ignore it and re-read from 0 once, then the next call hits the new cache.
   } catch { /* cache miss or corrupt — read from 0 */ }
 
   // File shrank (rotation / clear) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; }
+  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; cachedSaved = 0; }
 
   // No new bytes — short-circuit the I/O entirely.
-  if (stat.size === cachedOffset) return cachedCost;
+  if (stat.size === cachedOffset) return { cost: cachedCost, saved: cachedSaved };
 
   let newCost = cachedCost;
+  let newSaved = cachedSaved;
   let newOffset = cachedOffset;
   try {
     const fd = fs.openSync(transcriptPath, 'r');
@@ -876,9 +958,7 @@ function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRI
       const bytesToRead = stat.size - cachedOffset;
       const buf = Buffer.alloc(bytesToRead);
       fs.readSync(fd, buf, 0, bytesToRead, cachedOffset);
-      // Only consume up to the last complete line. The tail may be a partial
-      // write being flushed — leave it for next call so we don't double-count.
-      const lastNl = buf.lastIndexOf(0x0A); // ASCII '\n'
+      const lastNl = buf.lastIndexOf(0x0A);
       if (lastNl >= 0) {
         const text = buf.slice(0, lastNl).toString('utf8');
         for (const line of text.split('\n')) {
@@ -886,21 +966,23 @@ function totalCostFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRI
           try {
             const d = JSON.parse(line);
             const u = d && d.message && d.message.usage;
-            if (u) newCost += costFromUsage(u, prices);
-          } catch { /* invalid line — skip, caller can retry next turn */ }
+            if (u) {
+              newCost += costFromUsage(u, prices);
+              newSaved += savedFromUsage(u, prices);
+            }
+          } catch { /* invalid line — skip */ }
         }
         newOffset = cachedOffset + lastNl + 1;
       }
-      // No newline in the new bytes → nothing complete yet; keep old cache.
     } finally { fs.closeSync(fd); }
-  } catch { return cachedCost; } // read failed — return stale rather than zero
+  } catch { return { cost: cachedCost, saved: cachedSaved }; }
 
   try {
     fs.writeFileSync(cacheFile,
-      JSON.stringify({ offset: newOffset, cost: newCost }), 'utf8');
+      JSON.stringify({ offset: newOffset, cost: newCost, saved: newSaved }), 'utf8');
   } catch { /* best effort */ }
 
-  return newCost;
+  return { cost: newCost, saved: newSaved };
 }
 
 // ─── Session duration ────────────────────────────────────────────────────────
@@ -1001,15 +1083,26 @@ function main() {
   // estimate using the user's configured prices. The authoritative number
   // reflects what Anthropic actually billed; the estimate is only correct if
   // the configured price list matches the current model's public pricing.
+  //
+  // cacheSaved is always transcript-derived — Claude Code doesn't expose a
+  // "saved by cache" number on stdin, and the transcript pass is cheap (same
+  // incremental offset cache as cost). Only computed when the field is
+  // configured to avoid paying for the read when it's unused.
   let costUsd = 0;
-  if (cfg.fields.includes('cost')) {
+  let cacheSavedUsd = 0;
+  const wantCost = cfg.fields.includes('cost');
+  const wantCacheSaved = cfg.fields.includes('cacheSaved');
+  if (wantCost || wantCacheSaved) {
     const officialCost = input.cost && typeof input.cost === 'object'
       ? Number(input.cost.total_cost_usd)
       : Number(input.total_cost_usd);
-    if (Number.isFinite(officialCost) && officialCost > 0) {
+    if (wantCost && Number.isFinite(officialCost) && officialCost > 0 && !wantCacheSaved) {
       costUsd = officialCost;
     } else {
-      costUsd = totalCostFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
+      const totals = totalsFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
+      costUsd = (wantCost && Number.isFinite(officialCost) && officialCost > 0)
+        ? officialCost : totals.cost;
+      cacheSavedUsd = totals.saved;
     }
   }
 
@@ -1039,6 +1132,7 @@ function main() {
     task: taskInfo.text,
     sessionDurationMs,
     costUsd,
+    cacheSavedUsd,
     usedTranscript,
     usage,
     thinking,

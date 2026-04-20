@@ -72,3 +72,41 @@ test('cacheHitRatio returns null when both inputs are zero', () => {
   assert.equal(costEst.cacheHitRatio({ cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }), null);
   assert.equal(costEst.cacheHitRatio(null), null);
 });
+
+// ── cache savings ────────────────────────────────────────────────────────
+
+test('savedFromUsage returns 0 when no cache_read', () => {
+  assert.equal(costEst.savedFromUsage({ cache_read_input_tokens: 0 }), 0);
+  assert.equal(costEst.savedFromUsage(null), 0);
+});
+
+test('savedFromUsage computes delta × tokens / 1M', () => {
+  // read=100k, input=15/M, cache_read=1.5/M → delta=13.5 → 100000/1_000_000 * 13.5 = 1.35
+  const saved = costEst.savedFromUsage({ cache_read_input_tokens: 100_000 });
+  assert.ok(Math.abs(saved - 1.35) < 1e-6, `got ${saved}`);
+});
+
+test('totalsFromTranscript accumulates cost + saved incrementally', () => {
+  const now = '2026-04-19T18:00:00.000Z';
+  const path_ = writeTranscript([
+    { type: 'assistant', timestamp: now, message: { usage: {
+      input_tokens: 1000, cache_read_input_tokens: 100_000, cache_creation_input_tokens: 5000, output_tokens: 500,
+    } } },
+    { type: 'assistant', timestamp: now, message: { usage: {
+      input_tokens: 500, cache_read_input_tokens: 50_000, cache_creation_input_tokens: 1000, output_tokens: 200,
+    } } },
+  ]);
+  const sid = 'totals-test-' + Date.now();
+  const out = costEst.totalsFromTranscript(path_, sid);
+  // saved = (100k + 50k) / 1M * 13.5 = 2.025
+  assert.ok(Math.abs(out.saved - 2.025) < 1e-6, `saved=${out.saved}`);
+  // cost > 0
+  assert.ok(out.cost > 0);
+
+  // Second call hits the cache — same result, no re-parse needed.
+  const out2 = costEst.totalsFromTranscript(path_, sid);
+  assert.equal(out2.saved, out.saved);
+  assert.equal(out2.cost, out.cost);
+
+  fs.unlinkSync(path_);
+});

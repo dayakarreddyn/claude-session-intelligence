@@ -29,6 +29,16 @@ const STATUSLINE_PRESETS = {
     'model', 'project', 'branch', 'diffstat', 'tokens',
     'newline',
     'session', 'tools', 'cost', 'task',
+    'newline',
+    'cacheHit', 'cacheTokens', 'cacheSaved', 'compactAge',
+  ],
+  // Token economics focus — smaller primary bar, dedicated line for cache stats.
+  'verbose-cache':  [
+    'model', 'project', 'tokens',
+    'newline',
+    'session', 'tools', 'cost', 'task',
+    'newline',
+    'cacheHit', 'cacheTokens', 'cacheSaved',
   ],
 };
 
