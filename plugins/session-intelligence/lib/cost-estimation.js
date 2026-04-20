@@ -124,6 +124,49 @@ function costBand(usage, prices = DEFAULT_PRICES) {
   return { costPerKTok, cacheRatio, band };
 }
 
+/**
+ * Find the first assistant turn in the transcript whose timestamp is strictly
+ * after `sinceTs` (ms since epoch) and return its usage block. Used to measure
+ * cache-hit ratio on the first post-compact turn — that number tells us
+ * whether `compact.stablePrefix` is actually being served from cache.
+ *
+ * Non-incremental (reads the whole file). The measurement fires once per
+ * compact so the offset-cache machinery isn't worth it.
+ */
+function firstAssistantUsageAfter(transcriptPath, sinceTs) {
+  if (!transcriptPath || !Number.isFinite(sinceTs)) return null;
+  let content;
+  try { content = fs.readFileSync(transcriptPath, 'utf8'); }
+  catch { return null; }
+  for (const line of content.split('\n')) {
+    if (!line) continue;
+    try {
+      const d = JSON.parse(line);
+      if (!d || d.type !== 'assistant') continue;
+      const ts = d.timestamp ? Date.parse(d.timestamp) : NaN;
+      if (!Number.isFinite(ts) || ts <= sinceTs) continue;
+      const u = d.message && d.message.usage;
+      if (u) return u;
+    } catch { /* skip malformed line */ }
+  }
+  return null;
+}
+
+/**
+ * Ratio of prefix tokens served from cache on a single turn:
+ *   cache_read / (cache_read + cache_creation)
+ * Returns null when the denominator is zero (turn produced no cacheable
+ * prefix — rare, but happens on the very first turn of a session).
+ */
+function cacheHitRatio(usage) {
+  if (!usage) return null;
+  const read = usage.cache_read_input_tokens || 0;
+  const creation = usage.cache_creation_input_tokens || 0;
+  const denom = read + creation;
+  if (denom <= 0) return null;
+  return read / denom;
+}
+
 /** Format a USD amount for terse status-line / message rendering. */
 function formatUsd(n) {
   if (!Number.isFinite(n) || n <= 0) return '';
@@ -137,5 +180,7 @@ module.exports = {
   costFromUsage,
   totalCostFromTranscript,
   costBand,
+  firstAssistantUsageAfter,
+  cacheHitRatio,
   formatUsd,
 };

@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const LOG_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || os.homedir(),
@@ -174,8 +175,18 @@ function adaptiveZones(history, defaults, opts) {
   // the threshold OUT so we warn later, giving the user more context budget.
   // Use the bucketed history so per-cwd regret doesn't get diluted by other
   // repos' patterns.
+  //
+  // Sums both hard regret (DROP touches) and soft regret (WARM touches).
+  // softRegretCount is stamped pre-dampened (weight = raw * SOFT_REGRET_DAMPEN
+  // at hit time), so we don't re-dampen here — just add it in. Soft signal
+  // exists because users who compact early (median ~60k) rarely age dirs
+  // to COLD, so hard regret alone systematically undercounts.
   const recentRegret = workingHistory.slice(-10)
-    .reduce((sum, h) => sum + (Number.isFinite(h.regretCount) ? h.regretCount : 0), 0);
+    .reduce((sum, h) => {
+      const hard = Number.isFinite(h.regretCount) ? h.regretCount : 0;
+      const soft = Number.isFinite(h.softRegretCount) ? h.softRegretCount : 0;
+      return sum + hard + soft;
+    }, 0);
   const totalCompacts = Math.min(10, workingHistory.length);
   const regretRate = totalCompacts > 0 ? recentRegret / totalCompacts : 0;
   if (regretRate >= 1) {
@@ -281,6 +292,49 @@ function announceAdaptiveShift(zones, cwd) {
   };
   writeAnnounceState(state);
   return msg;
+}
+
+// ── stablePrefix drift check ─────────────────────────────────────────────
+// When `compact.stablePrefix` is enabled, the text SI emits on PreCompact
+// is supposed to be byte-stable across compacts of the same working set —
+// that's the whole point of the feature. If it silently mutates (e.g. a
+// refactor leaked a timestamp or a call count into the "stable" path), the
+// cache-hit promise breaks without any visible error. This helper fingerprints
+// the emitted block per-cwd and warns when the fingerprint moves between
+// compacts. Writes to /tmp so state is per-machine, never shipped.
+
+const PREFIX_DIR = os.tmpdir();
+
+function prefixHashPath(cwdKey) {
+  const safe = crypto.createHash('sha256').update(String(cwdKey || 'default')).digest('hex').slice(0, 16);
+  return path.join(PREFIX_DIR, `claude-compact-prefix-${safe}.json`);
+}
+
+/**
+ * Hash the stable-prefix text, compare to the prior recorded hash for this
+ * cwd, and record the new hash. Returns:
+ *   - { drifted: false, firstRun: true, newHash } when there's no prior
+ *   - { drifted: false, newHash } when hash matches the prior
+ *   - { drifted: true, prevHash, newHash, ageSec } when it changed
+ */
+function compareStablePrefixHash(cwdKey, prefixText) {
+  const newHash = crypto.createHash('sha256').update(prefixText || '').digest('hex');
+  const p = prefixHashPath(cwdKey);
+  let prev = null;
+  try { prev = JSON.parse(fs.readFileSync(p, 'utf8')); }
+  catch { /* first run or corrupt */ }
+  const now = Date.now();
+  try {
+    fs.writeFileSync(p, JSON.stringify({ hash: newHash, t: now }));
+  } catch { /* best effort */ }
+  if (!prev || typeof prev.hash !== 'string') {
+    return { drifted: false, firstRun: true, newHash };
+  }
+  if (prev.hash === newHash) {
+    return { drifted: false, newHash };
+  }
+  const ageSec = Number.isFinite(prev.t) ? Math.round((now - prev.t) / 1000) : null;
+  return { drifted: true, prevHash: prev.hash, newHash, ageSec };
 }
 
 // ── Snapshot (per-session, ephemeral) ────────────────────────────────────
@@ -421,10 +475,11 @@ function upgradeHistoryRegret(snap) {
   const regretWeight = sumWeights(regrets);
   const positiveWeight = sumWeights(positives);
   const softRegretWeight = sumWeights(softRegrets);
-  // Soft regret intentionally does NOT feed continuationQuality yet.
-  // The Q1 follow-up is to accumulate data first; wire soft regret into
-  // adaptiveZones/continuationQuality in a later pass once we can see
-  // whether the signal is high-enough quality to act on.
+  // Soft regret feeds adaptiveZones (summed into regretRate alongside hard
+  // regret) but still NOT into continuationQuality — that score is an
+  // intent-proxy ("did compact focus attention on the right dirs?"), and
+  // WARM touches are too noisy to say yes/no on that question. Keep it
+  // out until per-repo data tells us it's high-signal.
   const denom = positiveWeight + regretWeight;
   const continuationQuality = denom > 0
     ? Number(((positiveWeight - regretWeight) / denom).toFixed(2))
@@ -446,6 +501,15 @@ function upgradeHistoryRegret(snap) {
         }
         if (continuationQuality !== null) {
           parsed[i].continuationQuality = continuationQuality;
+        }
+        // Cache-hit telemetry measured by token-budget from the first
+        // post-compact assistant turn. Validates whether stablePrefix is
+        // actually getting served from cache — the "verbose metrics for
+        // −90% read cost" trade only makes sense if the cache hits.
+        if (Number.isFinite(snap.postCompactCacheHitRatio)) {
+          parsed[i].postCompactCacheHitRatio = snap.postCompactCacheHitRatio;
+          parsed[i].postCompactCacheRead = snap.postCompactCacheRead || 0;
+          parsed[i].postCompactCacheCreation = snap.postCompactCacheCreation || 0;
         }
         fs.writeFileSync(
           HISTORY_FILE,
@@ -470,6 +534,8 @@ module.exports = {
   clearSnapshot,
   checkPostCompactRegret,
   regretWeightFor,
+  compareStablePrefixHash,
+  prefixHashPath,
   _thresholds: {
     MIN_SAMPLES_FOR_ADAPTIVE,
     ADAPTIVE_BOUND,

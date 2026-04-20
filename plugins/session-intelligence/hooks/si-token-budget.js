@@ -244,6 +244,39 @@ async function main() {
           { err: err && err.message });
       }
     }
+
+    // Post-compact cache-hit telemetry: while the regret window is still open
+    // (first 30 calls / 30 min), try to read the first assistant turn that
+    // landed AFTER the snapshot's t and stamp its cache-hit ratio on the
+    // snapshot. upgradeHistoryRegret copies it to the persistent history
+    // entry on window close. Fires at most once per compact — snapshot
+    // carries `postCompactCacheMeasured` as a one-shot flag.
+    if (compactHistory && parsedInput && parsedInput.transcript_path) {
+      try {
+        const snap = compactHistory.readSnapshot(sessionId);
+        if (snap && Number.isFinite(snap.t) && !snap.postCompactCacheMeasured) {
+          const costEst = require(path.join(SI_LIB, 'cost-estimation'));
+          const u = costEst.firstAssistantUsageAfter(parsedInput.transcript_path, snap.t);
+          if (u) {
+            const ratio = costEst.cacheHitRatio(u);
+            snap.postCompactCacheMeasured = true;
+            if (ratio !== null) {
+              snap.postCompactCacheHitRatio = Number(ratio.toFixed(3));
+              snap.postCompactCacheRead = u.cache_read_input_tokens || 0;
+              snap.postCompactCacheCreation = u.cache_creation_input_tokens || 0;
+            }
+            compactHistory.writeSnapshot(sessionId, snap);
+            intelLog('token-budget', 'info', 'post-compact cache-hit measured',
+              { ratio: snap.postCompactCacheHitRatio,
+                read: snap.postCompactCacheRead,
+                creation: snap.postCompactCacheCreation });
+          }
+        }
+      } catch (err) {
+        intelLog('token-budget', 'debug', 'cache-hit measurement failed',
+          { err: err && err.message });
+      }
+    }
   } catch (err) {
     intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });
   }

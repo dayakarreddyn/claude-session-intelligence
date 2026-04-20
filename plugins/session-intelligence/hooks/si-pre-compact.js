@@ -372,6 +372,37 @@ async function main() {
     });
   }
 
+  // stablePrefix drift check — when the opt-in cache-friendly mode is on,
+  // fingerprint the emitted block per-cwd. If the fingerprint moves between
+  // compacts of the same working set, something that was supposed to be
+  // stable leaked a volatile value; warn so the regression is loud rather
+  // than silent. The NEXT footer is intentionally excluded — its presence
+  // is already deterministic w.r.t. the same inputs as the rest of the block.
+  if (stablePrefix && compactHistory && compactHistory.compareStablePrefixHash) {
+    try {
+      const prefixText = (hints || '') + (shapeInjection || '')
+        + (memoryOffload || '') + (prioritiesReview || '');
+      if (prefixText) {
+        const cmp = compactHistory.compareStablePrefixHash(cwd || 'default', prefixText);
+        if (cmp.drifted) {
+          intelLog('pre-compact', 'warn', 'stablePrefix drifted across compacts',
+            { prevHash: cmp.prevHash.slice(0, 12),
+              newHash: cmp.newHash.slice(0, 12),
+              ageSec: cmp.ageSec, cwd });
+        } else if (cmp.firstRun) {
+          intelLog('pre-compact', 'debug', 'stablePrefix fingerprint recorded',
+            { newHash: cmp.newHash.slice(0, 12), cwd });
+        } else {
+          intelLog('pre-compact', 'debug', 'stablePrefix hash matched prior compact',
+            { hash: cmp.newHash.slice(0, 12), cwd });
+        }
+      }
+    } catch (err) {
+      intelLog('pre-compact', 'debug', 'stablePrefix drift check failed',
+        { err: err && err.message });
+    }
+  }
+
   // Continue-hint footer. Claude Code pauses for user input after /compact
   // and won't auto-fire SessionStart until the user types something, so the
   // resume banner only appears after that input. Surface the hint at the

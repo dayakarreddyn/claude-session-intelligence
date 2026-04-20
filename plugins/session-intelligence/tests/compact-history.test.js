@@ -286,6 +286,140 @@ test('upgradeHistoryRegret stamps softRegretCount on window close', () => {
   assert.equal(stamped.continuationQuality, undefined);
 });
 
+// ── stablePrefix drift check ─────────────────────────────────────────────
+
+test('compareStablePrefixHash reports firstRun on fresh cwd', () => {
+  const cwd = '/tmp/si-drift-test-fresh-' + Date.now();
+  try { fs.unlinkSync(compactHistory.prefixHashPath(cwd)); } catch { /* first run */ }
+  const out = compactHistory.compareStablePrefixHash(cwd, 'hello world');
+  assert.equal(out.drifted, false);
+  assert.equal(out.firstRun, true);
+  assert.ok(out.newHash.length === 64);
+});
+
+test('compareStablePrefixHash reports no drift when text unchanged', () => {
+  const cwd = '/tmp/si-drift-test-stable-' + Date.now();
+  try { fs.unlinkSync(compactHistory.prefixHashPath(cwd)); } catch { /* first run */ }
+  compactHistory.compareStablePrefixHash(cwd, 'same text');
+  const out = compactHistory.compareStablePrefixHash(cwd, 'same text');
+  assert.equal(out.drifted, false);
+  assert.equal(out.firstRun, undefined);
+});
+
+test('compareStablePrefixHash flags drift when text mutates', () => {
+  const cwd = '/tmp/si-drift-test-drift-' + Date.now();
+  try { fs.unlinkSync(compactHistory.prefixHashPath(cwd)); } catch { /* first run */ }
+  compactHistory.compareStablePrefixHash(cwd, 'version one');
+  const out = compactHistory.compareStablePrefixHash(cwd, 'version two');
+  assert.equal(out.drifted, true);
+  assert.ok(out.prevHash);
+  assert.notEqual(out.prevHash, out.newHash);
+  assert.ok(Number.isFinite(out.ageSec));
+});
+
+test('compareStablePrefixHash keys separately per cwd', () => {
+  const a = '/tmp/si-drift-a-' + Date.now();
+  const b = '/tmp/si-drift-b-' + Date.now();
+  for (const c of [a, b]) {
+    try { fs.unlinkSync(compactHistory.prefixHashPath(c)); } catch { /* first run */ }
+  }
+  compactHistory.compareStablePrefixHash(a, 'text A');
+  const out = compactHistory.compareStablePrefixHash(b, 'text B');
+  assert.equal(out.firstRun, true, 'second cwd should not inherit first cwd hash');
+});
+
+test('upgradeHistoryRegret stamps postCompactCacheHitRatio when present on snapshot', () => {
+  resetHistory();
+  const t = Date.now();
+  compactHistory.appendHistory(fakeEntry({
+    t, tokens: 250000, cost: 100,
+    hotDirs: ['src/auth'], droppedDirs: [],
+  }));
+  const sid = 'test-cachehit-' + t;
+  compactHistory.writeSnapshot(sid, {
+    t,
+    tokens: 250000,
+    cost: 100,
+    hotDirs: ['src/auth'],
+    warmDirs: [],
+    droppedDirs: [],
+    callsSince: 30,
+    positiveHits: [{ t: t + 1, root: 'src/auth', tool: 'Read', weight: 1.0 }],
+    regretHits: [],
+    softRegretHits: [],
+    postCompactCacheMeasured: true,
+    postCompactCacheHitRatio: 0.92,
+    postCompactCacheRead: 92000,
+    postCompactCacheCreation: 8000,
+  });
+  compactHistory.checkPostCompactRegret(sid, 'other', { toolName: 'Read', toolInput: {} });
+  const raw = fs.readFileSync(compactHistory.HISTORY_FILE, 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const stamped = raw.find((e) => e.t === t);
+  assert.equal(stamped.postCompactCacheHitRatio, 0.92);
+  assert.equal(stamped.postCompactCacheRead, 92000);
+  assert.equal(stamped.postCompactCacheCreation, 8000);
+});
+
+test('upgradeHistoryRegret skips cache-hit fields when snapshot lacks them', () => {
+  resetHistory();
+  const t = Date.now();
+  compactHistory.appendHistory(fakeEntry({ t, hotDirs: ['src/auth'] }));
+  const sid = 'test-nocache-' + t;
+  compactHistory.writeSnapshot(sid, {
+    t, tokens: 250000, cost: 100,
+    hotDirs: ['src/auth'], warmDirs: [], droppedDirs: [],
+    callsSince: 30,
+    positiveHits: [{ t: t + 1, root: 'src/auth', tool: 'Read', weight: 1.0 }],
+    regretHits: [], softRegretHits: [],
+  });
+  compactHistory.checkPostCompactRegret(sid, 'other', { toolName: 'Read', toolInput: {} });
+  const raw = fs.readFileSync(compactHistory.HISTORY_FILE, 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const stamped = raw.find((e) => e.t === t);
+  assert.equal(stamped.postCompactCacheHitRatio, undefined);
+});
+
+test('adaptiveZones sums softRegretCount into regret rate', () => {
+  resetHistory();
+  // Five compacts: hard regret = 0 everywhere, but soft regret averages ≥ 1
+  // per compact. Without the wire-through, orange would NOT get pushed out.
+  for (let i = 0; i < 5; i++) {
+    compactHistory.appendHistory(fakeEntry({
+      tokens: 260000,
+      regretCount: 0,
+      softRegretCount: 1.2, // dampened sum; 5 compacts × 1.2 = 6 / 5 compacts = 1.2 rate
+    }));
+  }
+  const defaults = { yellow: 200000, orange: 300000, red: 400000 };
+  const zones = compactHistory.adaptiveZones(compactHistory.readHistory(), defaults, {});
+  assert.equal(zones.adaptive, true);
+  // P50 of 260k → orangeTarget = floor(260000 * 0.9) = 234000.
+  // Regret-rate ≥ 1 triggers 10% push-out: 234000 * 1.1 = 257400 (capped to
+  // orangeMax = 300k * 1.3 = 390k, so 257400 stands).
+  assert.equal(zones.orange, 257400);
+  assert.equal(zones.regretRate, 1.2);
+});
+
+test('adaptiveZones does not push orange out when regret is zero', () => {
+  resetHistory();
+  for (let i = 0; i < 5; i++) {
+    compactHistory.appendHistory(fakeEntry({
+      tokens: 260000,
+      regretCount: 0,
+      softRegretCount: 0,
+    }));
+  }
+  const zones = compactHistory.adaptiveZones(
+    compactHistory.readHistory(),
+    { yellow: 200000, orange: 300000, red: 400000 },
+    {},
+  );
+  // No regret push-out: orange stays at orangeTarget = 234000.
+  assert.equal(zones.orange, 234000);
+  assert.equal(zones.regretRate, 0);
+});
+
 test('soft regret only stamps when there were soft hits', () => {
   resetHistory();
   const t = Date.now();
