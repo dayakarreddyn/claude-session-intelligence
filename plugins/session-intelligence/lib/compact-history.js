@@ -310,22 +310,75 @@ function prefixHashPath(cwdKey) {
   return path.join(PREFIX_DIR, `claude-compact-prefix-${safe}.json`);
 }
 
+// Session-context's "Current Task" / "Key Files" sections are auto-filled
+// from HEAD by the bootstrap hook and mutate on every commit. They're
+// marked with a `<!-- si:autofill sha=<HEAD> -->` sentinel. Hashing them
+// as-is guarantees drift between any two compacts that cross a commit —
+// which is almost every compact. Strip the autofill block (sentinel +
+// the following body until a blank line or next `## ` heading) so the
+// drift check only fires on content that's supposed to be stable.
+function normalizePrefixForHash(text) {
+  if (!text) return '';
+  const lines = String(text).split('\n');
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (/<!--\s*si:autofill\s+sha=[0-9a-f]+\s*-->/i.test(line)) {
+      out.push('<!-- si:autofill -->');
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (line.trim() === '' || /^##\s/.test(line)) {
+        skipping = false;
+        out.push(line);
+        continue;
+      }
+      continue; // drop autofilled body from hash input
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+// Produce the first few line-level differences so drift warnings point at
+// the actual mutation site instead of just hash mismatches. Truncates each
+// side to 120 chars so a leaked blob doesn't flood the intel log.
+function firstDiffLines(prevText, newText, maxLines = 3) {
+  const a = String(prevText || '').split('\n');
+  const b = String(newText || '').split('\n');
+  const diffs = [];
+  const max = Math.max(a.length, b.length);
+  const trim = (s) => (s === undefined ? null : s.slice(0, 120));
+  for (let i = 0; i < max && diffs.length < maxLines; i++) {
+    if (a[i] !== b[i]) {
+      diffs.push({ line: i + 1, prev: trim(a[i]), next: trim(b[i]) });
+    }
+  }
+  return diffs.length ? diffs : null;
+}
+
 /**
  * Hash the stable-prefix text, compare to the prior recorded hash for this
  * cwd, and record the new hash. Returns:
  *   - { drifted: false, firstRun: true, newHash } when there's no prior
  *   - { drifted: false, newHash } when hash matches the prior
- *   - { drifted: true, prevHash, newHash, ageSec } when it changed
+ *   - { drifted: true, prevHash, newHash, ageSec, diff } when it changed
+ *
+ * The hash input is normalized to strip autofill blocks — see
+ * `normalizePrefixForHash`. Prior normalized text is persisted so drift
+ * warnings can include a concrete line-level diff preview.
  */
 function compareStablePrefixHash(cwdKey, prefixText) {
-  const newHash = crypto.createHash('sha256').update(prefixText || '').digest('hex');
+  const normalized = normalizePrefixForHash(prefixText);
+  const newHash = crypto.createHash('sha256').update(normalized).digest('hex');
   const p = prefixHashPath(cwdKey);
   let prev = null;
   try { prev = JSON.parse(fs.readFileSync(p, 'utf8')); }
   catch { /* first run or corrupt */ }
   const now = Date.now();
   try {
-    fs.writeFileSync(p, JSON.stringify({ hash: newHash, t: now }));
+    fs.writeFileSync(p, JSON.stringify({ hash: newHash, text: normalized, t: now }));
   } catch { /* best effort */ }
   if (!prev || typeof prev.hash !== 'string') {
     return { drifted: false, firstRun: true, newHash };
@@ -334,7 +387,8 @@ function compareStablePrefixHash(cwdKey, prefixText) {
     return { drifted: false, newHash };
   }
   const ageSec = Number.isFinite(prev.t) ? Math.round((now - prev.t) / 1000) : null;
-  return { drifted: true, prevHash: prev.hash, newHash, ageSec };
+  const diff = firstDiffLines(prev.text, normalized);
+  return { drifted: true, prevHash: prev.hash, newHash, ageSec, diff };
 }
 
 // ── Snapshot (per-session, ephemeral) ────────────────────────────────────
@@ -535,6 +589,7 @@ module.exports = {
   checkPostCompactRegret,
   regretWeightFor,
   compareStablePrefixHash,
+  normalizePrefixForHash,
   prefixHashPath,
   _thresholds: {
     MIN_SAMPLES_FOR_ADAPTIVE,

@@ -388,7 +388,8 @@ async function main() {
           intelLog('pre-compact', 'warn', 'stablePrefix drifted across compacts',
             { prevHash: cmp.prevHash.slice(0, 12),
               newHash: cmp.newHash.slice(0, 12),
-              ageSec: cmp.ageSec, cwd });
+              ageSec: cmp.ageSec, cwd,
+              diff: cmp.diff || null });
         } else if (cmp.firstRun) {
           intelLog('pre-compact', 'debug', 'stablePrefix fingerprint recorded',
             { newHash: cmp.newHash.slice(0, 12), cwd });

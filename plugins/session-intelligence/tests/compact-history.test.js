@@ -328,6 +328,70 @@ test('compareStablePrefixHash keys separately per cwd', () => {
   assert.equal(out.firstRun, true, 'second cwd should not inherit first cwd hash');
 });
 
+test('normalizePrefixForHash strips autofill sentinel and body', () => {
+  const raw = [
+    '## Current Task',
+    '<!-- si:autofill sha=abc1234 -->',
+    'type: feat — something',
+    'description: derived from last commit',
+    '',
+    '## Key Files',
+    '<!-- si:autofill sha=abc1234 -->',
+    '- README.md',
+    '- CLAUDE.md',
+    '',
+    '## Stable Section',
+    'content that should survive',
+  ].join('\n');
+  const normalized = compactHistory.normalizePrefixForHash(raw);
+  assert.ok(!/sha=abc1234/.test(normalized), 'autofill sha stripped');
+  assert.ok(!/type: feat/.test(normalized), 'autofilled body stripped');
+  assert.ok(!/README\.md/.test(normalized), 'autofilled file list stripped');
+  assert.ok(/Stable Section/.test(normalized), 'stable sections preserved');
+  assert.ok(/content that should survive/.test(normalized));
+});
+
+test('compareStablePrefixHash ignores autofill-only mutations', () => {
+  const cwd = '/tmp/si-drift-autofill-' + Date.now();
+  try { fs.unlinkSync(compactHistory.prefixHashPath(cwd)); } catch { /* first run */ }
+  const build = (sha, task) => [
+    '## Current Task',
+    `<!-- si:autofill sha=${sha} -->`,
+    `type: feat — ${task}`,
+    '',
+    '## Preserve',
+    '- plugins/session-intelligence',
+  ].join('\n');
+  compactHistory.compareStablePrefixHash(cwd, build('abc1234', 'alpha'));
+  const out = compactHistory.compareStablePrefixHash(cwd, build('def5678', 'bravo'));
+  assert.equal(out.drifted, false,
+    'autofill sha + task body churn should not be treated as drift');
+});
+
+test('compareStablePrefixHash flags real drift in stable content with diff preview', () => {
+  const cwd = '/tmp/si-drift-real-' + Date.now();
+  try { fs.unlinkSync(compactHistory.prefixHashPath(cwd)); } catch { /* first run */ }
+  const v1 = [
+    '## Preserve',
+    '- plugins/session-intelligence',
+    '- docs',
+  ].join('\n');
+  const v2 = [
+    '## Preserve',
+    '- plugins/session-intelligence',
+    '- totally-different',
+  ].join('\n');
+  compactHistory.compareStablePrefixHash(cwd, v1);
+  const out = compactHistory.compareStablePrefixHash(cwd, v2);
+  assert.equal(out.drifted, true);
+  assert.ok(Array.isArray(out.diff), 'diff preview returned on drift');
+  assert.ok(out.diff.length >= 1);
+  const first = out.diff[0];
+  assert.equal(first.line, 3);
+  assert.ok(/docs/.test(first.prev));
+  assert.ok(/totally-different/.test(first.next));
+});
+
 test('upgradeHistoryRegret stamps postCompactCacheHitRatio when present on snapshot', () => {
   resetHistory();
   const t = Date.now();

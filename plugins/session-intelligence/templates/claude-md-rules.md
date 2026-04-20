@@ -55,3 +55,13 @@ The pre-compact block suggests two filenames:
 Always update `MEMORY.md` with a one-line pointer. Don't duplicate prior memory content — update in place.
 
 Disable either surface with `compact.memoryOffload: false` in `~/.claude/session-intelligence.json` or `CLAUDE_COMPACT_MEMORY_OFFLOAD=0`.
+
+#### Tool-Response Archive (post-compact retrieval)
+`si-tool-archive.js` snapshots any tool response larger than `toolArchive.thresholdChars` (default 4096) to `${TMPDIR}/claude-tool-archive-<sid>/<tool_use_id>.json`. After `/compact` erases the body from context, replay it with `/si expand <tool_use_id>` instead of re-running the tool.
+
+When to reach for this:
+- After `/compact`, when you need the full body of a `Read`/`Bash`/`Grep` result that just got summarised away.
+- Before re-running an expensive command — check `/si archive-list` first; the output may already be on disk.
+- When a subagent returned a long report and you want to reference it after compaction without re-delegating.
+
+Disable with `toolArchive.enabled=false` or `CLAUDE_TOOL_ARCHIVE=0` if you don't want the disk writes.
