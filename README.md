@@ -819,6 +819,29 @@ node -e 'const {adaptiveZones, readHistory} = require("~/.claude/plugins/cache/s
 - **ccstatusline / starship / custom statusLines** — the chain wrapper preserves whatever you had
 - **Any Claude Code project** — hooks are global, session-context is per-project
 
+## Ecosystem
+
+Session Intelligence is a **session-level** tool — it decides *when* the whole context should compact and *what* to preserve. A parallel ecosystem of **per-call** token reducers decides *how much each individual tool call costs*. They compose well and solve different problems, so SI doesn't bundle or require any of them.
+
+If you're running one of these alongside SI, `/si status` will surface it under an `Ecosystem` section so you can reason about SI's metrics (zone frequency, cache-hit ratio) in the context of the full stack.
+
+**Per-call output / read-scope reducers**
+- [RTK (Rust Token Killer)](https://github.com/rtk-ai/rtk) — proxy that filters terminal output before it enters the context. Zero dependencies. Detected via `RTK_ENABLED` / `CLAUDE_RTK`.
+- [Context Mode](https://github.com/mksglu/context-mode) — sandboxes raw tool output into SQLite instead of the context window. Large log + GitHub dumps go there instead of into tokens.
+- [Code Review Graph](https://github.com/tirth8205/code-review-graph) — Tree-sitter graph makes Claude read only the symbols that matter on large monorepos.
+- [Token Savior](https://github.com/mibayy/token-savior) — symbol-based code navigation with persistent memory.
+
+**MCP layer**
+- [Token Optimizer MCP](https://github.com/ooples/token-optimizer-mcp) — aggressive caching + compression for MCP tool calls. Detected by MCP server name.
+- [Claude Context](https://github.com/zilliztech/claude-context) — Zilliz hybrid vector-search MCP that turns your codebase into retrieval context. Detected by MCP server name.
+
+**Static terseness**
+- [Claude Token Efficient](https://github.com/drona23/claude-token-efficient) — drop-in `CLAUDE.md` enforcing terse output.
+- [Claude Token Optimizer](https://github.com/nadimtuhin/claude-token-optimizer) — setup prompts that shrink project docs.
+- [Caveman Claude](https://github.com/juliusbrussee/caveman) — caveman-speak output-style for dramatic output-token reduction.
+
+Detection in `/si status` is read-only — it only parses MCP config files and a couple of env markers. It never runs external processes or modifies anything. If you want a tool added to detection, open an issue with the MCP server name or env var.
+
 ## Background
 
 Based on [Thariq's research](https://x.com/trq212/status/2044548257058328723) on Claude Code session management with 1M context:

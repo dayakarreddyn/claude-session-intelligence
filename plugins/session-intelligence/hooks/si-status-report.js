@@ -223,6 +223,68 @@ function collectSession(sid) {
   };
 }
 
+// Partner tools in the Claude Code token-reduction ecosystem. Detection is
+// best-effort and read-only: we look for their MCP server names in user-level
+// MCP config files plus a couple of well-known env markers. Never run external
+// processes and never write anywhere. Purpose is purely informational — show
+// the user which token-reducer tools are active so they can reason about
+// SI's metrics in the context of the full stack.
+const ECOSYSTEM_MCP_NAMES = [
+  { id: 'token-optimizer-mcp', match: /token[-_]?optimizer/i,  note: 'MCP cache + compression (ooples)' },
+  { id: 'claude-context',      match: /claude[-_]?context/i,   note: 'hybrid vector search (zilliztech)' },
+  { id: 'context-mode',        match: /context[-_]?mode/i,     note: 'SQLite sandbox for raw output (mksglu)' },
+];
+
+const ECOSYSTEM_ENV_MARKERS = [
+  { id: 'rtk',           env: 'RTK_ENABLED',           note: 'Rust Token Killer proxy' },
+  { id: 'rtk',           env: 'CLAUDE_RTK',            note: 'Rust Token Killer proxy' },
+  { id: 'caveman-claude', env: 'CAVEMAN_MODE',         note: 'Caveman output mode' },
+];
+
+function mcpServerNamesFromFile(filePath) {
+  const data = readJson(filePath);
+  if (!data) return [];
+  // Two common shapes: top-level `mcpServers` (user MCP config) or nested
+  // under `settings.json`'s `mcpServers` key.
+  const bag = data.mcpServers || (data.mcp && data.mcp.servers) || data.servers;
+  if (!bag || typeof bag !== 'object') return [];
+  return Object.keys(bag);
+}
+
+function collectEcosystem() {
+  const detected = [];
+  const seen = new Set();
+
+  const mcpCandidates = [
+    path.join(CLAUDE_DIR, 'mcp.json'),
+    path.join(CLAUDE_DIR, '.mcp.json'),
+    path.join(CLAUDE_DIR, 'settings.json'),
+    path.join(process.cwd(), '.mcp.json'),
+    path.join(process.cwd(), '.claude', 'mcp.json'),
+  ];
+  const allServerNames = new Set();
+  for (const p of mcpCandidates) {
+    for (const name of mcpServerNamesFromFile(p)) allServerNames.add(name);
+  }
+  for (const name of allServerNames) {
+    for (const partner of ECOSYSTEM_MCP_NAMES) {
+      if (partner.match.test(name) && !seen.has(partner.id)) {
+        detected.push({ id: partner.id, via: `mcp:${name}`, note: partner.note });
+        seen.add(partner.id);
+      }
+    }
+  }
+
+  for (const marker of ECOSYSTEM_ENV_MARKERS) {
+    if (process.env[marker.env] && !seen.has(marker.id)) {
+      detected.push({ id: marker.id, via: `env:${marker.env}`, note: marker.note });
+      seen.add(marker.id);
+    }
+  }
+
+  return detected;
+}
+
 function collectCompactLog() {
   const log = path.join(CLAUDE_DIR, 'session-data', 'compaction-log.txt');
   try {
@@ -303,6 +365,15 @@ function main() {
   out.push(line('last /compact',
     compactLog ? fmtAge(compactLog.ageMs) : '—'));
   out.push('');
+
+  const ecosystem = collectEcosystem();
+  if (ecosystem.length > 0) {
+    out.push(`Ecosystem (coexisting token-reducer tools)`);
+    for (const e of ecosystem) {
+      out.push(line(e.id, `${e.note}  [${e.via}]`));
+    }
+    out.push('');
+  }
 
   if (config.debug?.enabled) out.push('(debug logging ON — ~/.claude/logs/session-intel-YYYY-MM-DD.log)');
   if (config.debug?.quiet)   out.push('(quiet mode ON — errors only)');
