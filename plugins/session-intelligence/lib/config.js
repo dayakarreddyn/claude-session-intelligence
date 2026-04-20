@@ -25,27 +25,25 @@ const os = require('os');
 const STATUSLINE_PRESETS = {
   minimal:  ['tokens'],
   standard: ['model', 'project', 'tokens', 'newline', 'task'],
-  // 4-line layout: zone bar gets its own top row so the warning signal has
-  // maximum visual weight; identity/repo context on line 2; session activity
-  // on line 3; token economics on line 4.
+  // 3-line layout:
+  //   Line 1: zone bar + compactAge — the two fields that ESCALATE colour,
+  //           both in one row so the "act now" signal is unified.
+  //   Line 2: identity / repo / task context — dim.
+  //   Line 3: session activity + token economics — dim.
   verbose:  [
-    'tokens',
+    'tokens', 'compactAge',
     'newline',
     'model', 'project', 'branch', 'diffstat', 'task',
     'newline',
-    'session', 'tools', 'cost', 'compactAge',
-    'newline',
-    'tokenFlow', 'cacheHit', 'cacheSaved',
+    'session', 'tools', 'cost', 'tokenFlow', 'cacheHit', 'cacheSaved',
   ],
-  // Token-economics focus — same 4-line skeleton, more cache detail on line 4.
+  // Token-economics focus — same 3-line skeleton, adds cacheTokens.
   'verbose-cache':  [
-    'tokens',
+    'tokens', 'compactAge',
     'newline',
     'model', 'project', 'task',
     'newline',
-    'session', 'tools', 'cost', 'compactAge',
-    'newline',
-    'tokenFlow', 'cacheHit', 'cacheTokens', 'cacheSaved',
+    'session', 'tools', 'cost', 'tokenFlow', 'cacheHit', 'cacheTokens', 'cacheSaved',
   ],
 };
 

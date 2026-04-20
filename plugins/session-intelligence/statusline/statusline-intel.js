@@ -103,13 +103,11 @@ function loadConfig() {
   const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
   const defaults = {
     fields: [
-      'tokens',
+      'tokens', 'compactAge',
       'newline',
       'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'task',
       'newline',
-      'emoji2', 'session', 'tools', 'cost', 'deploy', 'compactAge',
-      'newline',
-      'tokenFlow', 'cacheHit', 'cacheSaved',
+      'emoji2', 'session', 'tools', 'cost', 'deploy', 'tokenFlow', 'cacheHit', 'cacheSaved',
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
@@ -799,25 +797,26 @@ function buildRenderers(C) {
     },
 
     /**
-     * Cumulative token flow across the session, Claude-Code-style compact
-     * breakdown: `<total> ↓<in> ↑<out> c<cached>` where
-     *   total   = input + cache_creation + cache_read + output  (all tokens
-     *             Anthropic billed for, whichever rate applied)
-     *   ↓ in    = input_tokens + cache_creation_input_tokens   (everything
-     *             ingressed this session — both novel input and first-time
-     *             prompt bytes that got written into the cache)
-     *   ↑ out   = output_tokens                                (model output)
-     *   c       = cache_read_input_tokens                       (served from
-     *             cache at ~10% of the input rate)
-     * Hidden when no transcript data is available yet.
+     * Cumulative token flow across the session, format matching ccstatusline
+     * and Claude Code's own context-window summary so both surfaces agree
+     * on the same numbers. `<total> ↓<in> ↑<out> c<cached>`:
+     *   total = input + cache_creation + cache_read + output  (all tokens
+     *           Anthropic billed for at any rate)
+     *   ↓ in  = input_tokens                                  (fresh, uncached
+     *           input — what you paid the full input rate for)
+     *   ↑ out = output_tokens                                 (model output)
+     *   c     = cache_read + cache_creation                   (all cache
+     *           activity — reads served AND first-time writes)
+     * Invariant: in + out + c = total, so the three components partition the
+     * session's token spend cleanly. Hidden when no transcript data yet.
      */
     tokenFlow: (_input, ctx) => {
       const t = ctx.tokenTotals;
       if (!t) return '';
       const total = t.input + t.output + t.cached + t.creation;
       if (total <= 0) return '';
-      const inBytes = t.input + t.creation;
-      return `${C.dim}${fmtTokens(total)} ↓${fmtTokens(inBytes)} ↑${fmtTokens(t.output)} c${fmtTokens(t.cached)}${C.reset}`;
+      const cacheActivity = t.cached + t.creation;
+      return `${C.dim}${fmtTokens(total)} ↓${fmtTokens(t.input)} ↑${fmtTokens(t.output)} c${fmtTokens(cacheActivity)}${C.reset}`;
     },
 
     /**
