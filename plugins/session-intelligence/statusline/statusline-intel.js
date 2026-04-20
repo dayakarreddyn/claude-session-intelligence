@@ -103,11 +103,13 @@ function loadConfig() {
   const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
   const defaults = {
     fields: [
-      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'tokens',
+      'tokens',
       'newline',
-      'emoji2', 'session', 'tools', 'cost', 'deploy', 'task',
+      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'task',
       'newline',
-      'cacheHit', 'cacheTokens', 'cacheSaved', 'compactAge',
+      'emoji2', 'session', 'tools', 'cost', 'deploy', 'compactAge',
+      'newline',
+      'tokenFlow', 'cacheHit', 'cacheSaved',
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
@@ -797,6 +799,28 @@ function buildRenderers(C) {
     },
 
     /**
+     * Cumulative token flow across the session, Claude-Code-style compact
+     * breakdown: `<total> ↓<in> ↑<out> c<cached>` where
+     *   total   = input + cache_creation + cache_read + output  (all tokens
+     *             Anthropic billed for, whichever rate applied)
+     *   ↓ in    = input_tokens + cache_creation_input_tokens   (everything
+     *             ingressed this session — both novel input and first-time
+     *             prompt bytes that got written into the cache)
+     *   ↑ out   = output_tokens                                (model output)
+     *   c       = cache_read_input_tokens                       (served from
+     *             cache at ~10% of the input rate)
+     * Hidden when no transcript data is available yet.
+     */
+    tokenFlow: (_input, ctx) => {
+      const t = ctx.tokenTotals;
+      if (!t) return '';
+      const total = t.input + t.output + t.cached + t.creation;
+      if (total <= 0) return '';
+      const inBytes = t.input + t.creation;
+      return `${C.dim}${fmtTokens(total)} ↓${fmtTokens(inBytes)} ↑${fmtTokens(t.output)} c${fmtTokens(t.cached)}${C.reset}`;
+    },
+
+    /**
      * Git diff-stat: (+N,-M) across all uncommitted changes in HEAD + untracked.
      * Skipped silently when clean. All dim — see colour policy above.
      */
@@ -921,7 +945,7 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
  * implementation so both renderers see the same offsets.
  */
 function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0 };
+  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0 };
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
   let stat;
@@ -933,6 +957,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedOffset = 0;
   let cachedCost = 0;
   let cachedSaved = 0;
+  let cachedInput = 0;
+  let cachedOutput = 0;
+  let cachedCacheRead = 0;
+  let cachedCreation = 0;
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -940,17 +968,34 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedOffset = cached.offset;
       cachedCost = cached.cost;
       cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
+      cachedInput = typeof cached.input === 'number' ? cached.input : 0;
+      cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
+      cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
+      cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
 
   // File shrank (rotation / clear) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; cachedSaved = 0; }
+  if (stat.size < cachedOffset) {
+    cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
+    cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+  }
 
   // No new bytes — short-circuit the I/O entirely.
-  if (stat.size === cachedOffset) return { cost: cachedCost, saved: cachedSaved };
+  if (stat.size === cachedOffset) {
+    return {
+      cost: cachedCost, saved: cachedSaved,
+      input: cachedInput, output: cachedOutput,
+      cached: cachedCacheRead, creation: cachedCreation,
+    };
+  }
 
   let newCost = cachedCost;
   let newSaved = cachedSaved;
+  let newInput = cachedInput;
+  let newOutput = cachedOutput;
+  let newCacheRead = cachedCacheRead;
+  let newCreation = cachedCreation;
   let newOffset = cachedOffset;
   try {
     const fd = fs.openSync(transcriptPath, 'r');
@@ -969,20 +1014,37 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
             if (u) {
               newCost += costFromUsage(u, prices);
               newSaved += savedFromUsage(u, prices);
+              newInput += u.input_tokens || 0;
+              newOutput += u.output_tokens || 0;
+              newCacheRead += u.cache_read_input_tokens || 0;
+              newCreation += u.cache_creation_input_tokens || 0;
             }
           } catch { /* invalid line — skip */ }
         }
         newOffset = cachedOffset + lastNl + 1;
       }
     } finally { fs.closeSync(fd); }
-  } catch { return { cost: cachedCost, saved: cachedSaved }; }
+  } catch {
+    return {
+      cost: cachedCost, saved: cachedSaved,
+      input: cachedInput, output: cachedOutput,
+      cached: cachedCacheRead, creation: cachedCreation,
+    };
+  }
 
   try {
-    fs.writeFileSync(cacheFile,
-      JSON.stringify({ offset: newOffset, cost: newCost, saved: newSaved }), 'utf8');
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      offset: newOffset, cost: newCost, saved: newSaved,
+      input: newInput, output: newOutput,
+      cached: newCacheRead, creation: newCreation,
+    }), 'utf8');
   } catch { /* best effort */ }
 
-  return { cost: newCost, saved: newSaved };
+  return {
+    cost: newCost, saved: newSaved,
+    input: newInput, output: newOutput,
+    cached: newCacheRead, creation: newCreation,
+  };
 }
 
 // ─── Session duration ────────────────────────────────────────────────────────
@@ -1090,19 +1152,22 @@ function main() {
   // configured to avoid paying for the read when it's unused.
   let costUsd = 0;
   let cacheSavedUsd = 0;
+  let tokenTotals = null;
   const wantCost = cfg.fields.includes('cost');
   const wantCacheSaved = cfg.fields.includes('cacheSaved');
-  if (wantCost || wantCacheSaved) {
+  const wantTokenFlow = cfg.fields.includes('tokenFlow');
+  if (wantCost || wantCacheSaved || wantTokenFlow) {
     const officialCost = input.cost && typeof input.cost === 'object'
       ? Number(input.cost.total_cost_usd)
       : Number(input.total_cost_usd);
-    if (wantCost && Number.isFinite(officialCost) && officialCost > 0 && !wantCacheSaved) {
+    if (wantCost && Number.isFinite(officialCost) && officialCost > 0
+        && !wantCacheSaved && !wantTokenFlow) {
       costUsd = officialCost;
     } else {
-      const totals = totalsFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
+      tokenTotals = totalsFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
       costUsd = (wantCost && Number.isFinite(officialCost) && officialCost > 0)
-        ? officialCost : totals.cost;
-      cacheSavedUsd = totals.saved;
+        ? officialCost : tokenTotals.cost;
+      cacheSavedUsd = tokenTotals.saved;
     }
   }
 
@@ -1133,6 +1198,7 @@ function main() {
     sessionDurationMs,
     costUsd,
     cacheSavedUsd,
+    tokenTotals,
     usedTranscript,
     usage,
     thinking,

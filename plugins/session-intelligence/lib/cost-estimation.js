@@ -80,10 +80,11 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
  * read picks up from the offset, so only tail-bytes get re-counted for saved).
  */
 function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return { cost: 0, saved: 0 };
+  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0 };
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
   let stat;
-  try { stat = fs.statSync(transcriptPath); } catch { return { cost: 0, saved: 0 }; }
+  try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
   const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
@@ -91,6 +92,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedOffset = 0;
   let cachedCost = 0;
   let cachedSaved = 0;
+  let cachedInput = 0;
+  let cachedOutput = 0;
+  let cachedCacheRead = 0;
+  let cachedCreation = 0;
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -98,15 +103,32 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedOffset = cached.offset;
       cachedCost = cached.cost;
       cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
+      cachedInput = typeof cached.input === 'number' ? cached.input : 0;
+      cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
+      cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
+      cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
 
   // File shrank (rotation / compact) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) { cachedOffset = 0; cachedCost = 0; cachedSaved = 0; }
-  if (stat.size === cachedOffset) return { cost: cachedCost, saved: cachedSaved };
+  if (stat.size < cachedOffset) {
+    cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
+    cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+  }
+  if (stat.size === cachedOffset) {
+    return {
+      cost: cachedCost, saved: cachedSaved,
+      input: cachedInput, output: cachedOutput,
+      cached: cachedCacheRead, creation: cachedCreation,
+    };
+  }
 
   let newCost = cachedCost;
   let newSaved = cachedSaved;
+  let newInput = cachedInput;
+  let newOutput = cachedOutput;
+  let newCacheRead = cachedCacheRead;
+  let newCreation = cachedCreation;
   let newOffset = cachedOffset;
   try {
     const fd = fs.openSync(transcriptPath, 'r');
@@ -125,20 +147,37 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
             if (u) {
               newCost += costFromUsage(u, prices);
               newSaved += savedFromUsage(u, prices);
+              newInput += u.input_tokens || 0;
+              newOutput += u.output_tokens || 0;
+              newCacheRead += u.cache_read_input_tokens || 0;
+              newCreation += u.cache_creation_input_tokens || 0;
             }
           } catch { /* invalid line — skip */ }
         }
         newOffset = cachedOffset + lastNl + 1;
       }
     } finally { fs.closeSync(fd); }
-  } catch { return { cost: cachedCost, saved: cachedSaved }; }
+  } catch {
+    return {
+      cost: cachedCost, saved: cachedSaved,
+      input: cachedInput, output: cachedOutput,
+      cached: cachedCacheRead, creation: cachedCreation,
+    };
+  }
 
   try {
-    fs.writeFileSync(cacheFile,
-      JSON.stringify({ offset: newOffset, cost: newCost, saved: newSaved }), 'utf8');
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      offset: newOffset, cost: newCost, saved: newSaved,
+      input: newInput, output: newOutput,
+      cached: newCacheRead, creation: newCreation,
+    }), 'utf8');
   } catch { /* best effort */ }
 
-  return { cost: newCost, saved: newSaved };
+  return {
+    cost: newCost, saved: newSaved,
+    input: newInput, output: newOutput,
+    cached: newCacheRead, creation: newCreation,
+  };
 }
 
 /**

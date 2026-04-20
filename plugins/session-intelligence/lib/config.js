@@ -25,20 +25,27 @@ const os = require('os');
 const STATUSLINE_PRESETS = {
   minimal:  ['tokens'],
   standard: ['model', 'project', 'tokens', 'newline', 'task'],
+  // 4-line layout: zone bar gets its own top row so the warning signal has
+  // maximum visual weight; identity/repo context on line 2; session activity
+  // on line 3; token economics on line 4.
   verbose:  [
-    'model', 'project', 'branch', 'diffstat', 'tokens',
+    'tokens',
     'newline',
-    'session', 'tools', 'cost', 'task',
+    'model', 'project', 'branch', 'diffstat', 'task',
     'newline',
-    'cacheHit', 'cacheTokens', 'cacheSaved', 'compactAge',
+    'session', 'tools', 'cost', 'compactAge',
+    'newline',
+    'tokenFlow', 'cacheHit', 'cacheSaved',
   ],
-  // Token economics focus — smaller primary bar, dedicated line for cache stats.
+  // Token-economics focus — same 4-line skeleton, more cache detail on line 4.
   'verbose-cache':  [
-    'model', 'project', 'tokens',
+    'tokens',
     'newline',
-    'session', 'tools', 'cost', 'task',
+    'model', 'project', 'task',
     'newline',
-    'cacheHit', 'cacheTokens', 'cacheSaved',
+    'session', 'tools', 'cost', 'compactAge',
+    'newline',
+    'tokenFlow', 'cacheHit', 'cacheTokens', 'cacheSaved',
   ],
 };
 

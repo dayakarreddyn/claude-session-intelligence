@@ -232,6 +232,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `thinking` | `think:32k` | Estimated extended-thinking tokens in recent assistant turns. Residual of `output_tokens` after subtracting visible text + tool_use content on turns with `thinking` blocks. Rendered only when the recent-window estimate crosses `statusline.thinkingMinDisplay` (default 5k). Opt-in — add to `fields` to enable (dim) |
 | `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open (dim) |
 | `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (dim; prices configurable) |
+| `tokenFlow` | `75.3M ↓60.4k ↑600.2k c74.9M` | **Cumulative** token breakdown across the session. `total` sums all four usage fields; `↓ in` = `input_tokens + cache_creation_input_tokens` (everything ingressed); `↑ out` = `output_tokens`; `c` = `cache_read_input_tokens` (served from cache). One incremental transcript pass shared with `cost` / `cacheSaved` (dim) |
 | `cacheHit` | `cache:92%` | Live prompt-cache hit ratio on the latest assistant turn: `cache_read / (cache_read + cache_creation)`. Dim green ≥70%, dim yellow 30–70%, dim red <30%. Hidden on turns with no cacheable prefix (first turn of a session). The one coloured field on line 3 — colour escalates when `compact.stablePrefix` isn't paying off (low cache-hit on a stable working set) |
 | `cacheTokens` | `prefix:120k/3k` | Latest turn's prefix breakdown — `<cache_read>/<cache_creation>` tokens. Low read + high creation on a stable working set is the warning sign that `stablePrefix` is leaking a volatile value somewhere. Dim |
 | `cacheSaved` | `saved:$2.83` | **Cumulative** USD saved across the session by cache hits vs. paying the uncached input rate for the same tokens. Hidden when savings are under $0.10 (not worth the field) (dim) |
@@ -252,8 +253,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | line 1: `model`, `project`, `branch`, `diffstat`, `tokens` · line 2: `session`, `tools`, `cost`, `task` · line 3: `cacheHit`, `cacheTokens`, `cacheSaved`, `compactAge` |
-| `verbose-cache` | Token-economics-focused — smaller line 1 (`model`, `project`, `tokens`), standard line 2, full cache line 3 |
+| `verbose` (default) | 4 lines. Line 1: `tokens` (dedicated zone bar) · Line 2: `model`, `project`, `branch`, `diffstat`, `task` · Line 3: `session`, `tools`, `cost`, `compactAge` · Line 4: `tokenFlow`, `cacheHit`, `cacheSaved` |
+| `verbose-cache` | 4 lines, token-economics-focused. Line 2 trimmed, line 4 includes `cacheTokens` for per-turn prefix breakdown |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
 
