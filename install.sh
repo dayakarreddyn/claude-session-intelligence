@@ -94,6 +94,47 @@ if [ "$FORCE_LEGACY" = false ] && [ -f "$INSTALLED_PLUGINS_JSON" ]; then
   fi
 fi
 
+# ─── 1a. Refresh plugin cache (when plugin is installed) ───
+#
+# `/plugin install session-intelligence@session-intelligence` is a no-op
+# for cache content when `plugin.json.version` hasn't bumped — it registers
+# the scope entry in `installed_plugins.json` but reuses whatever is already
+# at `installPath`. Without an rsync, in-tree edits never reach the live
+# plugin cache that `CLAUDE_PLUGIN_ROOT` points at, so hooks + statusline
+# silently run the stale cached version (easy-to-miss footgun: UI looks
+# "wrong" after a /plugin install because it's running old code).
+#
+# Fix: on every `install.sh` run with a detected plugin install, rsync the
+# source tree into every `installPath` listed for this plugin. One
+# statement, uses `installed_plugins.json` as the source of truth for where
+# the cache lives (so multi-scope installs all stay in sync).
+if [ "$PLUGIN_INSTALLED" = true ]; then
+  CACHE_PATHS="$(node -e "
+    try {
+      const j = JSON.parse(require('fs').readFileSync('${INSTALLED_PLUGINS_JSON}','utf8'));
+      const entries = (j && j.plugins && j.plugins['session-intelligence@session-intelligence']) || [];
+      const paths = Array.from(new Set(entries.map(e => e.installPath).filter(Boolean)));
+      process.stdout.write(paths.join('\n'));
+    } catch {}
+  " 2>/dev/null)"
+
+  if [ -n "$CACHE_PATHS" ] && command -v rsync &>/dev/null; then
+    while IFS= read -r cache; do
+      [ -z "$cache" ] && continue
+      if [ -d "$cache" ]; then
+        rsync -a --delete \
+          --exclude='.git/' --exclude='node_modules/' --exclude='tests/' \
+          "${PLUGIN_SRC}/" "${cache}/" \
+          && ok "Refreshed plugin cache → ${cache}"
+      else
+        warn "Plugin cache path missing: ${cache} (skipped)"
+      fi
+    done <<< "$CACHE_PATHS"
+  elif [ -n "$CACHE_PATHS" ]; then
+    warn "rsync not found — skipping plugin cache refresh. Install rsync or re-run /plugin install."
+  fi
+fi
+
 # ─── 1. Install hooks + shared lib ──────────────────
 
 mkdir -p "$HOOKS_DIR" "$LIB_DIR" "$SCRIPTS_DIR" "$LOGS_DIR" "$COMMANDS_DIR"

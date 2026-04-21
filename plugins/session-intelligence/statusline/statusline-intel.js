@@ -39,6 +39,14 @@ const { execFileSync } = require('child_process');
 // overrides silently no-op'd — now covered.
 function resolveLibDir() {
   const candidates = [
+    // 1. Plugin cache (canonical when installed via `/plugin install`). This
+    //    MUST win over any legacy copies in ~/.claude/scripts/hooks/ — those
+    //    diverge on every install.sh rsync because install.sh only populates
+    //    LIB_DIR when the plugin is NOT detected. Checking plugin cache first
+    //    keeps the standalone ~/.claude/scripts/statusline-intel.js working
+    //    even when the legacy lib dir is empty.
+    path.join(require('os').homedir(), '.claude', 'plugins', 'cache',
+              'session-intelligence', 'session-intelligence', '1.0.0', 'lib'),
     path.join(__dirname, '..', 'lib'),
     path.join(__dirname, 'lib'),
     path.join(__dirname, 'hooks', 'session-intelligence', 'lib'),
