@@ -754,6 +754,22 @@ function buildRenderers(C) {
     },
 
     /**
+     * Combined cost + cache-savings: `c$0.45 / s$1.23`. Merges what used to be
+     * two adjacent fields (`cost` + `cacheSaved`) into one token-economics
+     * cell so line 2 stays compact. Omits either side when zero; hides
+     * entirely when both are zero.
+     */
+    costSaved: (_input, ctx) => {
+      const cost = ctx.costUsd || 0;
+      const saved = ctx.cacheSavedUsd || 0;
+      const parts = [];
+      if (cost > 0) parts.push(`c$${cost.toFixed(2)}`);
+      if (saved >= 0.1) parts.push(`s$${saved.toFixed(2)}`);
+      if (!parts.length) return '';
+      return `${C.dim}${parts.join(' / ')}${C.reset}`;
+    },
+
+    /**
      * Live prompt-cache hit ratio from the latest assistant turn's usage
      * block: cache_read / (cache_read + cache_creation). Shown as `cache:92%`.
      * Colour-gated: dim green ≥70% (good hit rate), dim yellow 30-70%
@@ -1160,8 +1176,9 @@ function main() {
   let costUsd = 0;
   let cacheSavedUsd = 0;
   let tokenTotals = null;
-  const wantCost = cfg.fields.includes('cost');
-  const wantCacheSaved = cfg.fields.includes('cacheSaved');
+  const wantCostSaved = cfg.fields.includes('costSaved');
+  const wantCost = cfg.fields.includes('cost') || wantCostSaved;
+  const wantCacheSaved = cfg.fields.includes('cacheSaved') || wantCostSaved;
   const wantTokenFlow = cfg.fields.includes('tokenFlow');
   if (wantCost || wantCacheSaved || wantTokenFlow) {
     const officialCost = input.cost && typeof input.cost === 'object'
