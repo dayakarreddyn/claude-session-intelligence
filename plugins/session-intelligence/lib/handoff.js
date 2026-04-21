@@ -366,8 +366,8 @@ function wrapHandoffForModelEcho(block) {
     '',
     'AFTER printing the block, immediately continue working:',
     '  1. If "Current task" / in-flight files name concrete work, resume it — read the relevant files, make the next edit, run the next check.',
-    '  2. If the current task is finished and "Next priorities" lists a concrete actionable item, pick the top one and start it.',
-    '  3. Only stop to ask the user if BOTH (a) the current task is complete or ambiguous AND (b) there is no actionable next priority. One short line then.',
+    '  2. If the current task is finished, read the "Next-up references" files yourself, verify they\'re still accurate against git log + issues, then pick the top actionable item.',
+    '  3. Only stop to ask the user if BOTH (a) the current task is complete or ambiguous AND (b) no reference surfaces a still-actionable item. One short line then.',
     '',
     'Do not re-announce what you are about to do in prose before tool calls — just start.',
   ].join('\n');
@@ -410,9 +410,18 @@ function renderHandoffBlock(handoff) {
     lines.push('');
   }
 
+  // Don't inject memory bullets here — they go stale fast (issues close
+  // elsewhere, priorities files age out), and a verbatim dump trains the
+  // model to trust a list that may be weeks old. Instead: point to the
+  // reference files and nudge the model to write its own reference_*.md
+  // when it discovers next-up work during the session. Only emit the
+  // pointer when a priority-bearing file actually exists, so a fresh
+  // repo doesn't see a dead-link nudge.
   if (Array.isArray(handoff.nextPriorities) && handoff.nextPriorities.length) {
-    lines.push('Next priorities (from memory):');
-    for (const n of handoff.nextPriorities) lines.push(`  - ${n}`);
+    lines.push('Next-up references (verify before acting — may be stale):');
+    lines.push('  - `memory/MEMORY.md`, `memory/project_next_session_priorities.md`, `session-context.md`');
+    lines.push('  - Cross-check against git log + open issues before picking anything up.');
+    lines.push('  - If you discover new next-up work this session, write it as `memory/reference_<slug>.md` now rather than waiting for the next banner.');
     lines.push('');
   }
 
@@ -433,7 +442,7 @@ function renderHandoffBlock(handoff) {
     lines.push('');
   }
 
-  lines.push('Resume the current task now. Only ask first if the task is finished and no actionable next priority exists, or if `/compact` was meant to change topics (in which case this context is stale).');
+  lines.push('Resume the current task now. Only ask first if the task is finished and no reference surfaces actionable work, or if `/compact` was meant to change topics (in which case this context is stale).');
   return lines.join('\n');
 }
 

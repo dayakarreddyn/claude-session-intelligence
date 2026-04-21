@@ -223,6 +223,27 @@ test('wrapHandoffForModelEcho wraps block with echo directive + markers', () => 
 
 // ─── gitPorcelain truncation sentinel (M1) ───────────────────────────────
 
+test('renderHandoffBlock does not inline priority bullets — points at files instead', () => {
+  // Priority bullets scraped from memory go stale (issues close, projects
+  // move on), so the resume banner should point at the reference files and
+  // ask the model to verify them, NOT dump them verbatim. Regression guard
+  // for the stale-priorities-in-banner complaint.
+  const block = handoff.renderHandoffBlock({
+    t: Date.now(),
+    currentTask: 'wire auth middleware',
+    currentTaskAgeHours: 1.0,
+    nextPriorities: ['#186 fix verify-email 404', '#187 dedup emails on /register'],
+  });
+  assert.doesNotMatch(block, /#186/, 'scraped priority bullet should not appear verbatim');
+  assert.doesNotMatch(block, /#187/, 'scraped priority bullet should not appear verbatim');
+  assert.match(block, /Next-up references/,
+    'banner should point the model at reference files');
+  assert.match(block, /project_next_session_priorities\.md/,
+    'banner should name the canonical priorities file');
+  assert.match(block, /reference_<slug>\.md/,
+    'banner should instruct the model to capture new next-up work as a reference');
+});
+
 test('gitPorcelain truncation sentinel appears when result exceeds 20', () => {
   // Can't easily reproduce 20+ uncommitted files in a test repo; instead,
   // we validate the renderer surfaces the sentinel when present.
