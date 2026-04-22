@@ -25,23 +25,39 @@ const os = require('os');
 const STATUSLINE_PRESETS = {
   minimal:  ['tokens'],
   standard: ['model', 'project', 'tokens', 'newline', 'task'],
-  // 3-line layout:
-  //   Line 1: zone bar + compactAge — the two colour-escalating fields.
-  //   Line 2: session activity + token economics — the live "what's happening
+  // Single-line layout for Claude Code setups that only render one status row
+  // (older builds, tight terminals, or specific rendering modes). Packs the
+  // highest-signal fields into one bar — zone, compact age, spend, identity,
+  // task — at the cost of losing token-flow + cache metrics.
+  oneline: [
+    'tokens', 'compactAge', 'compactCost', 'model', 'project', 'branch', 'task',
+  ],
+  // 4-line layout:
+  //   Line 1: zone bar · compactAge · compactCost · contextPct — colour-
+  //           escalating warning row. contextPct replaces the ccstatusline
+  //           `93.0%` signal so we can retire the 1.5s npx spend.
+  //   Line 2: session activity + token economics — live "what's happening
   //           right now" row at eye level, just below the warning bar.
-  //   Line 3: identity / repo / task — dim reference context at the bottom.
+  //   Line 3: quota + cwd — Claude Code 5h / 7d usage plus working dir.
+  //           Data comes from the cached usage API (180 s TTL, refreshed
+  //           by a detached worker so the hot path never blocks on HTTPS).
+  //   Line 4: identity / repo / task — dim reference context at the bottom.
   verbose:  [
-    'tokens', 'compactAge',
+    'tokens', 'compactAge', 'compactCost',
     'newline',
     'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit',
     'newline',
+    'blockUsage', 'weekUsage', 'cwd',
+    'newline',
     'model', 'project', 'branch', 'diffstat', 'task',
   ],
-  // Token-economics focus — same 3-line skeleton, adds cacheTokens.
+  // Token-economics focus — same 4-line skeleton, adds cacheTokens.
   'verbose-cache':  [
-    'tokens', 'compactAge',
+    'tokens', 'compactAge', 'compactCost',
     'newline',
     'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens',
+    'newline',
+    'blockUsage', 'weekUsage', 'cwd',
     'newline',
     'model', 'project', 'task',
   ],

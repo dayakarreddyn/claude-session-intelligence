@@ -87,6 +87,63 @@ function loadCompactHistoryLib() {
   return null;
 }
 
+function loadUsageApiLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'usage-api.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
+// Cached per-process so blockUsage + weekUsage share one disk read + one
+// "should we kick off a background refresh" decision per render.
+let _usageCached = undefined;
+function loadUsage() {
+  if (_usageCached !== undefined) return _usageCached;
+  const lib = loadUsageApiLib();
+  if (!lib) { _usageCached = null; return null; }
+  try { _usageCached = lib.readAndRefreshIfStale(); }
+  catch { _usageCached = null; }
+  return _usageCached;
+}
+
+// Render a usage cell as `<label>:<pct>% · <reset-in duration>`. The %
+// gets the usual zone colour escalation so a soon-to-exhaust quota reads
+// at a glance. Reset-duration stays dim — supporting context, not alarm.
+function _renderUsageCellImpl(label, pctRaw, resetAt, C) {
+  if (typeof pctRaw !== 'number' || !Number.isFinite(pctRaw)) return '';
+  const pct = Math.round(pctRaw);
+  let col = C.green;
+  if (pct >= 95) col = C.red;
+  else if (pct >= 85) col = C.orange;
+  else if (pct >= 60) col = C.yellow;
+  let resetStr = '';
+  if (resetAt) {
+    const ms = resetAtMs(resetAt) - Date.now();
+    if (Number.isFinite(ms) && ms > 0) resetStr = fmtDuration(ms);
+  }
+  const head = `${col}${label}:${pct}%${C.reset}`;
+  // `r:` prefix on the reset duration keeps the cell self-explanatory.
+  // Plain-space separator inside the cell — the outer `·` between fields
+  // is the field boundary, so we skip it within a single usage cell.
+  return resetStr ? `${head} ${C.dim}r:${resetStr}${C.reset}` : head;
+}
+
+// Parse either ISO-8601 or epoch-seconds reset timestamps. The usage API
+// has returned both shapes over time — accept either to stay compatible.
+function resetAtMs(resetAt) {
+  if (typeof resetAt === 'number') {
+    return resetAt > 1e12 ? resetAt : resetAt * 1000;
+  }
+  if (typeof resetAt === 'string') {
+    const parsed = Date.parse(resetAt);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+}
+
 // Shared session-context parser — same placeholder + autofill rules the
 // handoff reader and pre-compact hint formatter use. Loaded lazily so a
 // missing lib dir just falls back to the legacy inline parser below.
@@ -111,7 +168,7 @@ function loadConfig() {
   const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
   const defaults = {
     fields: [
-      'tokens', 'compactAge',
+      'tokens', 'compactAge', 'compactCost',
       'newline',
       'emoji2', 'session', 'tools', 'cost', 'deploy', 'tokenFlow', 'cacheHit', 'cacheSaved',
       'newline',
@@ -147,6 +204,10 @@ function makeColors(enabled) {
     red:    code('\x1b[31m'),
     blue:   code('\x1b[34m'),
     gray:   code('\x1b[90m'),
+    // Near-invisible 256-colour grey for field separators only. Keeping
+    // `·` barely legible makes the actual field content pop without losing
+    // the visual break between cells.
+    graySep: code('\x1b[38;5;237m'),
     cyan:   code('\x1b[36m'),
     magenta: code('\x1b[35m'),
   };
@@ -436,17 +497,24 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 
 /**
- * Claude's effective context cap for the active model. Opus with the `[1m]`
- * context tag reports it in `model.id` or `display_name`; everything else
- * defaults to the 200k cap. We don't need perfect model detection — a cap
- * that's too small just means the bar saturates faster, which is a harmless
- * visual nudge.
+ * Claude's effective context cap for the active model.
+ *
+ *   1. Explicit `statusline.contextCap` in config wins (escape hatch).
+ *   2. Legacy `[1m]` / `-1m` marker in the model id → 1M.
+ *   3. Any Opus 4.x / 5.x or Sonnet 4.x — 1M. Newer Claude Code builds
+ *      dropped the `[1m]` marker once 1M became the default for these
+ *      models, so key off the family name instead.
+ *   4. Fallback 200k.
  */
-function contextCap(input) {
+function contextCap(input, cfg) {
+  if (cfg && Number.isFinite(cfg.contextCap) && cfg.contextCap > 0) {
+    return cfg.contextCap;
+  }
   const id = String(
     (input && input.model && (input.model.id || input.model.display_name)) || ''
   ).toLowerCase();
   if (/\[1m\]|-1m|\b1m\b|1000k|1000000/.test(id)) return 1000000;
+  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]/.test(id)) return 1000000;
   return 200000;
 }
 
@@ -488,22 +556,96 @@ function projectLabel(cwd) {
 }
 
 function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '0m';
   const totalMin = Math.floor(ms / 60000);
-  const h = Math.floor(totalMin / 60);
+  const d = Math.floor(totalMin / (60 * 24));
+  const h = Math.floor((totalMin % (60 * 24)) / 60);
   const m = totalMin % 60;
-  if (h > 0) return `${h}h${m}m`;
-  return `${m}m`;
+  const parts = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}hr`);
+  // Skip minutes once the span exceeds a day — the extra precision isn't
+  // actionable at those scales and `1d 5hr 32m` starts to feel busy.
+  if (m && !d) parts.push(`${m}m`);
+  return parts.join(' ') || '0m';
 }
 
 // ─── Compaction ──────────────────────────────────────────────────────────────
 
 function minutesSinceLastCompact() {
+  const ms = compactionLogMtimeMs();
+  return ms === null ? null : Math.floor((Date.now() - ms) / 60000);
+}
+
+function compactionLogMtimeMs() {
   const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
   const log = path.join(home, '.claude', 'session-data', 'compaction-log.txt');
+  try { return fs.statSync(log).mtimeMs; } catch { return null; }
+}
+
+/**
+ * Cost + cache-savings accrued since the last /compact. Scans transcript
+ * JSONL lines whose `timestamp` is >= compaction-log mtime. Incrementally
+ * cached under /tmp keyed by sessionId + compactMs — when the compact
+ * mtime advances (new /compact fires), the cache resets automatically.
+ */
+function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
+  const empty = { cost: 0, saved: 0 };
+  const compactMs = compactionLogMtimeMs();
+  if (!compactMs) return empty;
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
+
+  let stat;
+  try { stat = fs.statSync(transcriptPath); } catch { return empty; }
+
+  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}`);
+
+  let cache = null;
   try {
-    const stat = fs.statSync(log);
-    return Math.floor((Date.now() - stat.mtimeMs) / 60000);
-  } catch { return null; }
+    const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (parsed && parsed.compactMs === compactMs
+        && typeof parsed.offset === 'number' && parsed.offset >= 0
+        && parsed.offset <= stat.size) {
+      cache = parsed;
+    }
+  } catch { /* miss or stale */ }
+
+  if (!cache) cache = { compactMs, offset: 0, cost: 0, saved: 0 };
+  if (stat.size === cache.offset) return { cost: cache.cost, saved: cache.saved };
+
+  try {
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      const bytesToRead = stat.size - cache.offset;
+      const buf = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buf, 0, bytesToRead, cache.offset);
+      const lastNl = buf.lastIndexOf(0x0A);
+      if (lastNl >= 0) {
+        const text = buf.slice(0, lastNl).toString('utf8');
+        for (const line of text.split('\n')) {
+          if (!line) continue;
+          try {
+            const d = JSON.parse(line);
+            const u = d && d.message && d.message.usage;
+            if (!u) continue;
+            const ts = d.timestamp ? Date.parse(d.timestamp) : NaN;
+            if (!Number.isFinite(ts) || ts < compactMs) continue;
+            cache.cost += costFromUsage(u, prices);
+            cache.saved += savedFromUsage(u, prices);
+          } catch { /* skip bad line */ }
+        }
+        cache.offset += lastNl + 1;
+      }
+    } finally { fs.closeSync(fd); }
+  } catch {
+    return { cost: cache.cost, saved: cache.saved };
+  }
+
+  try { fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8'); }
+  catch { /* best effort */ }
+
+  return { cost: cache.cost, saved: cache.saved };
 }
 
 // ─── Deploy breadcrumb ───────────────────────────────────────────────────────
@@ -688,7 +830,7 @@ function buildRenderers(C) {
       if (t <= 0) {
         return `${color}${sourceTag}${zone.icon} idle${C.reset}`;
       }
-      const cap = contextCap(input);
+      const cap = contextCap(input, ctx.cfg);
       const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, 20);
       const used = fmtTokens(t);
       const total = cap >= 1000000 ? '1M' : fmtTokens(cap);
@@ -869,9 +1011,80 @@ function buildRenderers(C) {
     compactAge: (_input, _ctx) => {
       const mins = minutesSinceLastCompact();
       if (mins === null) return '';
-      const label = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h${mins % 60}m`;
+      const label = fmtDuration(mins * 60 * 1000);
       const color = mins >= 120 ? C.red : C.dim;
       return `${color}compact:${label} ago${C.reset}`;
+    },
+
+    /** Cost + cache-savings accrued since last /compact. Pairs with
+     *  compactAge to answer "how much has this post-compact run cost so
+     *  far, and how much is the prefix cache earning me." Hidden when
+     *  both are trivially small (<$0.10) or when no compact has happened
+     *  yet. Always dim — volume signal, not a warning. */
+    compactCost: (input, ctx) => {
+      const { cost, saved } = costsSinceCompact(
+        input.transcript_path || input.transcriptPath || '',
+        input.session_id || input.sessionId || '',
+        ctx.cfg.prices || DEFAULT_PRICES,
+      );
+      const parts = [];
+      if (cost >= 0.01) parts.push(`c$${cost.toFixed(2)}`);
+      if (saved >= 0.1) parts.push(`s$${saved.toFixed(2)}`);
+      if (!parts.length) return '';
+      return `${C.dim}${parts.join(' / ')}${C.reset}`;
+    },
+
+    /** Percentage of the context window consumed. Replaces ccstatusline's
+     *  `93.0%` signal so we can retire the 1.5 s `npx` spend. Uses zones.red
+     *  as the 100% reference — matches the token-bar cap. Zone-colored:
+     *    <60% green · 60-85% yellow · 85-95% orange · >=95% red */
+    contextPct: (_input, ctx) => {
+      const max = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
+      if (!ctx.tokens || ctx.tokens <= 0) return '';
+      const pct = Math.round((ctx.tokens / max) * 100);
+      let col = C.green;
+      if (pct >= 95) col = C.red;
+      else if (pct >= 85) col = C.orange;
+      else if (pct >= 60) col = C.yellow;
+      return `${col}ctx:${pct}%${C.reset}`;
+    },
+
+    /** Claude Code 5-hour block usage + time until reset. Data from the
+     *  cached usage API (180 s TTL, refreshed by a detached worker). Shown
+     *  as `5h:47% · 3hr 12m` — percent then "resets in" duration. Empty
+     *  when the cache is absent or has an error marker. */
+    blockUsage: (_input, _ctx) => {
+      const u = loadUsage();
+      if (!u || typeof u.sessionUsage !== 'number') return '';
+      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C);
+    },
+
+    /** Weekly (7-day) usage + time until reset. Same shape as blockUsage
+     *  with a `w` prefix. Format: `w:31% · r:4d 12hr`. */
+    weekUsage: (_input, _ctx) => {
+      const u = loadUsage();
+      if (!u || typeof u.weeklyUsage !== 'number') return '';
+      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C);
+    },
+
+    /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
+     *  and middle-truncates when longer than 60 chars (keeps the leaf dir,
+     *  which carries most of the signal). Dim — reference context only. */
+    cwd: (input, _ctx) => {
+      const raw = input.cwd || '';
+      if (!raw) return '';
+      const home = os.homedir();
+      let display = raw;
+      if (raw === home) display = '~';
+      else if (raw.startsWith(home + '/')) display = '~' + raw.slice(home.length);
+      const MAX = 60;
+      if (display.length > MAX) {
+        const leaf = path.basename(display);
+        const room = MAX - leaf.length - 2; // for `…/`
+        if (room > 0) display = display.slice(0, room) + '…/' + leaf;
+        else display = '…/' + leaf;
+      }
+      return `${C.dim}${display}${C.reset}`;
     },
 
     /** Last deploy target + how fresh, read from ~/.claude/logs/deploy-breadcrumb.
@@ -1229,7 +1442,7 @@ function main() {
   };
 
   const renderers = buildRenderers(C);
-  const sep = `${C.gray}${cfg.separator}${C.reset}`;
+  const sep = `${C.graySep}${cfg.separator}${C.reset}`;
 
   // Split fields on 'newline' pseudo-field so users can lay out multi-line
   // status bars, e.g. fields: ['emoji','model','project','newline','branch','tokens','cost'].

@@ -198,14 +198,20 @@ The memory-offload block works with Claude Code's built-in auto-memory system (`
 
 ## Status Line
 
-Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw:
+Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw. Default `verbose` preset emits four lines:
 
 ```
-Opus 4.7 (1M) · CSM · dev · (+22,-13) · ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)
-3h42m · 70 tools · $7.56 · feat — statusline v2 · compact:2h13m ago
+▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%) · compact:1hr 22m ago · c$12.34 / s$68.20
+2d 19hr · sid:82cc15b9 · 612 tools · c$491.56 / s$1114.78 · 85.66M ↓7.4k ↑503.0k c85.15M · cache:99%
+b:36% r:1hr 22m · w:95% r:1d 5hr · ~/DWS/claude-session-intelligence
+Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — statusline v2
 ```
 
-**Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim except `compactAge` which goes **red** when the last /compact was ≥2h ago. Emojis are off by default in the shipped presets — they added width and a second decision point ("what does that glyph mean?") on top of already-loud text. They're opt-in via the `emoji` / `emoji2` fields if you want them back.
+**Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim. Line 3's usage fields (`b:`, `w:`) escalate yellow → orange → red as quota utilization crosses 60 / 85 / 95%. `compactAge` goes **red** when the last /compact was ≥2h ago. Field separators render in near-invisible dark grey (`\x1b[38;5;237m`) so content stays the visual focus. Emojis are off by default — opt-in via the `emoji` / `emoji2` fields if you want them back.
+
+### Quota & reset timers (line 3)
+
+`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns, fed from the same `api.anthropic.com/api/oauth/usage` endpoint ccstatusline uses. A detached background worker (`lib/usage-refresh.js`) refreshes a disk cache every 180 s — the statusline hot path only reads the cache, so redraws stay sub-100 ms. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any failure (no creds, network down, API error) silently renders an empty cell — never blocks.
 
 ### Real token count
 
@@ -225,7 +231,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `dirty` | `±3` | Simple count of dirty files (dim) |
 | `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
 | `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
-| `tokens` | `▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)` | **Full context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap, colored green → yellow → orange → red by current zone. Cap auto-detects from `model.id`: `[1m]` tag → 1M, else 200k. Prefixed with `~` when using the estimate fallback. Zones are adaptive (fall back to defaults when history < 5 compacts) |
+| `tokens` | `▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)` | **Full context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap, colored green → yellow → orange → red by current zone. Cap auto-detects: `[1m]` / `-1m` tag in `model.id` → 1M, Opus 4.x / Sonnet 4.x family → 1M (newer Claude Code builds drop the `[1m]` marker once 1M is the default), else 200k. Override with `statusline.contextCap`. Prefixed with `~` when using the estimate fallback. Zones are adaptive (fall back to defaults when history < 5 compacts) |
+| `contextPct` | `ctx:43%` | Context-window % on its own (no bar). Zone-coloured like `tokens`. Useful when you want the signal on a different row from the bar — redundant when `tokens` is already present on the same line. Not in any default preset |
 | `zone` | `orange` | Zone name only, coloured |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
 | `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
@@ -236,7 +243,11 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `cacheHit` | `cache:92%` | Live prompt-cache hit ratio on the latest assistant turn: `cache_read / (cache_read + cache_creation)`. Dim green ≥70%, dim yellow 30–70%, dim red <30%. Hidden on turns with no cacheable prefix (first turn of a session). The one coloured field on line 3 — colour escalates when `compact.stablePrefix` isn't paying off (low cache-hit on a stable working set) |
 | `cacheTokens` | `prefix:120k/3k` | Latest turn's prefix breakdown — `<cache_read>/<cache_creation>` tokens. Low read + high creation on a stable working set is the warning sign that `stablePrefix` is leaking a volatile value somewhere. Dim |
 | `cacheSaved` | `saved:$2.83` | **Cumulative** USD saved across the session by cache hits vs. paying the uncached input rate for the same tokens. Hidden when savings are under $0.10 (not worth the field) (dim) |
-| `compactAge` | `compact:2h13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
+| `compactAge` | `compact:2hr 13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
+| `compactCost` | `c$12.34 / s$68.20` | Cost + cache-savings accrued **since last /compact**. Incrementally cached at `/tmp/claude-cost-sincecompact-<sid>`, auto-invalidated when compact mtime advances. Shows `c$` only when ≥$0.01, `s$` only when ≥$0.10; hidden when both trivial (dim) |
+| `blockUsage` | `b:47% r:1hr 12m` | Claude's 5-hour block quota utilisation + time until reset. Data from cached `/api/oauth/usage` response (180s TTL, refreshed in background). % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95%. Empty cell when the cache is absent or errored |
+| `weekUsage` | `w:31% r:4d 12hr` | Weekly (7-day) quota utilisation + time until reset. Same colour escalation as `blockUsage` |
+| `cwd` | `~/DWS/claude-session-intelligence` | Full working directory, ccstatusline-style. `$HOME` collapses to `~`; middle-ellipsis when longer than 60 chars (keeps the leaf) (dim) |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (dim) |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (dim) |
 | `health` | `[●●○]` | Coloured dot per service URL configured in `serviceHealth` — curl probe cached 30s |
@@ -253,8 +264,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 3 lines. Line 1: `tokens` + `compactAge` (colour-escalating fields) · Line 2: `session`, `tools`, `cost`, `tokenFlow`, `cacheHit`, `cacheSaved` (live activity at eye level) · Line 3: `model`, `project`, `branch`, `diffstat`, `task` (dim reference context) |
-| `verbose-cache` | 3 lines, token-economics-focused. Line 2 adds `cacheTokens`; line 3 trimmed to model/project/task |
+| `verbose` (default) | 4 lines. L1: `tokens`, `compactAge`, `compactCost` — colour-escalating warning row · L2: `session`, `sessionId`, `tools`, `costSaved`, `tokenFlow`, `cacheHit` — live activity · L3: `blockUsage`, `weekUsage`, `cwd` — quota + working dir · L4: `model`, `project`, `branch`, `diffstat`, `task` — dim reference context |
+| `verbose-cache` | 4 lines, token-economics-focused. Same shape as `verbose` with `cacheTokens` appended to L2; L4 trimmed to model/project/task |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
 
@@ -312,17 +323,19 @@ The installer drops this file at `~/.claude/session-intelligence.json` on first 
 
 ### Append, don't replace
 
-Most users already have a statusLine — ccstatusline, starship, a custom script. The installer detects it and wires a chain wrapper (`statusline-chain.sh`) that runs your previous command first, then the intel line as new lines below:
+Most users already have a statusLine — ccstatusline, starship, a custom script. The installer detects it and wires a chain wrapper (`statusline-chain.sh`) that preserves your previous command alongside the intel lines:
 
 ```
-🌴 main · ⎇ dev · (+0,-0) · /Users/you/project       ← your existing statusLine
-🔛 · ↓ · ↑ · c · 🏎️
-⏱️ Session: 0m · 💰 3hr 42m
-👾 Opus 4.7 (1M)
-⏳ Weekly: 3.0% · Weekly Reset: 6d 10hr
-🔥 Opus 4.7 · project · dev · ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)   ← appended by us (line 1)
-   3h42m · 70 tools · $0.76 · feat — statusline v2 · compact:2h13m ago  ← appended by us (line 2)
+▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%) · compact:1hr 22m ago · c$12.34 / s$68.20   ← intel line 1
+2d 19hr · sid:82cc15b9 · 612 tools · c$491.56 / s$1114.78 · cache:99%            ← intel line 2
+b:36% r:1hr 22m · w:95% r:1d 5hr · ~/DWS/claude-session-intelligence             ← intel line 3
+Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — statusline v2  ← intel line 4
+🌴 main · ⎇ dev · /Users/you/project                                             ← your previous statusLine
 ```
+
+**Intel-first by default.** The zone bar and quota row need to live closest to the prompt, so intel renders on top and your previous command falls below. Set `CLAUDE_STATUSLINE_PREV_FIRST=1` to flip the order if you prefer your old bar on top.
+
+**Performance note.** If your previous statusLine is `ccstatusline` via `npx -y`, expect ~1.2-1.5 s per redraw — `npx` alone is ~1 s even with a warm local cache. The intel line is self-contained (~60 ms warm, ~70 ms cold with a 48 MB transcript). To reclaim that latency, replicate ccstatusline's signals via intel fields (`cwd`, `tokens`, `session`, `project`, `branch`, `blockUsage`, `weekUsage`) and either leave `PREV_STATUSLINE=__PREV_STATUSLINE__` in `statusline-chain.sh` or set `CLAUDE_STATUSLINE_NO_PREV=1` in your shell.
 
 If you had no statusLine configured, you get just the intel lines.
 
