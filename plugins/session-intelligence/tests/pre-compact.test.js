@@ -12,7 +12,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { formatCompactionHints, STALENESS_MS } = require('../hooks/si-pre-compact');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const {
+  formatCompactionHints,
+  buildMemoryCleanupBlock,
+  buildGitNexusRefreshBlock,
+  STALENESS_MS,
+} = require('../hooks/si-pre-compact');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = Date.UTC(2026, 3, 22); // 2026-04-22, anchor for deterministic age math
@@ -120,4 +129,52 @@ test('explicit stalenessMs override lets callers tune the window', () => {
 
 test('STALENESS_MS export is 3 days (the tuned default)', () => {
   assert.equal(STALENESS_MS, 3 * DAY_MS);
+});
+
+test('buildMemoryCleanupBlock returns "" when projectDir is null', () => {
+  assert.equal(buildMemoryCleanupBlock(null), '');
+  assert.equal(buildMemoryCleanupBlock(undefined), '');
+});
+
+test('buildMemoryCleanupBlock returns "" when memory dir is missing', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'si-precompact-'));
+  try {
+    assert.equal(buildMemoryCleanupBlock(tmp), '');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('buildMemoryCleanupBlock emits cleanup directive when memory dir exists', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'si-precompact-'));
+  const memoryDir = path.join(tmp, 'memory');
+  fs.mkdirSync(memoryDir);
+  try {
+    const out = buildMemoryCleanupBlock(tmp);
+    assert.match(out, /STALE MEMORY CLEANUP \(pre-compact\)/);
+    assert.match(out, /MEMORY\.md/);
+    assert.match(out, /project_session_\*\.md/);
+    assert.match(out, /reference_\*\.md/);
+    assert.match(out, /cleaned N lines/);
+    assert.ok(out.includes(memoryDir), 'directive must name the concrete memory path');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('buildGitNexusRefreshBlock returns "" when disabled / skipped / empty', () => {
+  assert.equal(buildGitNexusRefreshBlock(null), '');
+  assert.equal(buildGitNexusRefreshBlock(undefined), '');
+  assert.equal(buildGitNexusRefreshBlock({ skipped: true }), '');
+  assert.equal(buildGitNexusRefreshBlock({ refreshed: false, anchors: 5, sinceDays: 90 }), '');
+  assert.equal(buildGitNexusRefreshBlock({ refreshed: true, anchors: 0, sinceDays: 90 }), '');
+  assert.equal(buildGitNexusRefreshBlock({ refreshed: true, anchors: 10, sinceDays: 0 }), '');
+});
+
+test('buildGitNexusRefreshBlock emits refresh note with anchor count + sinceDays', () => {
+  const out = buildGitNexusRefreshBlock({ refreshed: true, anchors: 12, sinceDays: 90 });
+  assert.match(out, /REPO GRAPH \(git-nexus refreshed\)/);
+  assert.match(out, /last 90d of commit history/);
+  assert.match(out, /12 anchor\(s\) cached/);
+  assert.match(out, /preserveGlobs/);
 });

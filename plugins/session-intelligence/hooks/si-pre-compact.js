@@ -100,6 +100,57 @@ const STALENESS_MS = 3 * 24 * 60 * 60 * 1000;
  * Skipped when no priority-bearing file exists, so an empty block doesn't
  * pollute the pre-compact output on first-ever compacts.
  */
+/**
+ * Memory-cleanup directive — ask Claude to sweep resolved/stale lines out of
+ * auto-memory before compact closes. Sister to priorities-review but scoped
+ * at memory files: MEMORY.md pointers that reference deleted files, session
+ * logs whose "next steps" all shipped, reference_*.md recipes that no longer
+ * match current code. Regex sweepers can't judge semantic staleness; the
+ * model has transcript + git state + ability to read current files and can.
+ *
+ * Skipped when no memory dir exists so first-ever compacts aren't spammed.
+ */
+function buildMemoryCleanupBlock(projectDir) {
+  if (!projectDir) return '';
+  const memoryDir = path.join(projectDir, 'memory');
+  if (!fs.existsSync(memoryDir)) return '';
+
+  return [
+    '',
+    '## STALE MEMORY CLEANUP (pre-compact)',
+    `Before compact closes, spot-check \`${memoryDir}/\` for rot — resolved items, dead pointers, outdated recipes:`,
+    '  - `MEMORY.md` index — remove or update lines whose target file was deleted, renamed, or no longer matches what it describes.',
+    '  - `project_session_*.md` — strike (`~~...~~`) or remove lines describing work that visibly shipped this session (commits landed, feature removed, decision reversed).',
+    '  - `reference_*.md` — delete or correct recipes that now disagree with the current code (renamed functions, removed flags, deprecated patterns).',
+    '',
+    'Prefer in-place edits over "new session log" churn. One-line summary when done: "cleaned N lines" or "nothing stale".',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Git Nexus refresh note — one-line confirmation that the top-touched-files
+ * cache was re-derived from git-log this compact. Compact is a natural
+ * milestone (session commits just landed) so the 24h-TTL cache is likely
+ * mid-stale; refreshing now keeps the repo graph current for the next
+ * session's preserveGlobs + allowlist derivation.
+ *
+ * Returns '' when disabled, when git-nexus failed silently, or when the
+ * repo isn't a git repo (anchors=0, sinceDays=0 sentinel from a failed call).
+ */
+function buildGitNexusRefreshBlock(status) {
+  if (!status || status.skipped || !status.refreshed) return '';
+  const { anchors, sinceDays } = status;
+  if (!Number.isFinite(anchors) || anchors <= 0) return '';
+  if (!Number.isFinite(sinceDays) || sinceDays <= 0) return '';
+  return [
+    '',
+    '## REPO GRAPH (git-nexus refreshed)',
+    `Re-derived top-touched file anchors from the last ${sinceDays}d of commit history — ${anchors} anchor(s) cached. This is the frequency-based signal that feeds preserveGlobs + shape allowlisting, so refreshing at compact time keeps the repo graph current with whatever landed this session.`,
+    '',
+  ].join('\n');
+}
+
 function buildPrioritiesReviewBlock(projectDir) {
   if (!projectDir) return '';
   const memoryDir = path.join(projectDir, 'memory');
@@ -247,15 +298,27 @@ async function main() {
   // foundational dirs if git commit frequency already surfaces them.
   const gitNexusCfg = (siCfg.shape && siCfg.shape.gitNexus) || {};
   let nexusGlobs = [];
+  // Tracks whether we successfully re-derived the anchor list this compact
+  // so buildGitNexusRefreshBlock can emit a confirmation note. Initialized
+  // with skipped=true so the block renders nothing when git-nexus is off or
+  // refresh-on-compact is disabled.
+  const gitNexusSinceDays = Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90;
+  const gitNexusStatus = { skipped: true, refreshed: false, anchors: 0, sinceDays: gitNexusSinceDays };
   if (gitNexusCfg.enabled !== false) {
     try {
       const { topTouchedFiles, toPreserveGlobs } = require(path.join(SI_LIB, 'git-nexus'));
+      const refresh = gitNexusCfg.refreshOnCompact !== false;
       const anchors = topTouchedFiles(cwd, {
-        sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
+        sinceDays: gitNexusSinceDays,
         limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
+        force: refresh,
       });
       nexusGlobs = toPreserveGlobs(anchors);
-      intelLog('pre-compact', 'debug', 'git-nexus anchors resolved', { count: nexusGlobs.length });
+      gitNexusStatus.skipped = false;
+      gitNexusStatus.refreshed = refresh && nexusGlobs.length > 0;
+      gitNexusStatus.anchors = nexusGlobs.length;
+      intelLog('pre-compact', 'debug', 'git-nexus anchors resolved',
+        { count: nexusGlobs.length, refreshed: gitNexusStatus.refreshed });
     } catch (err) {
       intelLog('pre-compact', 'debug', 'git-nexus lookup failed', { err: err && err.message });
     }
@@ -390,10 +453,20 @@ async function main() {
   // Claude has transcript context and can judge what shipped semantically.
   const prioritiesReview = buildPrioritiesReviewBlock(projectDir);
 
+  // Memory-cleanup directive — tell Claude to sweep stale/resolved lines out
+  // of MEMORY.md + project_session_*.md before compact closes. Sister
+  // directive to priorities-review; same logic (transcript context > regex).
+  const memoryCleanup = buildMemoryCleanupBlock(projectDir);
+
+  // Git-nexus refresh note — confirms the repo-graph anchor cache was
+  // re-derived this compact. Empty string when gitNexus is disabled,
+  // refresh-on-compact is off, or the cwd isn't a git repo.
+  const gitNexusRefresh = buildGitNexusRefreshBlock(gitNexusStatus);
+
   // Single top-level heading so the model knows this block came from the
   // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
   // mobile render it cleanly, no wide bars that wrap on narrow screens.
-  if (hints || shapeInjection || memoryOffload || prioritiesReview) {
+  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh) {
     process.stdout.write(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
@@ -424,6 +497,23 @@ async function main() {
       bytes: prioritiesReview.length,
     });
   }
+  if (memoryCleanup) {
+    process.stdout.write(memoryCleanup);
+    log('[PreCompact] Injected stale-memory-cleanup directive');
+    intelLog('pre-compact', 'info', 'memory cleanup directive emitted', {
+      projectDir: path.basename(projectDir || ''),
+      bytes: memoryCleanup.length,
+    });
+  }
+  if (gitNexusRefresh) {
+    process.stdout.write(gitNexusRefresh);
+    log('[PreCompact] Injected git-nexus refresh note');
+    intelLog('pre-compact', 'info', 'git-nexus refresh note emitted', {
+      anchors: gitNexusStatus.anchors,
+      sinceDays: gitNexusStatus.sinceDays,
+      bytes: gitNexusRefresh.length,
+    });
+  }
 
   // stablePrefix drift check — when the opt-in cache-friendly mode is on,
   // fingerprint the emitted block per-cwd. If the fingerprint moves between
@@ -434,7 +524,8 @@ async function main() {
   if (stablePrefix && compactHistory && compactHistory.compareStablePrefixHash) {
     try {
       const prefixText = (hints || '') + (shapeInjection || '')
-        + (memoryOffload || '') + (prioritiesReview || '');
+        + (memoryOffload || '') + (prioritiesReview || '')
+        + (memoryCleanup || '') + (gitNexusRefresh || '');
       if (prefixText) {
         const cmp = compactHistory.compareStablePrefixHash(cwd || 'default', prefixText);
         if (cmp.drifted) {
@@ -573,6 +664,8 @@ async function main() {
 // still fires below even with these exports present.
 module.exports = {
   formatCompactionHints,
+  buildMemoryCleanupBlock,
+  buildGitNexusRefreshBlock,
   STALENESS_MS,
 };
 

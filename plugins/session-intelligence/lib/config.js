@@ -159,6 +159,11 @@ const DEFAULTS = {
       limit: 20,
       injectAtStart: false, // emit anchor block via SessionStart additionalContext
       injectLimit: 10,
+      // Force-refresh the git-log-backed anchor cache at pre-compact time.
+      // Compact is a natural milestone: session commits just landed, so the
+      // 24h-TTL cache is likely mid-stale. Refresh keeps the repo graph
+      // current before the next session reads it.
+      refreshOnCompact: true,
     },
   },
   continue: {
