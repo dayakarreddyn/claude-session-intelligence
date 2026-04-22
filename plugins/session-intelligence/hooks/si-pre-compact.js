@@ -63,7 +63,18 @@ try { costEst = require(path.join(SI_LIB, 'cost-estimation')); } catch { /* not 
 // (shared with lib/handoff.js). Local copies previously drifted between
 // the two files — extract-once keeps compact-hint output and handoff
 // replay working from the same parse rules.
-const parseSessionContext = require(path.join(SI_LIB, 'session-context')).parseSessionContext;
+const {
+  parseSessionContext,
+  AUTOFILL_SENTINEL_RE,
+} = require(path.join(SI_LIB, 'session-context'));
+
+// Sections without the `<!-- si:autofill sha=... -->` sentinel are user-
+// managed and can drift stale for weeks. Inject them verbatim only while
+// the file was recently edited; past this window we replace the body with
+// a "stale — verify before trusting" pointer so the model doesn't treat
+// multi-week-old guidance as current. Mirrors the handoff.js fix that
+// stopped inlining scraped `nextPriorities` bullets.
+const STALENESS_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
  * Format structured compaction hints from parsed session context. Returns
@@ -135,7 +146,14 @@ function buildMemoryOffloadBlock(projectDir, sessionId, opts = {}) {
   ].join('\n');
 }
 
-function formatCompactionHints(sections) {
+function formatCompactionHints(sections, opts = {}) {
+  const mtimeMs = Number.isFinite(opts.mtimeMs) ? opts.mtimeMs : 0;
+  const nowMs = Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
+  const stalenessMs = Number.isFinite(opts.stalenessMs) ? opts.stalenessMs : STALENESS_MS;
+  const ageMs = mtimeMs > 0 ? nowMs - mtimeMs : Infinity;
+  const isStale = ageMs > stalenessMs;
+  const ageDays = Math.max(0, Math.round(ageMs / (24 * 60 * 60 * 1000)));
+
   const sectionMap = [
     // At compact-time the work under "## Current Task" is the task we were
     // just on — from the post-compact summariser's perspective it's the
@@ -147,18 +165,47 @@ function formatCompactionHints(sections) {
     ['Completed Tasks (safe to drop details)', 'SAFE TO DROP (resolved \u2014 keep only one-line summaries):'],
   ];
 
+  const skipped = [];
   const body = [];
   for (const [key, label] of sectionMap) {
-    if (sections[key]) body.push('', label, sections[key]);
+    const raw = sections[key];
+    if (!raw) continue;
+
+    // Autofill sentinel — content is refreshed per-commit by
+    // si-bootstrap, so it can never be meaningfully stale. Always inject.
+    if (AUTOFILL_SENTINEL_RE.test(raw)) {
+      body.push('', label, raw);
+      continue;
+    }
+
+    // Hand-written content — safe only while the file has been
+    // touched recently. If file mtime is missing (mtimeMs=0 →
+    // ageMs=Infinity) or older than the staleness window, skip the body.
+    if (isStale) {
+      skipped.push(key);
+      continue;
+    }
+
+    body.push('', label, raw);
   }
-  if (body.length === 0) return '';
+  if (body.length === 0 && skipped.length === 0) return '';
+
+  const header = '## COMPACTION GUIDANCE (from session-context.md)';
+  const notes = [];
+  if (skipped.length > 0) {
+    const ageLabel = Number.isFinite(ageMs) ? `${ageDays} day(s) old` : 'of unknown age';
+    notes.push(
+      '',
+      `NOTE: skipped user-managed section(s) ${skipped.map((s) => `\`${s}\``).join(', ')} — session-context.md is ${ageLabel} and carries no \`<!-- si:autofill sha=... -->\` sentinel. Refresh the file or add the sentinel to have it surface here again.`,
+    );
+  }
 
   // Plain ASCII headers and no heavy-rule bars — both the CLI terminal and
   // the Claude mobile client render this block. Mobile wraps the old 50×━
   // divider across 3 lines and surfaces the surrounding ANSI dim codes as
   // literal "[2m"/"[22m" noise, so we drop bars entirely and rely on
   // section labels + single blank lines for structure.
-  return ['', '## COMPACTION GUIDANCE (from session-context.md)', ...body, ''].join('\n');
+  return ['', header, ...body, ...notes, ''].join('\n');
 }
 
 async function main() {
@@ -302,11 +349,17 @@ async function main() {
 
     if (content && content.trim().length > 0) {
       const sections = parseSessionContext(content);
-      hints = formatCompactionHints(sections);
+      // mtime gates user-managed (non-autofill) sections so weeks-old hand-
+      // written guidance doesn't leak into every compact. stat() failure →
+      // mtimeMs=0 → treated as "unknown age" (stale) by formatCompactionHints.
+      let mtimeMs = 0;
+      try { mtimeMs = fs.statSync(contextFile).mtimeMs; } catch { /* already handled */ }
+      hints = formatCompactionHints(sections, { mtimeMs });
       if (hints) {
         intelLog('pre-compact', 'info', 'injected hints', {
           projectDir: path.basename(projectDir),
           sections: Object.keys(sections).filter((k) => sections[k]),
+          mtimeMs,
           bytes: hints.length,
         });
       } else {
@@ -516,12 +569,21 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(err => {
-  // exit(1) so the hook pipeline sees the failure. Previous exit(0) was
-  // indistinguishable from success; a crash in the shape-append or
-  // compact-history path would silently ship no hints + no handoff while
-  // the pipeline reported "completed successfully".
-  console.error('[PreCompact] Error:', err.message);
-  intelLog('pre-compact', 'error', 'hook crashed', { err: err.message, stack: err.stack });
-  process.exit(1);
-});
+// Exported for tests. The hook is run directly by Claude Code, so `main()`
+// still fires below even with these exports present.
+module.exports = {
+  formatCompactionHints,
+  STALENESS_MS,
+};
+
+if (require.main === module) {
+  main().catch(err => {
+    // exit(1) so the hook pipeline sees the failure. Previous exit(0) was
+    // indistinguishable from success; a crash in the shape-append or
+    // compact-history path would silently ship no hints + no handoff while
+    // the pipeline reported "completed successfully".
+    console.error('[PreCompact] Error:', err.message);
+    intelLog('pre-compact', 'error', 'hook crashed', { err: err.message, stack: err.stack });
+    process.exit(1);
+  });
+}
