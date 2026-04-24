@@ -19,9 +19,28 @@ UNIFIED_CONFIG="${CLAUDE_DIR}/session-intelligence.json"
 INSTALLED_PLUGINS_JSON="${CLAUDE_DIR}/plugins/installed_plugins.json"
 
 FORCE_LEGACY=false
+REFRESH_ONLY=false
 for arg in "$@"; do
   case "$arg" in
     --force-legacy) FORCE_LEGACY=true ;;
+    --refresh-only) REFRESH_ONLY=true ;;
+    --help|-h)
+      cat <<'USAGE'
+Session Intelligence installer
+
+Usage: install.sh [flags]
+
+Flags:
+  --refresh-only   Sync repo → plugin cache + marketplace mirrors, then exit.
+                   Fast path for dogfooding: no hook rewrites, no settings
+                   touch. Use after editing plugins/session-intelligence/.
+  --force-legacy   Skip plugin detection and run the pre-plugin install path
+                   (copies hooks into ~/.claude/scripts/hooks/ and patches
+                   ~/.claude/settings.json).
+  --help, -h       Show this help.
+USAGE
+      exit 0
+      ;;
   esac
 done
 
@@ -94,7 +113,7 @@ if [ "$FORCE_LEGACY" = false ] && [ -f "$INSTALLED_PLUGINS_JSON" ]; then
   fi
 fi
 
-# ─── 1a. Refresh plugin cache (when plugin is installed) ───
+# ─── 1a. Refresh plugin cache + marketplace (when plugin is installed) ───
 #
 # `/plugin install session-intelligence@session-intelligence` is a no-op
 # for cache content when `plugin.json.version` hasn't bumped — it registers
@@ -104,10 +123,20 @@ fi
 # silently run the stale cached version (easy-to-miss footgun: UI looks
 # "wrong" after a /plugin install because it's running old code).
 #
-# Fix: on every `install.sh` run with a detected plugin install, rsync the
-# source tree into every `installPath` listed for this plugin. One
-# statement, uses `installed_plugins.json` as the source of truth for where
-# the cache lives (so multi-scope installs all stay in sync).
+# There are TWO mirrors to keep in sync on every install:
+#   (a) the live cache — what CLAUDE_PLUGIN_ROOT resolves to at runtime,
+#       listed in installed_plugins.json as `installPath`.
+#   (b) the marketplace source — what `/plugin install` COPIES FROM the
+#       next time the user (re)installs, at
+#       ~/.claude/plugins/marketplaces/session-intelligence/plugins/session-intelligence/.
+#       If this drifts, a user who re-runs /plugin install gets an outdated
+#       cache again even though we just refreshed it.
+#
+# Prior versions of this block only updated (a). New files added to the
+# repo's lib/ (e.g. usage-api.js, usage-refresh.js in the quota row
+# feature) silently failed to reach runtime until someone manually rsync'd
+# the mirrors — captured in the plugin-cache-refresh memory note. Now we
+# sync both.
 if [ "$PLUGIN_INSTALLED" = true ]; then
   CACHE_PATHS="$(node -e "
     try {
@@ -118,21 +147,53 @@ if [ "$PLUGIN_INSTALLED" = true ]; then
     } catch {}
   " 2>/dev/null)"
 
-  if [ -n "$CACHE_PATHS" ] && command -v rsync &>/dev/null; then
-    while IFS= read -r cache; do
-      [ -z "$cache" ] && continue
-      if [ -d "$cache" ]; then
-        rsync -a --delete \
-          --exclude='.git/' --exclude='node_modules/' --exclude='tests/' \
-          "${PLUGIN_SRC}/" "${cache}/" \
-          && ok "Refreshed plugin cache → ${cache}"
-      else
-        warn "Plugin cache path missing: ${cache} (skipped)"
-      fi
-    done <<< "$CACHE_PATHS"
-  elif [ -n "$CACHE_PATHS" ]; then
-    warn "rsync not found — skipping plugin cache refresh. Install rsync or re-run /plugin install."
+  # Marketplace source — deterministic path from the `@<marketplace>` suffix
+  # on the plugin id. Only present when the user pulled this marketplace
+  # into their install.
+  MARKETPLACE_PATH="${CLAUDE_DIR}/plugins/marketplaces/session-intelligence/plugins/session-intelligence"
+
+  if command -v rsync &>/dev/null; then
+    # (a) Live cache(s) — there may be multiple if the user installed at
+    # different scopes (user + project). installed_plugins.json is the
+    # source of truth.
+    if [ -n "$CACHE_PATHS" ]; then
+      while IFS= read -r cache; do
+        [ -z "$cache" ] && continue
+        if [ -d "$cache" ]; then
+          rsync -a --delete \
+            --exclude='.git/' --exclude='node_modules/' --exclude='tests/' \
+            "${PLUGIN_SRC}/" "${cache}/" \
+            && ok "Refreshed plugin cache → ${cache}"
+        else
+          warn "Plugin cache path missing: ${cache} (skipped)"
+        fi
+      done <<< "$CACHE_PATHS"
+    fi
+
+    # (b) Marketplace source — prevents re-install from resurrecting stale
+    # code. Only touches the plugin's own subtree, not sibling plugins.
+    if [ -d "$MARKETPLACE_PATH" ]; then
+      rsync -a --delete \
+        --exclude='.git/' --exclude='node_modules/' --exclude='tests/' \
+        "${PLUGIN_SRC}/" "${MARKETPLACE_PATH}/" \
+        && ok "Refreshed marketplace source → ${MARKETPLACE_PATH}"
+    fi
+  elif [ -n "$CACHE_PATHS" ] || [ -d "$MARKETPLACE_PATH" ]; then
+    warn "rsync not found — skipping plugin cache/marketplace refresh. Install rsync or re-run /plugin install."
   fi
+fi
+
+# --refresh-only bails here. The rest of the script rewrites hooks in
+# ~/.claude/scripts/hooks/ and patches ~/.claude/settings.json; neither is
+# needed when you just edited files in the repo and want them live at
+# runtime. Use this in dogfood loops so you don't re-register hooks or
+# touch user settings every round.
+if [ "$REFRESH_ONLY" = true ]; then
+  if [ "$PLUGIN_INSTALLED" != true ]; then
+    warn "--refresh-only: plugin not detected in installed_plugins.json — nothing refreshed."
+  fi
+  ok "Refresh complete. Exiting early (hooks + settings untouched)."
+  exit 0
 fi
 
 # ─── 1. Install hooks + shared lib ──────────────────

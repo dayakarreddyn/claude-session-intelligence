@@ -151,11 +151,12 @@ DROP: login debugging traces, CSS exploration, E2E raw output
 
 ### 3. What Happens on Compact
 
-When `/compact` fires (manually or auto), the pre-compact hook injects up to three blocks into the summary context:
+When `/compact` fires (manually or auto), the pre-compact hook injects up to four blocks into the summary context:
 
 1. **COMPACTION GUIDANCE** — parsed from `session-context.md` (user-curated signal)
 2. **OBSERVED CONTEXT SHAPE** — generated from the shape tracker's tool-call log (grounded signal)
 3. **MEMORY OFFLOAD CHECKPOINT** — a directive telling Claude to preserve rich detail in auto-memory before the summary collapses it
+4. **TIP** — a one-line post-compact lifeline (e.g. `/si expand <tool_use_id>` to replay an archived tool response, `/si archive-list` to see what's on disk). Rotated deterministically from a small pool; disappears gracefully on mixed-version installs.
 
 ```
 COMPACTION GUIDANCE (from session-context.md):
@@ -456,15 +457,17 @@ Optional: offload rich detail to auto-memory at /Users/you/.claude/projects/<enc
 (project_session_*.md / reference_*.md + MEMORY.md index) before compacting.
 When you do compact, `/compact` auto-injects preserve/drop hints from observed tool usage; free-text hints still work.
 (Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
+Tip: commit in-flight work now; a clean tree survives /compact without needing to be re-described.
 Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.
 ```
 
-The tone is **advisory, not directive**. Claude is told "continue if the task needs full context" so a zone warning doesn't derail a mid-flight refactor. Five layers:
+The tone is **advisory, not directive**. Claude is told "continue if the task needs full context" so a zone warning doesn't derail a mid-flight refactor. Six layers:
 - **Header** — zone + tokens + cost, explicitly flagged "advisory only"
 - **Diagnosis** — what the shape tracker observed: domain shifts, stale bands, hot dirs
 - **Memory offload** — *optional* nudge to dump rich detail to auto-memory before compact collapses it, while context is still live
 - **Action hint** — when you do compact, `/compact` auto-injects preserve/drop hints via the PreCompact hook
 - **Adaptive footnote** — only appears when zones learned from your history
+- **Rotating tip** — one-line zone-keyed suggestion (preserve-hint syntax, subagent delegation, `/si expand` post-compact, …). Keyed to `(sessionId, zone, day)` so it stays stable within a session but varies across sessions/days — avoids banner fatigue without flickering between tool calls.
 
 The hook exits `2` (stderr fed back to Claude Code as hook feedback), but because this runs on `PostToolUse` the tool call itself already completed successfully — the message arrives on the next assistant turn as a heads-up, not an interruption.
 

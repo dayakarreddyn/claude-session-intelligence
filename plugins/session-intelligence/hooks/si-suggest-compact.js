@@ -63,6 +63,8 @@ let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 let costEst = null;
 try { costEst = require(path.join(SI_LIB, 'cost-estimation')); } catch { /* optional */ }
+let pickTip = null;
+try { pickTip = require(path.join(SI_LIB, 'tips')).pickTip; } catch { /* optional */ }
 
 // Load unified config; env overrides already baked in by loadConfig().
 function loadSiConfig() {
@@ -354,6 +356,16 @@ async function main() {
         try {
           const shiftLine = compactHistory.announceAdaptiveShift(zonesCfg, cwdForZones);
           if (shiftLine) body.push(shiftLine);
+        } catch { /* best effort */ }
+      }
+      // Rotating tip keyed to (sessionId, zone, day) — stable within a
+      // session so Claude doesn't see the message flicker between tool
+      // calls, but varied across sessions/days so the pool doesn't get
+      // stale. Best-effort: tips module is optional.
+      if (pickTip) {
+        try {
+          const tip = pickTip(zone, sessionId);
+          if (tip) body.push(`Tip: ${tip}`);
         } catch { /* best effort */ }
       }
       body.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');

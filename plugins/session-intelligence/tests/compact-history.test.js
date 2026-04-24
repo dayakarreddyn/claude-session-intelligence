@@ -510,3 +510,38 @@ test('soft regret only stamps when there were soft hits', () => {
   assert.equal(stamped.softRegretCount, undefined, 'no soft regret field when no soft hits');
   assert.equal(stamped.continuationQuality, 1); // positive-only → +1
 });
+
+// ── Session-scoped last-compact lookup ────────────────────────────────────
+
+test('lastCompactMsForSession returns most recent t for matching sid', () => {
+  resetHistory();
+  const base = Date.now() - 10_000;
+  compactHistory.appendHistory(fakeEntry({ t: base,      sid: 'sid-A' }));
+  compactHistory.appendHistory(fakeEntry({ t: base + 1,  sid: 'sid-B' }));
+  compactHistory.appendHistory(fakeEntry({ t: base + 2,  sid: 'sid-A' })); // winner
+  compactHistory.appendHistory(fakeEntry({ t: base + 3,  sid: 'sid-B' }));
+  assert.equal(compactHistory.lastCompactMsForSession('sid-A'), base + 2);
+  assert.equal(compactHistory.lastCompactMsForSession('sid-B'), base + 3);
+});
+
+test('lastCompactMsForSession returns null when sid has no compact yet', () => {
+  resetHistory();
+  compactHistory.appendHistory(fakeEntry({ sid: 'other-sid' }));
+  assert.equal(compactHistory.lastCompactMsForSession('fresh-sid'), null);
+});
+
+test('lastCompactMsForSession returns null for empty sid', () => {
+  resetHistory();
+  compactHistory.appendHistory(fakeEntry({ sid: 'whatever' }));
+  assert.equal(compactHistory.lastCompactMsForSession(''), null);
+  assert.equal(compactHistory.lastCompactMsForSession(undefined), null);
+});
+
+test('lastCompactMsForSession accepts pre-read history to avoid double I/O', () => {
+  resetHistory();
+  const base = Date.now() - 5_000;
+  compactHistory.appendHistory(fakeEntry({ t: base,     sid: 'xyz' }));
+  compactHistory.appendHistory(fakeEntry({ t: base + 7, sid: 'xyz' }));
+  const history = compactHistory.readHistory();
+  assert.equal(compactHistory.lastCompactMsForSession('xyz', history), base + 7);
+});

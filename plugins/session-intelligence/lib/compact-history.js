@@ -109,6 +109,20 @@ function readHistory(limit = MAX_HISTORY_READ) {
   } catch { return []; }
 }
 
+// Most recent compact timestamp (ms) for the given session id, or null when
+// this session hasn't compacted yet. Callers use this to scope the
+// "compact ago" and "cost since compact" signals to the current session
+// instead of the global last-compact event.
+function lastCompactMsForSession(sessionId, history) {
+  if (!sessionId) return null;
+  const entries = Array.isArray(history) ? history : readHistory();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.sid === sessionId && typeof e.t === 'number') return e.t;
+  }
+  return null;
+}
+
 // ── Percentiles ──────────────────────────────────────────────────────────
 
 function percentiles(values) {
@@ -579,6 +593,7 @@ module.exports = {
   HISTORY_FILE,
   appendHistory,
   readHistory,
+  lastCompactMsForSession,
   percentiles,
   adaptiveZones,
   announceAdaptiveShift,

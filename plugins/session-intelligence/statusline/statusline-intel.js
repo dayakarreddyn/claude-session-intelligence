@@ -109,22 +109,29 @@ function loadUsage() {
   return _usageCached;
 }
 
-// Render a usage cell as `<label>:<pct>% · <reset-in duration>`. The %
-// gets the usual zone colour escalation so a soon-to-exhaust quota reads
-// at a glance. Reset-duration stays dim — supporting context, not alarm.
-function _renderUsageCellImpl(label, pctRaw, resetAt, C) {
+// Render a usage cell as `<label>:<pct>% · <reset-in duration>`.
+// colourMode: 'zone' escalates green→yellow→orange→red at 60/85/95 so a
+// soon-to-exhaust quota reads at a glance (weekly, where the signal is
+// load-bearing). 'dim' keeps the cell muted to match the rest of the row
+// (5h block, where the percent matters less than the countdown).
+function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
   if (typeof pctRaw !== 'number' || !Number.isFinite(pctRaw)) return '';
   const pct = Math.round(pctRaw);
-  let col = C.green;
-  if (pct >= 95) col = C.red;
-  else if (pct >= 85) col = C.orange;
-  else if (pct >= 60) col = C.yellow;
   let resetStr = '';
   if (resetAt) {
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDuration(ms);
   }
-  const head = `${col}${label}:${pct}%${C.reset}`;
+  let head;
+  if (colourMode === 'dim') {
+    head = `${C.dim}${label}:${pct}%${C.reset}`;
+  } else {
+    let col = C.green;
+    if (pct >= 95) col = C.red;
+    else if (pct >= 85) col = C.orange;
+    else if (pct >= 60) col = C.yellow;
+    head = `${col}${label}:${pct}%${C.reset}`;
+  }
   // `r:` prefix on the reset duration keeps the cell self-explanatory.
   // Plain-space separator inside the cell — the outer `·` between fields
   // is the field boundary, so we skip it within a single usage cell.
@@ -519,17 +526,42 @@ function contextCap(input, cfg) {
 }
 
 /**
- * Render a Unicode progress bar. Fill is colored by current zone; empty
- * slots are dim. Zone state is conveyed by color alone — no markers.
+ * Render a Unicode progress bar as a segmented gradient. Each filled slot
+ * is coloured by the zone the tokens AT THAT SLOT POSITION belong to
+ * (green → yellow → orange → red), so zone boundaries are visible even
+ * mid-fill. Empty slots stay dim. This replaces the prior mono-colour fill
+ * (whole bar = current zone's colour) that made zone progression invisible
+ * until the bar flipped wholesale.
  *
- * Returns an ANSI-colored string of visible width `width`.
+ * `zoneColorName` is no longer used for the fill — it's accepted for
+ * source compatibility with callers that still pass it. Unfilled tail
+ * colour is always dim.
+ *
+ * Returns an ANSI-coloured string of visible width `width`.
  */
-function renderContextBar(used, cap, zones, C, zoneColorName, width) {
+function renderContextBar(used, cap, zones, C, _zoneColorName, width) {
   const w = Math.max(8, Math.min(40, width || 20));
   const ratio = cap > 0 ? Math.max(0, Math.min(1, used / cap)) : 0;
   const filled = Math.round(ratio * w);
-  const zoneColor = C[zoneColorName] || C.reset;
-  return `${zoneColor}${'▰'.repeat(filled)}${C.reset}${C.dim}${'▱'.repeat(w - filled)}${C.reset}`;
+  if (cap <= 0) {
+    return `${C.dim}${'▱'.repeat(w)}${C.reset}`;
+  }
+  let out = '';
+  let prevColor = '';
+  for (let i = 0; i < filled; i++) {
+    // Classify each slot by the tokens at its upper edge so a slot that
+    // crosses a zone threshold takes the new zone's colour (visual bias
+    // toward "this is the zone you've reached").
+    const slotTokens = ((i + 1) / w) * cap;
+    const color = C[zoneFor(slotTokens, zones).color] || C.reset;
+    if (color !== prevColor) {
+      out += `${C.reset}${color}`;
+      prevColor = color;
+    }
+    out += '▰';
+  }
+  out += `${C.reset}${C.dim}${'▱'.repeat(w - filled)}${C.reset}`;
+  return out;
 }
 
 function zoneFor(tokens, zones) {
@@ -572,26 +604,35 @@ function fmtDuration(ms) {
 
 // ─── Compaction ──────────────────────────────────────────────────────────────
 
-function minutesSinceLastCompact() {
-  const ms = compactionLogMtimeMs();
+// Session-scoped. Returns the ms timestamp of the most recent /compact this
+// session has performed (via compact-history.jsonl), or null when there's
+// been no compact in this sid yet. A global compaction-log mtime was used
+// here previously — it surfaced OTHER sessions' compacts and confused the
+// "compact ago" and "cost since compact" signals in tabs that hadn't
+// compacted at all.
+function lastCompactMsForSession(sessionId) {
+  if (!sessionId) return null;
+  const lib = loadCompactHistoryLib();
+  if (!lib || typeof lib.lastCompactMsForSession !== 'function') return null;
+  return lib.lastCompactMsForSession(sessionId);
+}
+
+function minutesSinceLastCompact(sessionId) {
+  const ms = lastCompactMsForSession(sessionId);
   return ms === null ? null : Math.floor((Date.now() - ms) / 60000);
 }
 
-function compactionLogMtimeMs() {
-  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
-  const log = path.join(home, '.claude', 'session-data', 'compaction-log.txt');
-  try { return fs.statSync(log).mtimeMs; } catch { return null; }
-}
-
 /**
- * Cost + cache-savings accrued since the last /compact. Scans transcript
- * JSONL lines whose `timestamp` is >= compaction-log mtime. Incrementally
- * cached under /tmp keyed by sessionId + compactMs — when the compact
- * mtime advances (new /compact fires), the cache resets automatically.
+ * Cost + cache-savings accrued since the last /compact IN THIS SESSION.
+ * Returns zeroes when the session hasn't compacted yet — the cell renders
+ * empty in that case, same as compactAge. Scans transcript JSONL lines
+ * whose `timestamp` is >= the session's last-compact timestamp.
+ * Incrementally cached under /tmp keyed by sessionId + compactMs — when
+ * the session compacts again, the cache resets automatically.
  */
 function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
   const empty = { cost: 0, saved: 0 };
-  const compactMs = compactionLogMtimeMs();
+  const compactMs = lastCompactMsForSession(sessionId);
   if (!compactMs) return empty;
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
@@ -982,7 +1023,7 @@ function buildRenderers(C) {
       const total = t.input + t.output + t.cached + t.creation;
       if (total <= 0) return '';
       const cacheActivity = t.cached + t.creation;
-      return `${C.dim}${fmtTokens(total)} ↓${fmtTokens(t.input)} ↑${fmtTokens(t.output)} c${fmtTokens(cacheActivity)}${C.reset}`;
+      return `${C.dim}t:${fmtTokens(total)} ↓${fmtTokens(t.input)} ↑${fmtTokens(t.output)} c${fmtTokens(cacheActivity)}${C.reset}`;
     },
 
     /**
@@ -1002,14 +1043,18 @@ function buildRenderers(C) {
       return iss ? `${C.dim}${iss}${C.reset}` : '';
     },
 
-    /** Minutes since last compaction event (pre-compact hook timestamps).
-     *  This is the only line-2 field that escalates colour — red is reserved
-     *  for the "you should compact now" alert so it stands out against the
+    /** Minutes since last compaction event IN THIS SESSION (pre-compact
+     *  hook writes compact-history.jsonl keyed by session id). Empty when
+     *  the current session hasn't compacted yet — a global last-compact
+     *  age would surface other tabs' compacts and misrepresent this run.
+     *  The only line-2 field that escalates colour — red is reserved for
+     *  the "you should compact now" alert so it stands out against the
      *  otherwise dim second line:
      *    <120m  dim  — fresh enough, no action
      *    >=120m red  — overdue, compact strongly suggested */
-    compactAge: (_input, _ctx) => {
-      const mins = minutesSinceLastCompact();
+    compactAge: (input, _ctx) => {
+      const sid = input.session_id || input.sessionId || '';
+      const mins = minutesSinceLastCompact(sid);
       if (mins === null) return '';
       const label = fmtDuration(mins * 60 * 1000);
       const color = mins >= 120 ? C.red : C.dim;
@@ -1056,7 +1101,7 @@ function buildRenderers(C) {
     blockUsage: (_input, _ctx) => {
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
-      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C);
+      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim');
     },
 
     /** Weekly (7-day) usage + time until reset. Same shape as blockUsage
@@ -1064,7 +1109,7 @@ function buildRenderers(C) {
     weekUsage: (_input, _ctx) => {
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
-      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C);
+      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone');
     },
 
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`

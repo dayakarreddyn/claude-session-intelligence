@@ -285,12 +285,23 @@ function collectEcosystem() {
   return detected;
 }
 
-function collectCompactLog() {
-  const log = path.join(CLAUDE_DIR, 'session-data', 'compaction-log.txt');
-  try {
-    const stat = fs.statSync(log);
-    return { path: log, ageMs: Date.now() - stat.mtimeMs };
-  } catch { return null; }
+// Session-scoped — only reports a /compact timestamp if THIS session has
+// compacted. Global mtime of compaction-log.txt was misleading in fresh
+// tabs that inherited "last compact" from a sibling session.
+function collectCompactLog(sid) {
+  if (!sid) return null;
+  for (const pluginDir of PLUGIN_DIR_CANDIDATES) {
+    const libPath = path.join(pluginDir, 'plugins', 'session-intelligence', 'lib', 'compact-history.js');
+    if (!fs.existsSync(libPath)) continue;
+    try {
+      const lib = require(libPath);
+      if (typeof lib.lastCompactMsForSession !== 'function') continue;
+      const ms = lib.lastCompactMsForSession(sid);
+      if (ms === null) return null;
+      return { sid, ageMs: Date.now() - ms };
+    } catch { /* try next candidate */ }
+  }
+  return null;
 }
 
 // ─── Printer ─────────────────────────────────────────────────────────────────
@@ -309,7 +320,7 @@ function main() {
   const config = readJson(UNIFIED_CONFIG) || {};
   const zones = config.statusline?.zones;
   const zone = session.tokenBudget ? zoneFor(session.tokenBudget, zones) : null;
-  const compactLog = collectCompactLog();
+  const compactLog = collectCompactLog(sid);
 
   const out = [];
   out.push('Session Intelligence — runtime status');

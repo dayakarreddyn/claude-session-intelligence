@@ -151,6 +151,26 @@ function buildGitNexusRefreshBlock(status) {
   ].join('\n');
 }
 
+function buildTipBlock(sessionId) {
+  // Lazy-load: tips module is optional so mixed-version installs don't
+  // fail. Pre-compact tips are pulled from the 'compact' pool (distinct
+  // from the yellow/orange/red pools used by suggest-compact) because the
+  // audience is different — here the user is one beat away from /compact,
+  // so the most useful hint is "how to land softly" rather than "consider
+  // compacting".
+  let pickTip;
+  try { pickTip = require(path.join(SI_LIB, 'tips')).pickTip; }
+  catch { return ''; }
+  const tip = pickTip('compact', sessionId);
+  if (!tip) return '';
+  return [
+    '',
+    '## TIP',
+    `Tip: ${tip}`,
+    '',
+  ].join('\n');
+}
+
 function buildPrioritiesReviewBlock(projectDir) {
   if (!projectDir) return '';
   const memoryDir = path.join(projectDir, 'memory');
@@ -463,10 +483,15 @@ async function main() {
   // refresh-on-compact is off, or the cwd isn't a git repo.
   const gitNexusRefresh = buildGitNexusRefreshBlock(gitNexusStatus);
 
+  // Rotating one-liner — same salt convention as the zone-crossover
+  // callout so (session, day) stays stable within a day. Low-weight by
+  // design: a single line, skipped if the tips module isn't on disk.
+  const tipBlock = buildTipBlock(sessionId);
+
   // Single top-level heading so the model knows this block came from the
   // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
   // mobile render it cleanly, no wide bars that wrap on narrow screens.
-  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh) {
+  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh || tipBlock) {
     process.stdout.write(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
@@ -513,6 +538,10 @@ async function main() {
       sinceDays: gitNexusStatus.sinceDays,
       bytes: gitNexusRefresh.length,
     });
+  }
+  if (tipBlock) {
+    process.stdout.write(tipBlock);
+    intelLog('pre-compact', 'debug', 'tip block emitted', { bytes: tipBlock.length });
   }
 
   // stablePrefix drift check — when the opt-in cache-friendly mode is on,
