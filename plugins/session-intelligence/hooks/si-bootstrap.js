@@ -607,6 +607,53 @@ function showFirstRunTips(state) {
   return true;
 }
 
+// ─── Stale temp-file sweep ───────────────────────────────────────────────────
+// macOS /tmp cleanup is unreliable, so per-session state files
+// (claude-{compact-state,token-budget,tool-count,ctx-shape}-<sid>) accumulate
+// for weeks of dead sessions. Sweep anything older than 7 days at SessionStart
+// — cheap (one readdir, lstat per match), best-effort (any failure logged at
+// debug and moved past), bounded (only matches our own filename prefix).
+const STALE_TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive)-/;
+function sweepStaleTempFiles() {
+  let tempDir;
+  try {
+    const { getTempDir } = require(path.join(SI_LIB, 'utils'));
+    tempDir = getTempDir();
+  } catch { return 0; }
+  let removed = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(tempDir); }
+  catch (err) {
+    intelLog('bootstrap', 'debug', 'temp sweep readdir failed',
+      { err: err && err.message });
+    return 0;
+  }
+  const now = Date.now();
+  for (const name of entries) {
+    if (!STALE_TEMP_PREFIX_RE.test(name)) continue;
+    const full = path.join(tempDir, name);
+    try {
+      const st = fs.statSync(full);
+      if (now - st.mtimeMs < STALE_TEMP_MAX_AGE_MS) continue;
+      // Tool-archive matches are directories; everything else is a file.
+      if (st.isDirectory()) {
+        fs.rmSync(full, { recursive: true, force: true });
+      } else {
+        fs.unlinkSync(full);
+      }
+      removed++;
+    } catch (err) {
+      intelLog('bootstrap', 'debug', 'temp sweep entry failed',
+        { name, err: err && err.message });
+    }
+  }
+  if (removed > 0) {
+    intelLog('bootstrap', 'info', 'stale temp files swept', { removed });
+  }
+  return removed;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function readStdinJsonOrEmpty() {
@@ -743,6 +790,9 @@ function main() {
 
   // Ensure ~/.claude/ exists before we try to drop a lock file into it.
   try { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); } catch { /* ignore */ }
+  // Sweep stale per-session temp files BEFORE acquiring the lock — failure
+  // here is cosmetic and shouldn't gate the rest of bootstrap.
+  try { sweepStaleTempFiles(); } catch { /* best effort */ }
   const locked = acquireStateLock();
   try {
     const state = loadState();

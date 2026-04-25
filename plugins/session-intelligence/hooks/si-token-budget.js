@@ -153,8 +153,6 @@ async function main() {
     const toolName = (parsedInput && parsedInput.tool_name) || '';
     const toolInput = (parsedInput && parsedInput.tool_input) || {};
     const filePath = toolInput.file_path || toolInput.path || toolInput.notebook_path || '';
-    const depth = (cfg && cfg.shape && Number.isFinite(cfg.shape.rootDirDepth))
-      ? cfg.shape.rootDirDepth : 2;
     // Resolve cwd through the session anchor chain:
     //   1. session-state file written by si-bootstrap (stable across subagent
     //      cwd drift — the motivating case for this design)
@@ -169,6 +167,19 @@ async function main() {
     const { cwd, source: cwdSource } = resolveSessionCwd({
       sessionId, payloadCwd, filePath,
     });
+    // Apply per-project shape overrides — without this, `cfg.shape.rootDirDepth`
+    // is always the top-level value (default 2), so a perProject override like
+    // `/Users/alex/DWS/CSM: { rootDirDepth: 3 }` is silently ignored at WRITE
+    // time. Each appended entry's `root` field gets bucketed with the wrong
+    // depth, and downstream reclassification can only paper over so much.
+    let shapeCfg = (cfg && cfg.shape) ? cfg.shape : {};
+    try {
+      const cfgMod = require(path.join(SI_LIB, 'config'));
+      if (cfgMod.resolveShapeForCwd) {
+        shapeCfg = cfgMod.resolveShapeForCwd(cfg, cwd);
+      }
+    } catch { /* fall back to top-level shape */ }
+    const depth = Number.isFinite(shapeCfg.rootDirDepth) ? shapeCfg.rootDirDepth : 2;
     const root = rootDirOf(filePath, depth, { cwd });
 
     // Self-heal: if bootstrap didn't run (fresh install, cache drift) and the
@@ -205,8 +216,17 @@ async function main() {
     // Only append entries that carry a signal — a pure Bash echo with no file
     // and no event adds noise without informing the analyzer.
     if (root || event) {
-      const maxEntries = (cfg && cfg.shape && Number.isFinite(cfg.shape.maxEntries))
-        ? cfg.shape.maxEntries : undefined;
+      // clampMaxEntries enforces [50, 5000] so a perProject typo can't
+      // either starve the analyzer or balloon the shape file.
+      let maxEntries;
+      try {
+        const cfgMod = require(path.join(SI_LIB, 'config'));
+        maxEntries = cfgMod.clampMaxEntries
+          ? cfgMod.clampMaxEntries(shapeCfg.maxEntries)
+          : (Number.isFinite(shapeCfg.maxEntries) ? shapeCfg.maxEntries : undefined);
+      } catch {
+        maxEntries = Number.isFinite(shapeCfg.maxEntries) ? shapeCfg.maxEntries : undefined;
+      }
       appendShape(sessionId, {
         t: Date.now(),
         tok: cumulative,

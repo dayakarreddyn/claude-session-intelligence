@@ -52,7 +52,6 @@ const SI_LIB = resolveSiLibDir();
 const {
   getTempDir,
   writeFile,
-  log,
   readStdinJson,
   readTranscriptTokens,
   resolveProjectDir,
@@ -76,7 +75,20 @@ async function main() {
   const fullCfg = loadSiConfig();
   const cfg = fullCfg.compact || {};
   const learnCfg = fullCfg.learn || {};
-  const shapeCfg = fullCfg.shape || {};
+  // Read stdin early so we can resolve cwd before applying perProject overrides.
+  const stdinInput = readStdinJson();
+  const stdinCwd = (stdinInput && (stdinInput.cwd
+    || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
+  // Apply per-project shape override so preserveGlobs/gitNexus/rootDirDepth
+  // pick up the project-specific entries. Without this, shape diagnosis ran
+  // with top-level config even when perProject overrides were defined.
+  let shapeCfg = fullCfg.shape || {};
+  try {
+    const cfgMod = require(path.join(SI_LIB, 'config'));
+    if (cfgMod.resolveShapeForCwd) {
+      shapeCfg = cfgMod.resolveShapeForCwd(fullCfg, stdinCwd);
+    }
+  } catch { /* fall back to top-level shape */ }
   const userGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
 
   // ANSI styling for zone-crossover advisories. Two layers:
@@ -127,8 +139,6 @@ async function main() {
     return lines.join('\n');
   }
 
-  const stdinInput = readStdinJson();
-
   // Git-nexus allowlist is resolved lazily — cached 24h, so the cost of the
   // `git log` is amortised across every suggest-compact fire in a session.
   // Same inputs as pre-compact so both hooks see the same HOT band.
@@ -137,7 +147,6 @@ async function main() {
   if (gitNexusCfg.enabled !== false) {
     try {
       const { topTouchedFiles, toPreserveGlobs } = require(path.join(SI_LIB, 'git-nexus'));
-      const stdinCwd = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
       const anchors = topTouchedFiles(stdinCwd, {
         sinceDays: Number.isFinite(gitNexusCfg.sinceDays) ? gitNexusCfg.sinceDays : 90,
         limit: Number.isFinite(gitNexusCfg.limit) ? gitNexusCfg.limit : 20,
@@ -216,13 +225,24 @@ async function main() {
   // Cost-band: when sessionCost exceeds the user's historical p75 cost,
   // orange tightens by 12% — expensive sessions warrant earlier warnings.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
-  const staticZones = { yellow: 200000, orange: 300000, red: 400000 };
-  let zonesCfg = staticZones;
+  // Single source of truth — same thresholds the statusline paints with.
+  // Avoids the misalignment where `statusline.zones` was customised but the
+  // hook's hardcoded {200k,300k,400k} fell out of sync.
+  let baseZones;
+  try {
+    const cfgMod = require(path.join(SI_LIB, 'config'));
+    baseZones = cfgMod.getZoneThresholds
+      ? cfgMod.getZoneThresholds(fullCfg)
+      : { yellow: 200000, orange: 300000, red: 400000 };
+  } catch {
+    baseZones = { yellow: 200000, orange: 300000, red: 400000 };
+  }
+  let zonesCfg = baseZones;
   try {
     if (compactHistory) {
       zonesCfg = compactHistory.adaptiveZones(
         compactHistory.readHistory(),
-        staticZones,
+        baseZones,
         { cwd: cwdForZones, currentCost: sessionCost });
     }
   } catch { /* keep static */ }
@@ -230,55 +250,83 @@ async function main() {
   const zone = getZone(tokenBudget, zonesCfg);
   const budgetStr = tokenBudget > 0 ? ` (~${formatTokens(tokenBudget)} tokens, ${zone} zone)` : '';
 
-  // Tool-call based suggestions (original logic)
+  // Tool-call milestones — kept as observability signals only. Used to
+  // emit via `log()` (raw stderr), but those one-liners competed with the
+  // rich zone callout below and were easy to miss in scrollback. Intel log
+  // is the right surface for "useful for debugging hook behaviour, but not
+  // worth surfacing to the model on every milestone."
   if (count === threshold) {
-    log(`[StrategicCompact] ${threshold} tool calls reached${budgetStr} - consider /compact if transitioning phases`);
-  }
-
-  if (count > threshold && (count - threshold) % 25 === 0) {
-    log(`[StrategicCompact] ${count} tool calls${budgetStr} - good checkpoint for /compact if context is stale`);
-  }
-
-  // Token-budget based suggestions (new — only fires at zone transitions)
-  // We check both current and what the zone was ~5k tokens ago to avoid spam
-  if (tokenBudget > 0) {
-    const prevZone = getZone(tokenBudget - 5000, zonesCfg);
-
-    if (zone === 'yellow' && prevZone === 'green') {
-      log(paintZone('yellow', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — entering caution zone. Good time to /compact between tasks (offload rich detail to auto-memory first).`));
-      intelLog('suggest-compact', 'info', `suggestion: yellow-zone`, { tokenBudget, count });
-    } else if (zone === 'orange' && prevZone === 'yellow') {
-      log(paintZone('orange', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — drift zone. Hint: /compact at the next natural pause. Advisory, not blocking.`));
-      intelLog('suggest-compact', 'warn', `suggestion: orange-zone`, { tokenBudget, count });
-    } else if (zone === 'red' && prevZone === 'orange') {
-      log(paintZone('red', `[StrategicCompact] ~${formatTokens(tokenBudget)} tokens — high-risk zone. Hint: /compact soon. Continue if the task needs full context.`));
-      intelLog('suggest-compact', 'warn', `suggestion: red-zone`, { tokenBudget, count });
-    }
+    intelLog('suggest-compact', 'debug', 'tool-call milestone',
+      { count, threshold, tokenBudget, zone });
+  } else if (count > threshold && (count - threshold) % 25 === 0) {
+    intelLog('suggest-compact', 'debug', 'tool-call checkpoint',
+      { count, tokenBudget, zone });
   }
 
   // Surface the zone escalation to the assistant via PostToolUse exit 2
   // (stderr becomes hook feedback on the next turn — does NOT block the
-  // tool that just ran). One-shot per zone-rank increase so we don't spam
-  // every tool call inside the same zone. When tokens drop (post-compact),
-  // state re-sets and the next escalation fires again.
+  // tool that just ran). Two emit paths:
+  //   1. ZONE CROSSING — first time we hit orange/red in this session.
+  //   2. PERIODIC RE-FIRE — same zone but tokens grew by ≥ refireEveryTokens
+  //      since the last emit. Without this, a session that crosses orange
+  //      at 305k and stays in orange for the next 100k tokens would only
+  //      see ONE callout the entire time. The re-fire keeps the nudge
+  //      present as the user keeps adding context.
   //
-  // Disable the assistant-feedback channel with compact.autoblock=false
-  // (kept name for backwards compat — it's a misnomer now but changing the
-  // key would silently break existing configs).
+  // Disable the assistant-feedback channel with compact.autoblock=false.
+  // Tune the re-fire interval with compact.refireEveryTokens (default 25k);
+  // set to 0 to disable re-fire (only emit on zone crossings).
+  // Diagnostic log when the zone gate is skipped — used to be silent, which
+  // hid the "no transcript_path AND no budget tracker" wrapper-CLI failure
+  // mode where the hook ran but produced no callout.
+  if (tokenBudget === 0) {
+    intelLog('suggest-compact', 'info', 'zone gate skipped (tokenBudget=0)', {
+      hasTranscript: !!transcriptPath,
+      tokenSource,
+      sessionId,
+    });
+  }
   if (tokenBudget > 0 && cfg.autoblock !== false) {
     const stateFile = path.join(getTempDir(), `claude-compact-state-${sessionId}`);
     const rank = { green: 0, yellow: 1, orange: 2, red: 3 };
+    // State is JSON: { zone, tok }. Read tolerantly — older builds wrote
+    // a bare zone string, so plaintext fallback is treated as { zone, tok: 0 }
+    // (tok=0 means "we don't know the last emit level, allow re-fire").
     let lastZone = 'green';
+    let lastEmitTok = 0;
     try {
       const raw = fs.readFileSync(stateFile, 'utf8').trim();
-      if (rank[raw] !== undefined) lastZone = raw;
-    } catch { /* no prior state */ }
+      if (raw.startsWith('{')) {
+        const parsed = JSON.parse(raw);
+        if (parsed && rank[parsed.zone] !== undefined) lastZone = parsed.zone;
+        if (parsed && Number.isFinite(parsed.tok)) lastEmitTok = parsed.tok;
+      } else if (rank[raw] !== undefined) {
+        lastZone = raw;
+      }
+    } catch { /* no prior state or unparsable */ }
 
-    const escalated = rank[zone] > rank[lastZone] && rank[zone] >= rank.orange;
+    // Refire interval — clamp to a sane band so a typo can't either flood
+    // every tool call (1 token) or silence the feature for a million-token
+    // session (1B). Default 25k is roughly 8% of the 300k orange floor.
+    const rawRefire = Number.isFinite(cfg.refireEveryTokens) ? cfg.refireEveryTokens : 25000;
+    const refireEvery = rawRefire <= 0
+      ? 0
+      : Math.max(5000, Math.min(rawRefire, 200000));
+
+    // Yellow now joins the rich callout — used to be a silent one-line log,
+    // which meant a long session that plateaued in yellow saw no diagnosis,
+    // tip, or memory-offload nudge for the entire run.
+    const crossedUp = rank[zone] > rank[lastZone] && rank[zone] >= rank.yellow;
+    const stayedAtRisk = rank[zone] === rank[lastZone] && rank[zone] >= rank.yellow;
+    const grewEnough = refireEvery > 0
+      && stayedAtRisk
+      && (tokenBudget - lastEmitTok) >= refireEvery;
+    const escalated = crossedUp || grewEnough;
     if (escalated) {
-      // Persist immediately so we don't re-emit the same escalation on the
-      // very next tool call inside the same zone.
-      try { writeFile(stateFile, zone); } catch { /* best effort */ }
+      // Persist zone + the token level we emitted at, so the next call can
+      // gate re-fire on absolute token growth (independent of tool-call rate).
+      try { writeFile(stateFile, JSON.stringify({ zone, tok: tokenBudget })); }
+      catch { /* best effort */ }
 
       // Grounded diagnosis — what's actually in the context right now?
       // token-budget-tracker has been writing observation entries per tool
@@ -293,22 +341,22 @@ async function main() {
           canonicalCwd = state.cwd;
         }
       } catch { /* best effort */ }
-      // Apply per-project shape overrides (warmScoreCutoff) so the suggest
-      // diagnosis bands the same way the next /compact will. Without this,
-      // the user would see different hot/warm/cold in the zone-crossover
-      // hint vs the actual pre-compact summary.
-      let warmScoreCutoff;
+      // Re-resolve shape against canonicalCwd in case the bootstrap-pinned
+      // session cwd differs from the stdin cwd (subagent worktrees, payload
+      // drift). Falls back to the earlier shapeCfg when unavailable.
+      let canonicalShape = shapeCfg;
       try {
         const cfgMod = require(path.join(SI_LIB, 'config'));
-        const resolved = cfgMod.resolveShapeForCwd
-          ? cfgMod.resolveShapeForCwd(fullCfg, canonicalCwd)
-          : null;
-        if (resolved && Number.isFinite(resolved.warmScoreCutoff)) {
-          warmScoreCutoff = resolved.warmScoreCutoff;
+        if (cfgMod.resolveShapeForCwd && canonicalCwd) {
+          canonicalShape = cfgMod.resolveShapeForCwd(fullCfg, canonicalCwd);
         }
-      } catch { /* fall through to default */ }
+      } catch { /* keep earlier shapeCfg */ }
+      const warmScoreCutoff = Number.isFinite(canonicalShape.warmScoreCutoff)
+        ? canonicalShape.warmScoreCutoff : undefined;
+      const rootDirDepth = Number.isFinite(canonicalShape.rootDirDepth)
+        ? canonicalShape.rootDirDepth : undefined;
       const shape = analyzeShape(readShape(sessionId), {
-        preserveGlobs, canonicalCwd, warmScoreCutoff,
+        preserveGlobs, canonicalCwd, warmScoreCutoff, rootDirDepth,
       });
       const diagnosis = draftMessage(shape);
 
@@ -317,7 +365,14 @@ async function main() {
       // zone name alone carries the actionable signal; the numbers are
       // UX nice-to-haves that change every tool call.
       const stablePrefix = !!(fullCfg.compact && fullCfg.compact.stablePrefix);
-      const header = zone === 'red' ? 'High-risk zone' : 'Drift zone';
+      const baseHeader = zone === 'red'
+        ? 'High-risk zone'
+        : zone === 'orange'
+          ? 'Drift zone'
+          : 'Caution zone'; // yellow
+      // Subtle label so the model can tell crossings apart from re-fires —
+      // useful when scanning logs for "is this a fresh signal or a reminder?"
+      const header = grewEnough ? `${baseHeader} (still)` : baseHeader;
       const costStr = (!stablePrefix && costEst && sessionCost > 0)
         ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
       const tokStr = stablePrefix ? '' : ` — context at ~${formatTokens(tokenBudget)} tokens${costStr}`;
@@ -358,20 +413,26 @@ async function main() {
           if (shiftLine) body.push(shiftLine);
         } catch { /* best effort */ }
       }
-      // Rotating tip keyed to (sessionId, zone, day) — stable within a
-      // session so Claude doesn't see the message flicker between tool
-      // calls, but varied across sessions/days so the pool doesn't get
-      // stale. Best-effort: tips module is optional.
+      // Rotating tip keyed to (sessionId, zone, day) for crossings, plus
+      // the current `tokenBudget` snapshot for re-fires. The token bucket
+      // mixed in means the second hit at ~325k draws a different tip from
+      // the first hit at ~305k, instead of repeating the same line every
+      // refireEveryTokens window. Best-effort: tips module is optional.
       if (pickTip) {
         try {
-          const tip = pickTip(zone, sessionId);
+          const refireBucket = grewEnough
+            ? `|tok${Math.floor(tokenBudget / Math.max(refireEvery, 1))}`
+            : '';
+          const tip = pickTip(zone, `${sessionId}${refireBucket}`);
           if (tip) body.push(`Tip: ${tip}`);
         } catch { /* best effort */ }
       }
       body.push('Silence this feedback with CLAUDE_COMPACT_AUTOBLOCK=0.');
       process.stderr.write(renderCallout(zone, headline, body) + '\n');
       intelLog('suggest-compact', 'warn', `zone feedback at ${zone}`, {
-        tokenBudget, count, lastZone, sessionCost,
+        tokenBudget, count, lastZone, lastEmitTok,
+        emitReason: grewEnough ? 'refire' : 'crossing',
+        sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
         costTightened: !!zonesCfg.costTightened,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
@@ -380,8 +441,16 @@ async function main() {
     }
 
     // Tokens dropped (likely after /compact) — re-arm for next escalation.
+    // Reset lastEmitTok to the current budget so the next re-fire window is
+    // measured from "now," not from the high-water mark before /compact.
+    // Also log the descent so operators can correlate compact events with
+    // budget recovery in intel logs.
     if (rank[zone] < rank[lastZone]) {
-      try { writeFile(stateFile, zone); } catch { /* best effort */ }
+      try { writeFile(stateFile, JSON.stringify({ zone, tok: tokenBudget })); }
+      catch { /* best effort */ }
+      intelLog('suggest-compact', 'info', 'zone descended', {
+        from: lastZone, to: zone, tokenBudget, sessionId,
+      });
     }
   }
 

@@ -310,13 +310,25 @@ async function main() {
   let siCfg = {};
   try { siCfg = require(path.join(SI_LIB, 'config')).loadConfig() || {}; }
   catch { /* optional */ }
-  const userGlobs = (siCfg.shape && Array.isArray(siCfg.shape.preserveGlobs))
-    ? siCfg.shape.preserveGlobs : [];
+  // Apply per-project shape override to top-level shape so preserveGlobs unions
+  // user-global + project-specific entries. Re-resolved later against the
+  // session-pinned canonicalCwd; this initial pass uses payload cwd, which is
+  // correct for the common case where bootstrap pinned the same path.
+  let resolvedShape = (siCfg && siCfg.shape) || {};
+  try {
+    const cfgMod = require(path.join(SI_LIB, 'config'));
+    if (cfgMod.resolveShapeForCwd) {
+      resolvedShape = cfgMod.resolveShapeForCwd(siCfg, cwd);
+    }
+  } catch { /* fall back to top-level shape */ }
+  const userGlobs = Array.isArray(resolvedShape.preserveGlobs)
+    ? resolvedShape.preserveGlobs : [];
 
   // Git Nexus — fold top-touched files into the allowlist when enabled. This
   // is the "auto" half of preserve: user doesn't have to enumerate planning/
   // foundational dirs if git commit frequency already surfaces them.
-  const gitNexusCfg = (siCfg.shape && siCfg.shape.gitNexus) || {};
+  const gitNexusCfg = (resolvedShape && resolvedShape.gitNexus)
+    || (siCfg.shape && siCfg.shape.gitNexus) || {};
   let nexusGlobs = [];
   // Tracks whether we successfully re-derived the anchor list this compact
   // so buildGitNexusRefreshBlock can emit a confirmation note. Initialized

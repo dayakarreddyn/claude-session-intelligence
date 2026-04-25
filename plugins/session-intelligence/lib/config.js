@@ -84,8 +84,14 @@ const DEFAULTS = {
   },
   compact: {
     threshold: 50,              // tool calls before first advisory
-    autoblock: true,            // surface orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
+    autoblock: true,            // surface yellow/orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
     memoryOffload: true,        // inject a "offload rich detail to auto-memory" directive into pre-compact stdout
+    // Re-fire the zone callout after this many extra tokens accumulate while
+    // staying in the same at-risk zone. Without this, a single-shot crossing
+    // is the only signal — a session that plateaus in orange for 100k+ tokens
+    // sees one hint then nothing. 0 disables re-fire (crossings only).
+    // Clamped to [5000, 200000] at read time.
+    refireEveryTokens: 25000,
     // When true, model-visible pre-compact/zone-crossover output omits
     // per-compact-volatile values (call counts, stale-token estimates,
     // dated filenames, dollar amounts, live token counts). Trades UX
@@ -392,7 +398,11 @@ function resolveShapeForCwd(cfg, cwd) {
   const overrides = (base.perProject && typeof base.perProject === 'object')
     ? base.perProject[cwd]
     : null;
-  if (!overrides || typeof overrides !== 'object') return { ...base };
+  if (!overrides || typeof overrides !== 'object') {
+    const passthrough = { ...base };
+    delete passthrough.perProject;
+    return passthrough;
+  }
   const merged = { ...base, ...overrides };
   // Union preserveGlobs so a per-project override adds to (not replaces) user-global.
   const baseGlobs = Array.isArray(base.preserveGlobs) ? base.preserveGlobs : [];
@@ -404,6 +414,38 @@ function resolveShapeForCwd(cfg, cwd) {
   // returned object shape tight.
   delete merged.perProject;
   return merged;
+}
+
+/**
+ * Single source of truth for the {yellow, orange, red} token thresholds.
+ * Reads `statusline.zones` (the user-facing knob) and falls back to the
+ * built-in defaults. Suggest-compact and the statusline both call this so
+ * the bar's colour and the hook's escalation gate stay aligned — without
+ * it, customising one didn't move the other and you'd see orange in the
+ * bar while the hook still sat at yellow.
+ */
+function getZoneThresholds(cfg) {
+  const fallback = { yellow: 200000, orange: 300000, red: 400000 };
+  const z = (cfg && cfg.statusline && cfg.statusline.zones) || {};
+  return {
+    yellow: Number.isFinite(z.yellow) ? z.yellow : fallback.yellow,
+    orange: Number.isFinite(z.orange) ? z.orange : fallback.orange,
+    red:    Number.isFinite(z.red)    ? z.red    : fallback.red,
+  };
+}
+
+/**
+ * Clamp shape.maxEntries to [50, 5000]. Out-of-band values silently coerce
+ * to the default (200) so a typo can't either starve the analyzer (5 entries)
+ * or balloon the shape file to gigabytes. Returns the default when input is
+ * absent or non-numeric.
+ */
+function clampMaxEntries(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 200;
+  if (n < 50) return 50;
+  if (n > 5000) return 5000;
+  return Math.floor(n);
 }
 
 /** Dotted getter: get(cfg, "compact.autoblock"). */
@@ -438,4 +480,6 @@ module.exports = {
   set,
   deepMerge,
   resolveShapeForCwd,
+  getZoneThresholds,
+  clampMaxEntries,
 };
