@@ -12,6 +12,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si help                                  # list subcommands + one-line descriptions
 /si show                                  # print current config (pretty JSON)
 /si status                                # runtime state: hooks, statusline, session counters
+/si doctor                                # is SI actually wired up for THIS project? (whitelist + shape log)
 /si get <key>                             # print a single key (dotted path)
 /si set <key> <value>                     # stage a change, show diff, wait for YES
 /si reset <key|*>                         # reset a key (or all) to default
@@ -65,6 +66,16 @@ ${CLAUDE_PLUGIN_ROOT}/hooks/status-report.js
 ```
 
 Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's stdout verbatim — it's already formatted. Do not attempt to parse or summarise it unless the user asks a follow-up.
+
+**`doctor`** — One-shot project health check. Answers, authoritatively: *is SI actually wired up for the project I'm sitting in right now?* Diagnoses the most common silent failure (project `enabledPlugins` whitelist excluding SI), plus plugin-cache presence, unified-config readability, and whether the shape log is being written for this session. Resolve the script path in this order and invoke the first that exists:
+
+```
+${CLAUDE_PLUGIN_ROOT}/hooks/si-doctor.js
+~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/hooks/si-doctor.js
+~/.claude/plugins/marketplaces/session-intelligence/plugins/session-intelligence/hooks/si-doctor.js
+```
+
+Invoke as: `echo '{"session_id":"<sid>","cwd":"<abs cwd>"}' | node <path>`. Pass the **current working directory** explicitly — the doctor walks up from there to find the project's `.claude/settings.json` whitelist. Relay stdout verbatim. The script exits 1 when SI is dark and 0 when live; either way the verdict line at the bottom is the primary signal.
 
 **`get <key>`** — Print just the value at the dotted path. Report missing paths clearly.
 

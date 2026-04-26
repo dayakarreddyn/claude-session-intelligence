@@ -87,6 +87,16 @@ function loadCompactHistoryLib() {
   return null;
 }
 
+function loadContextShapeLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'context-shape.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 function loadUsageApiLib() {
   const dir = resolveLibDir();
   if (!dir) return null;
@@ -120,7 +130,7 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
   let resetStr = '';
   if (resetAt) {
     const ms = resetAtMs(resetAt) - Date.now();
-    if (Number.isFinite(ms) && ms > 0) resetStr = fmtDuration(ms);
+    if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
   let head;
   if (colourMode === 'dim') {
@@ -175,15 +185,20 @@ function loadConfig() {
   const legacyPath = path.join(home, '.claude', 'statusline-intel.json');
   const defaults = {
     fields: [
-      'tokens', 'compactAge', 'compactCost',
+      'tokens', 'compactAge', 'compactCost', 'cwd', 'siHealth',
       'newline',
-      'emoji2', 'session', 'tools', 'cost', 'deploy', 'tokenFlow', 'cacheHit', 'cacheSaved',
+      'session', 'tools', 'cost', 'deploy', 'cacheHit', 'cacheSaved',
       'newline',
-      'emoji', 'model', 'project', 'branch', 'issue', 'diffstat', 'task',
+      'branch', 'diffstat', 'activeRoot', 'issue', 'task',
+      'newline',
+      'model', 'blockUsage', 'weekUsage',
     ],
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
     maxTaskLength: 40,
+    maxBranchLength: 28,
+    maxCwdLength: 36,
+    maxActiveRootLength: 30,
     separator: ' · ',
     colors: true,
     serviceHealth: [],
@@ -577,8 +592,56 @@ function fmtTokens(n) {
   return String(n);
 }
 
+// Tight token formatter for cells that need every column (bar numerics,
+// tokenFlow). Drops decimals when the value is large enough that they read
+// as noise — `124k` instead of `124.2k`, `26M` instead of `26.08M`.
+function fmtTokensTight(n) {
+  if (n >= 10_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000_000)  return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 10_000)     return `${Math.round(n / 1_000)}k`;
+  if (n >= 1_000)      return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+// Compact USD formatter. Drops decimals once the value crosses $10 — at that
+// scale the cents are noise, and the cells appear in dim grey alongside other
+// numerics where vertical scan beats per-cent precision.
+function fmtUsd(n) {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n >= 10) return `$${Math.round(n)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+// Single-letter duration formatter for tight cells (compactAge, session).
+// `3hr 23m` -> `3h23m`, `11hr` -> `11h`, `45m` -> `45m`. Spans over 1d
+// keep the day component and skip minutes — the precision isn't useful at
+// that scale.
+function fmtDurationTight(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '0m';
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / (60 * 24));
+  const h = Math.floor((totalMin % (60 * 24)) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return h ? `${d}d${h}h` : `${d}d`;
+  if (h > 0) return m ? `${h}h${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
 function truncate(s, max) {
   return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
+}
+
+// Middle-ellipsis truncation. Used by fields where both ends carry signal \u2014
+// e.g. branch names like `feat/long-task-slug` (prefix says intent, suffix
+// disambiguates) or any path-like string. Falls back to end-truncate when
+// `max` is too small to leave room for both halves + the ellipsis.
+function truncateMiddle(s, max) {
+  if (!s || s.length <= max) return s;
+  if (max <= 4) return truncate(s, max);
+  const keep = max - 1; // 1 char for ellipsis
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return s.slice(0, head) + '\u2026' + s.slice(s.length - tail);
 }
 
 function projectLabel(cwd) {
@@ -708,7 +771,58 @@ function readDeployBreadcrumb() {
 // ─── Output style ────────────────────────────────────────────────────────────
 
 function detectOutputStyle(input) {
-  return input.output_style || input.outputStyle || process.env.CLAUDE_OUTPUT_STYLE || '';
+  // Claude Code emits output_style as either a string or `{name: string}`,
+  // and "default" should render blank (no signal). Same handling the prior
+  // inline-on-model rendering used.
+  const raw = input.output_style ?? input.outputStyle ?? process.env.CLAUDE_OUTPUT_STYLE ?? '';
+  let style = '';
+  if (typeof raw === 'string') style = raw;
+  else if (raw && typeof raw.name === 'string') style = raw.name;
+  if (!style || style.toLowerCase() === 'default') return '';
+  return style;
+}
+
+const SI_PLUGIN_KEY = 'session-intelligence@session-intelligence';
+
+/**
+ * Walk up from `cwd` looking for a `.claude/settings*.json` that declares
+ * `enabledPlugins`. Returns the gate state for SI:
+ *   - 'ok'              → no whitelist found OR SI explicitly enabled
+ *   - 'dark-omitted'    → whitelist exists, SI key absent
+ *   - 'dark-disabled'   → whitelist exists, SI set to false
+ *
+ * Project `enabledPlugins` is authoritative when present — Claude Code
+ * suppresses every plugin not in the list, including SI's hooks. The
+ * statusline still renders (it's wired separately as a statusCommand),
+ * which is exactly why this check is the missing self-diagnosis: the
+ * bar lights up but the SI-fed fields stay dark, and the user has no
+ * way to tell the difference from "nothing's happened yet."
+ *
+ * Cheap: walks ≤10 ancestors, reads tiny JSON files, no network. Called
+ * once per render (statusline is fresh-process per prompt) so we skip
+ * the cache layer.
+ */
+function detectSiPluginGate(cwd) {
+  if (!cwd || typeof cwd !== 'string') return 'ok';
+  let dir = path.resolve(cwd);
+  for (let i = 0; i < 10; i++) {
+    for (const fname of ['settings.json', 'settings.local.json']) {
+      const p = path.join(dir, '.claude', fname);
+      try {
+        const cfg = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (cfg && cfg.enabledPlugins && typeof cfg.enabledPlugins === 'object') {
+          const v = cfg.enabledPlugins[SI_PLUGIN_KEY];
+          if (v === true) return 'ok';
+          if (v === false) return 'dark-disabled';
+          return 'dark-omitted';
+        }
+      } catch { /* file missing or unreadable — keep walking */ }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return 'ok';
 }
 
 // ─── Service health cache ────────────────────────────────────────────────────
@@ -832,27 +946,29 @@ function buildRenderers(C) {
     // whole bar exists to warn about context pressure. Every other field is
     // context FOR that signal — making them bright just adds noise.
     model: (input) => {
-      const m = input.model?.display_name || input.model?.id || 'claude';
-      // output_style is the named output mode (concise, explanatory, etc.) —
-      // NOT the reasoning effort / thinking budget. Claude Code exposes it as
-      // either a string or {name: string}. Case-insensitive compare against
-      // "default" because observed payloads use both casings. Guard non-string
-      // .name so a malformed object can't leak "[object Object]".
-      const styleRaw = input.output_style;
-      let style = '';
-      if (typeof styleRaw === 'string') style = styleRaw;
-      else if (styleRaw && typeof styleRaw.name === 'string') style = styleRaw.name;
-      if (style && style.toLowerCase() !== 'default') {
-        return `${C.dim}${m} · ${style}${C.reset}`;
-      }
+      const raw = input.model?.display_name || input.model?.id || 'claude';
+      // Trim trailing parenthetical metadata like " (1M context)" from the
+      // display name — the context window is implicit and the cell stays
+      // identity-only ("Opus 4.7"). output_style now renders as its own
+      // cell (`outputStyle` below), so this keeps `model` single-purpose.
+      const m = raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || raw;
       return `${C.dim}${m}${C.reset}`;
     },
 
     project: (input) => `${C.dim}${projectLabel(input.cwd)}${C.reset}`,
 
-    branch: (input) => {
+    branch: (input, ctx) => {
       const b = gitBranch(input.cwd);
-      return b ? `${C.dim}${b}${C.reset}` : '';
+      if (!b) return '';
+      // Long branch names (feat/some-very-long-task-name-here) blow past the
+      // last status line on narrow terminals and the row vanishes mid-render.
+      // Middle-truncate so the prefix (`feat/`, `fix/`) and the trailing slug
+      // both survive — both carry signal.
+      const max = Number.isFinite(ctx.cfg.maxBranchLength)
+        && ctx.cfg.maxBranchLength > 5
+        ? Math.floor(ctx.cfg.maxBranchLength)
+        : 28;
+      return `${C.dim}${truncateMiddle(b, max)}${C.reset}`;
     },
 
     dirty: (input) => {
@@ -872,11 +988,15 @@ function buildRenderers(C) {
         return `${color}${sourceTag}${zone.icon} idle${C.reset}`;
       }
       const cap = contextCap(input, ctx.cfg);
-      const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, 20);
+      const segs = Number.isFinite(ctx.cfg.maxBarSegments) ? ctx.cfg.maxBarSegments : 14;
+      const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, segs);
       const used = fmtTokens(t);
-      const total = cap >= 1000000 ? '1M' : fmtTokens(cap);
+      const total = cap >= 1_000_000 ? '1M' : fmtTokens(cap);
       const pct = cap > 0 ? Math.round((t / cap) * 100) : 0;
-      return `${bar}${C.reset} ${color}${sourceTag}${used}${C.reset}${C.dim}/${total} (${pct}%)${C.reset}`;
+      // `175.7k/1M 18%` — keep the cap visible so the absolute scale is
+      // unambiguous; percent stays trailing, dim, sans `()` to keep the
+      // cell tight.
+      return `${bar}${C.reset} ${color}${sourceTag}${used}${C.reset}${C.dim}/${total}${C.reset} ${C.dim}${pct}%${C.reset}`;
     },
 
     zone: (input, ctx) => {
@@ -892,7 +1012,7 @@ function buildRenderers(C) {
 
     session: (_input, ctx) => {
       if (!ctx.sessionDurationMs) return '';
-      return `${C.dim}${fmtDuration(ctx.sessionDurationMs)}${C.reset}`;
+      return `${C.dim}${fmtDurationTight(ctx.sessionDurationMs)}${C.reset}`;
     },
 
     /**
@@ -927,7 +1047,10 @@ function buildRenderers(C) {
     sessionId: (input, _ctx) => {
       const sid = input.session_id || input.sessionId || '';
       if (!sid) return '';
-      const short = String(sid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 8);
+      // 6-char prefix is plenty to disambiguate a handful of open windows.
+      // Keep the `sid:` label — it's the established convention for the
+      // session-id cell and reads more clearly than a bare `id:`.
+      const short = String(sid).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 6);
       return short ? `${C.dim}sid:${short}${C.reset}` : '';
     },
 
@@ -946,10 +1069,10 @@ function buildRenderers(C) {
       const cost = ctx.costUsd || 0;
       const saved = ctx.cacheSavedUsd || 0;
       const parts = [];
-      if (cost > 0) parts.push(`c$${cost.toFixed(2)}`);
-      if (saved >= 0.1) parts.push(`s$${saved.toFixed(2)}`);
+      if (cost > 0) parts.push(`c${fmtUsd(cost)}`);
+      if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
       if (!parts.length) return '';
-      return `${C.dim}${parts.join(' / ')}${C.reset}`;
+      return `${C.dim}${parts.join('/')}${C.reset}`;
     },
 
     /**
@@ -1023,7 +1146,11 @@ function buildRenderers(C) {
       const total = t.input + t.output + t.cached + t.creation;
       if (total <= 0) return '';
       const cacheActivity = t.cached + t.creation;
-      return `${C.dim}t:${fmtTokens(total)} ↓${fmtTokens(t.input)} ↑${fmtTokens(t.output)} c${fmtTokens(cacheActivity)}${C.reset}`;
+      // Mirror the `c<cache>` suffix style on the total: `t33M ↓540 ↑160k c33M`.
+      // Single-letter prefixes line up visually with the in/out/cache parts
+      // and read as one cohesive cell. Use fmtTokensTight so 26.08M collapses
+      // to 26M.
+      return `${C.dim}t${fmtTokensTight(total)} ↓${fmtTokensTight(t.input)} ↑${fmtTokensTight(t.output)} c${fmtTokensTight(cacheActivity)}${C.reset}`;
     },
 
     /**
@@ -1056,9 +1183,11 @@ function buildRenderers(C) {
       const sid = input.session_id || input.sessionId || '';
       const mins = minutesSinceLastCompact(sid);
       if (mins === null) return '';
-      const label = fmtDuration(mins * 60 * 1000);
+      const label = fmtDurationTight(mins * 60 * 1000);
       const color = mins >= 120 ? C.red : C.dim;
-      return `${color}compact:${label} ago${C.reset}`;
+      // `cpt:3h23m ago` — `cpt` abbrev + tight duration + `ago` suffix
+      // (the elapsed sense reads naturally with the trailing word).
+      return `${color}cpt:${label} ago${C.reset}`;
     },
 
     /** Cost + cache-savings accrued since last /compact. Pairs with
@@ -1073,10 +1202,13 @@ function buildRenderers(C) {
         ctx.cfg.prices || DEFAULT_PRICES,
       );
       const parts = [];
-      if (cost >= 0.01) parts.push(`c$${cost.toFixed(2)}`);
-      if (saved >= 0.1) parts.push(`s$${saved.toFixed(2)}`);
+      if (cost >= 0.01) parts.push(`c${fmtUsd(cost)}`);
+      if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
       if (!parts.length) return '';
-      return `${C.dim}${parts.join(' / ')}${C.reset}`;
+      // Tight `c$20/s$94` instead of `c$20.31 / s$94.59` — saves ~8 cols
+      // per cell. The `c`/`s` prefixes carry the labelling so the slash
+      // can sit flush without ambiguity.
+      return `${C.dim}${parts.join('/')}${C.reset}`;
     },
 
     /** Percentage of the context window consumed. Replaces ccstatusline's
@@ -1115,21 +1247,71 @@ function buildRenderers(C) {
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
      *  and middle-truncates when longer than 60 chars (keeps the leaf dir,
      *  which carries most of the signal). Dim — reference context only. */
-    cwd: (input, _ctx) => {
+    cwd: (input, ctx) => {
       const raw = input.cwd || '';
       if (!raw) return '';
       const home = os.homedir();
+      // Show full path, just middle-truncate (single ellipsis) when it
+      // exceeds maxCwdLength. `~` substituted for $HOME first so the prefix
+      // stays informative. Default MAX=36; clamp >8 at read time.
+      const MAX = Number.isFinite(ctx.cfg.maxCwdLength) && ctx.cfg.maxCwdLength > 8
+        ? Math.floor(ctx.cfg.maxCwdLength) : 36;
       let display = raw;
       if (raw === home) display = '~';
       else if (raw.startsWith(home + '/')) display = '~' + raw.slice(home.length);
-      const MAX = 60;
-      if (display.length > MAX) {
-        const leaf = path.basename(display);
-        const room = MAX - leaf.length - 2; // for `…/`
-        if (room > 0) display = display.slice(0, room) + '…/' + leaf;
-        else display = '…/' + leaf;
+      return `${C.dim}${truncateMiddle(display, MAX)}${C.reset}`;
+    },
+
+    /** "Where Claude is touching files now" — latest root recorded in the
+     *  per-session shape log. Unlike `cwd` (which is the static session
+     *  shell directory), this updates as tool calls land in different
+     *  subtrees. Hidden when no shape entries exist or when the latest
+     *  root is `.` / matches the session cwd's leaf (no signal). */
+    activeRoot: (input, ctx) => {
+      const sid = input.session_id || input.sessionId || '';
+      if (!sid) return '';
+      const lib = loadContextShapeLib();
+      if (!lib || typeof lib.readShape !== 'function') return '';
+      let entries;
+      try { entries = lib.readShape(sid, 5); } catch { return ''; }
+      if (!Array.isArray(entries) || entries.length === 0) return '';
+      // Walk back from the latest entry to find a non-blank root. When
+      // `activeRootShowAtRoot` is on we keep `.` so the field still
+      // signals liveness while Claude is parked at cwd root.
+      const showAtRoot = !!ctx.cfg.activeRootShowAtRoot;
+      let root = '';
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const r = entries[i] && typeof entries[i].root === 'string' ? entries[i].root : '';
+        if (!r) continue;
+        if (r !== '.' || showAtRoot) { root = r; break; }
       }
-      return `${C.dim}${display}${C.reset}`;
+      if (!root) return '';
+      // Hide when the active root is just the cwd's basename — the `cwd`
+      // field already covers it, no point doubling up. Skip suppression
+      // when the per-project flag asks for "always show."
+      const cwd = input.cwd || '';
+      if (!showAtRoot && cwd && root === path.basename(cwd)) return '';
+      const home = os.homedir();
+      let display = root;
+      if (root.startsWith(home + '/')) display = '~' + root.slice(home.length);
+      const MAX = Number.isFinite(ctx.cfg.maxActiveRootLength) && ctx.cfg.maxActiveRootLength > 6
+        ? Math.floor(ctx.cfg.maxActiveRootLength) : 30;
+      return `${C.dim}→${truncateMiddle(display, MAX)}${C.reset}`;
+    },
+
+    /** Self-diagnosis tag — empty when SI is healthy on this project, a red
+     *  warning when the project's `enabledPlugins` whitelist is suppressing
+     *  us. Without this the dark state is invisible: the bar still renders
+     *  (statusline is wired separately) but the SI-fed fields stay blank
+     *  forever and the user has no way to distinguish "nothing happened
+     *  yet" from "hooks are off." Only renders the warning, never a green
+     *  "live" tag — silence is success. */
+    siHealth: (input, _ctx) => {
+      const cwd = input.cwd || input.workspace?.current_dir || '';
+      const gate = detectSiPluginGate(cwd);
+      if (gate === 'ok') return '';
+      const reason = gate === 'dark-disabled' ? 'disabled' : 'off';
+      return `${C.red}⚠ si-${reason}${C.reset}${C.dim} (run /si doctor)${C.reset}`;
     },
 
     /** Last deploy target + how fresh, read from ~/.claude/logs/deploy-breadcrumb.
@@ -1364,11 +1546,22 @@ function readSessionStartTime(transcriptPath) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function main() {
-  const cfg = loadConfig();
-  const C = makeColors(cfg.colors);
+  let cfg = loadConfig();
   const input = safeParse(readStdinSync());
   const sessionId = input.session_id || input.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
   const cwd = input.cwd || input.workspace?.current_dir || process.cwd();
+  // Apply per-project statusline overrides — without this a perProject block
+  // like `/Users/me/DWS/CSM: { activeRootShowAtRoot: true }` is silently
+  // ignored and the field stays blank. Falls back gracefully when the
+  // shared config module is unavailable (stand-alone fallback path).
+  try {
+    const shared = loadSharedConfig();
+    if (shared && typeof shared.resolveStatuslineForCwd === 'function') {
+      const full = (typeof shared.loadConfig === 'function') ? shared.loadConfig() : null;
+      if (full) cfg = shared.resolveStatuslineForCwd(full, cwd);
+    }
+  } catch { /* keep top-level cfg on error */ }
+  const C = makeColors(cfg.colors);
 
   // Prefer adaptive zones (derived from this repo's compact history) over
   // the static config zones so the bar color matches what si-suggest-compact

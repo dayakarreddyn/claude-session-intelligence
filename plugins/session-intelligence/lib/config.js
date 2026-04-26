@@ -43,13 +43,13 @@ const STATUSLINE_PRESETS = {
   //           by a detached worker so the hot path never blocks on HTTPS).
   //   Line 4: identity / repo / task — dim reference context at the bottom.
   verbose:  [
-    'tokens', 'compactAge', 'compactCost',
+    'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
-    'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit',
+    'session', 'blockUsage', 'sessionId', 'costSaved', 'tools', 'tokenFlow',
     'newline',
-    'weekUsage', 'blockUsage', 'cwd',
+    'branch', 'diffstat', 'cwd', 'activeRoot',
     'newline',
-    'model', 'project', 'branch', 'diffstat', 'task',
+    'model', 'weekUsage', 'outputStyle', 'thinking', 'task',
   ],
   // Token-economics focus — same 4-line skeleton, adds cacheTokens.
   'verbose-cache':  [
@@ -73,6 +73,18 @@ const DEFAULTS = {
     tokenSource: 'auto',
     zones: { yellow: 200000, orange: 300000, red: 400000 },
     maxTaskLength: 40,
+    // Middle-truncate the `branch` field at this length so long names like
+    // `feat/some-very-long-feature-slug` don't push the last status row past
+    // the terminal width and disappear after a resize. Clamp >5 at read time.
+    maxBranchLength: 28,
+    // cwd field — full path, middle-truncated when it exceeds maxCwdLength.
+    // Clamp >8 at read time. `~` is substituted for $HOME before truncation.
+    maxCwdLength: 36,
+    // activeRoot field — middle-truncated when longer. Clamp >6 at read time.
+    maxActiveRootLength: 30,
+    // tokens field — bar segment count. Trade-off: longer bar shows finer
+    // gradient but eats line width. Clamp [8, 40] at render time.
+    maxBarSegments: 14,
     separator: ' · ',
     colors: true,
     serviceHealth: [],
@@ -81,6 +93,23 @@ const DEFAULTS = {
     // this it is noise; above it is a genuine signal that current context
     // is carrying extended-thinking bytes. 0 disables the threshold.
     thinkingMinDisplay: 5000,
+    // activeRoot field — when true, render `→.` instead of suppressing the
+    // field while Claude is parked at the cwd root or basename(cwd). Default
+    // off because the global behaviour is "delta only — don't double up with
+    // the cwd block." Flip per-project for repos where a flat root layout
+    // means the field would otherwise stay blank all session.
+    activeRootShowAtRoot: false,
+    // Per-project statusline overrides, keyed by absolute canonical cwd.
+    // Mirrors `shape.perProject`. Each block is merged over the top-level
+    // statusline config when the active session cwd matches. Example:
+    //
+    //   "perProject": {
+    //     "/Users/me/DWS/CSM": { "activeRootShowAtRoot": true }
+    //   }
+    //
+    // Unknown keys are silently passed through — every key the renderer
+    // already reads from `cfg.statusline` is honoured.
+    perProject: {},
   },
   compact: {
     threshold: 50,              // tool calls before first advisory
@@ -417,6 +446,41 @@ function resolveShapeForCwd(cfg, cwd) {
 }
 
 /**
+ * Resolve statusline config for a specific project cwd. Merges
+ * `statusline.perProject[cwd]` on top of the top-level `statusline` block.
+ * `serviceHealth` is unioned (project adds to user-global) so a project
+ * override never silently drops global probes; everything else replaces.
+ * Returns a NEW object — the base statusline config is untouched.
+ */
+function resolveStatuslineForCwd(cfg, cwd) {
+  const base = (cfg && cfg.statusline) ? cfg.statusline : {};
+  const overrides = (base.perProject && typeof base.perProject === 'object' && cwd)
+    ? base.perProject[cwd]
+    : null;
+  if (!overrides || typeof overrides !== 'object') {
+    const passthrough = { ...base };
+    delete passthrough.perProject;
+    return passthrough;
+  }
+  const merged = { ...base, ...overrides };
+  const baseSvc = Array.isArray(base.serviceHealth) ? base.serviceHealth : [];
+  const projSvc = Array.isArray(overrides.serviceHealth) ? overrides.serviceHealth : [];
+  if (baseSvc.length || projSvc.length) {
+    merged.serviceHealth = [...baseSvc, ...projSvc];
+  }
+  // zones / prices are nested objects — shallow-merge so a partial override
+  // (e.g. only `red`) doesn't wipe the unspecified thresholds.
+  if (overrides.zones && typeof overrides.zones === 'object') {
+    merged.zones = { ...(base.zones || {}), ...overrides.zones };
+  }
+  if (overrides.prices && typeof overrides.prices === 'object') {
+    merged.prices = { ...(base.prices || {}), ...overrides.prices };
+  }
+  delete merged.perProject;
+  return merged;
+}
+
+/**
  * Single source of truth for the {yellow, orange, red} token thresholds.
  * Reads `statusline.zones` (the user-facing knob) and falls back to the
  * built-in defaults. Suggest-compact and the statusline both call this so
@@ -480,6 +544,7 @@ module.exports = {
   set,
   deepMerge,
   resolveShapeForCwd,
+  resolveStatuslineForCwd,
   getZoneThresholds,
   clampMaxEntries,
 };

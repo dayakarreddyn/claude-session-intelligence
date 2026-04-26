@@ -249,6 +249,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `blockUsage` | `b:47% r:1hr 12m` | Claude's 5-hour block quota utilisation + time until reset. Data from cached `/api/oauth/usage` response (180s TTL, refreshed in background). % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95%. Empty cell when the cache is absent or errored |
 | `weekUsage` | `w:31% r:4d 12hr` | Weekly (7-day) quota utilisation + time until reset. Same colour escalation as `blockUsage` |
 | `cwd` | `~/DWS/claude-session-intelligence` | Full working directory, ccstatusline-style. `$HOME` collapses to `~`; middle-ellipsis when longer than 60 chars (keeps the leaf) (dim) |
+| `activeRoot` | `→plugins/session-intelligence` | "Where Claude is touching files now" — latest non-blank `root` from the per-session shape log, complements `cwd`. Hidden when the latest root collapses to `.` (Claude is parked at cwd root) or matches `basename(cwd)` — those add no signal beyond `cwd`. To force a `→.` "still alive" indicator on flat-layout repos where everything is at the root, set `statusline.perProject["<abs cwd>"].activeRootShowAtRoot: true` (dim) |
+| `siHealth` | `⚠ si-off (run /si doctor)` | **Self-diagnosis tag.** Empty when SI is healthy on this project (silence = success), red warning when the project's `enabledPlugins` whitelist is suppressing SI. Without this the dark state is invisible — the bar still renders (statusline is wired separately) but every SI-fed field stays blank forever and there's no way to distinguish "nothing happened yet" from "hooks are off." The tag points users at `/si doctor` for the verbose remediation block |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (dim) |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (dim) |
 | `health` | `[●●○]` | Coloured dot per service URL configured in `serviceHealth` — curl probe cached 30s |
@@ -265,7 +267,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 4 lines. L1: `tokens`, `compactAge`, `compactCost` — colour-escalating warning row · L2: `session`, `sessionId`, `tools`, `costSaved`, `tokenFlow`, `cacheHit` — live activity · L3: `blockUsage`, `weekUsage`, `cwd` — quota + working dir · L4: `model`, `project`, `branch`, `diffstat`, `task` — dim reference context |
+| `verbose` (default) | 4 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `session`, `blockUsage`, `sessionId`, `costSaved`, `tools`, `tokenFlow` — live activity · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `weekUsage`, `outputStyle`, `thinking`, `task` — dim reference context |
 | `verbose-cache` | 4 lines, token-economics-focused. Same shape as `verbose` with `cacheTokens` appended to L2; L4 trimmed to model/project/task |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
@@ -364,6 +366,58 @@ echo "gateway $(date -u +%FT%TZ)" > ~/.claude/logs/deploy-breadcrumb
 
 Format: `<target-name> <ISO-timestamp>`. The status line parses it and shows `deploy:<target> <age> ago`. Good targets to breadcrumb: gateway restart, frontend CF Pages deploy, production cutover, schema migration.
 
+### Per-project statusline overrides
+
+Mirrors `shape.perProject` but for the statusline block. Keyed by absolute canonical cwd. Each block is merged on top of the top-level `statusline` config when the active session cwd matches:
+
+```json
+{
+  "statusline": {
+    "preset": "verbose",
+    "perProject": {
+      "/Users/me/DWS/CSM": {
+        "activeRootShowAtRoot": true,
+        "maxCwdLength": 50,
+        "zones": { "red": 500000 }
+      }
+    }
+  }
+}
+```
+
+Merge rules: scalars replace; `zones` and `prices` shallow-merge so a partial override doesn't wipe siblings; `serviceHealth` is unioned so a per-project block adds to (not replaces) the global probe list. Unknown keys pass through — every key the renderer reads from `cfg.statusline` is honoured.
+
+Useful for project-specific tuning that shouldn't leak globally — e.g. flat-layout repos where `activeRootShowAtRoot: true` keeps line 3 informative, or projects with looser/tighter compact zones than the user-global default.
+
+### Self-diagnosis: `/si doctor`
+
+The most common silent SI failure is a project's `.claude/settings.json` declaring an `enabledPlugins` whitelist that omits `session-intelligence@session-intelligence`. Claude Code treats that whitelist as authoritative — every plugin not listed is suppressed for that project, including SI's hooks. The statusline still renders (it's wired separately as a `statusCommand`), so the bar lights up but every SI-fed field stays blank forever, and there's no obvious way to tell that from "nothing's happened yet."
+
+`/si doctor` answers the question authoritatively. It walks cwd ancestry for `.claude/settings*.json`, inspects the `enabledPlugins` whitelist, checks plugin-cache presence, and verifies the session's shape log is being written. Output:
+
+```
+Session Intelligence — doctor for /Users/me/DWS/CSM
+
+Plugin install
+  ✓ plugin cache present  — /Users/me/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0
+  ✓ unified config readable  — ~/.claude/session-intelligence.json
+
+Project gating
+  ✗ project enabledPlugins whitelist  — DWS/CSM/.claude/settings.json omits SI — hooks are dark on this project
+
+  Fix: add to enabledPlugins block:
+    "session-intelligence@session-intelligence": true
+  in /Users/me/DWS/CSM/.claude/settings.json, then restart the Claude Code session.
+
+Runtime evidence (this session)
+  ✓ session id resolved  — 89dc4649-331…
+  ✗ shape log written  — no file at /tmp/claude-ctx-shape-89dc4649-….jsonl — si-token-budget hasn't run
+
+VERDICT: SI is dark for this project. See "Fix:" above.
+```
+
+Exits 0 when SI is live, 1 when dark. Pure read-only — never writes. The `siHealth` statusline field surfaces the same gating check passively on every render so users don't have to think to run the doctor.
+
 ### Service health
 
 Configure one or more URLs in `serviceHealth`. The status line shows a colored dot per service:
@@ -408,6 +462,7 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 ```text
 /si show                            # print the effective config
 /si status                          # runtime state: hooks, statusline, session counters
+/si doctor                          # is SI actually wired up for THIS project? whitelist + shape-log check
 /si get compact.threshold           # read a single dotted key
 /si set compact.autoblock false     # stage + diff + confirm + write
 /si set taskChange.minTokens 150000

@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 
 const {
   resolveShapeForCwd,
+  resolveStatuslineForCwd,
   getZoneThresholds,
   clampMaxEntries,
   DEFAULTS,
@@ -132,4 +133,53 @@ test('resolveShapeForCwd does not mutate the input config', () => {
   resolveShapeForCwd(cfg, '/repo/csm');
   assert.equal(JSON.stringify(cfg), before,
     'callers must be free to call this multiple times without surprises');
+});
+
+test('resolveStatuslineForCwd merges perProject override on matching cwd', () => {
+  const cfg = {
+    statusline: {
+      activeRootShowAtRoot: false,
+      maxActiveRootLength: 30,
+      zones: { yellow: 200000, orange: 300000, red: 400000 },
+      serviceHealth: ['https://api.example.com/health'],
+      perProject: {
+        '/repo/csm': {
+          activeRootShowAtRoot: true,
+          zones: { red: 500000 },
+          serviceHealth: ['https://csm.example.com/health'],
+        },
+      },
+    },
+  };
+  const out = resolveStatuslineForCwd(cfg, '/repo/csm');
+  assert.equal(out.activeRootShowAtRoot, true, 'project flag wins');
+  assert.equal(out.maxActiveRootLength, 30, 'unspecified base keys preserved');
+  assert.deepEqual(
+    out.zones,
+    { yellow: 200000, orange: 300000, red: 500000 },
+    'zones shallow-merged so a partial override does not wipe siblings',
+  );
+  assert.deepEqual(
+    out.serviceHealth,
+    ['https://api.example.com/health', 'https://csm.example.com/health'],
+    'serviceHealth unioned so per-project never silently drops global probes',
+  );
+  assert.equal(out.perProject, undefined, 'perProject stripped from result');
+});
+
+test('resolveStatuslineForCwd falls through to base on miss', () => {
+  const cfg = {
+    statusline: {
+      activeRootShowAtRoot: false,
+      perProject: { '/repo/csm': { activeRootShowAtRoot: true } },
+    },
+  };
+  const out = resolveStatuslineForCwd(cfg, '/repo/other');
+  assert.equal(out.activeRootShowAtRoot, false);
+  assert.equal(out.perProject, undefined);
+});
+
+test('resolveStatuslineForCwd handles missing statusline block gracefully', () => {
+  const out = resolveStatuslineForCwd({}, '/anywhere');
+  assert.deepEqual(out, {});
 });
