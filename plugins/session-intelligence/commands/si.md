@@ -13,6 +13,7 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si show                                  # print current config (pretty JSON)
 /si status                                # runtime state: hooks, statusline, session counters
 /si doctor                                # is SI actually wired up for THIS project? (whitelist + shape log)
+/si memory-audit                          # hygiene report on the project's memory dir (stale, oversized, frontmatter, index)
 /si get <key>                             # print a single key (dotted path)
 /si set <key> <value>                     # stage a change, show diff, wait for YES
 /si reset <key|*>                         # reset a key (or all) to default
@@ -76,6 +77,15 @@ ${CLAUDE_PLUGIN_ROOT}/hooks/si-doctor.js
 ```
 
 Invoke as: `echo '{"session_id":"<sid>","cwd":"<abs cwd>"}' | node <path>`. Pass the **current working directory** explicitly — the doctor walks up from there to find the project's `.claude/settings.json` whitelist. Relay stdout verbatim. The script exits 1 when SI is dark and 0 when live; either way the verdict line at the bottom is the primary signal.
+
+**`memory-audit`** — Read-only hygiene report for the active project's memory directory. Catches the three concerns Anthropic's official memory-tool spec calls out (file-size growth, expiration of unaccessed files, duplicate / orphan detection) plus frontmatter validation and MEMORY.md ↔ disk-file consistency. Resolve the script path in this order and invoke the first that exists:
+
+```
+${CLAUDE_PLUGIN_ROOT}/hooks/si-memory-audit.js
+~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/hooks/si-memory-audit.js
+```
+
+Invoke as: `echo '{"cwd":"<abs cwd>"}' | node <path>`. Optional flags: `--stale-days <N>` (default 60), `--size-bytes <N>` (default 16384). Exits 0 when clean, 1 when issues found. Relay stdout verbatim — the verdict line at the bottom is the primary signal.
 
 **`get <key>`** — Print just the value at the dotted path. Report missing paths clearly.
 

@@ -197,6 +197,39 @@ suggested — skip either if there's nothing new to record:
 
 The memory-offload block works with Claude Code's built-in auto-memory system (`~/.claude/projects/<encoded>/memory/` + `MEMORY.md` index) to preserve detail the compressed summary will lose. Disable with `compact.memoryOffload: false` or `CLAUDE_COMPACT_MEMORY_OFFLOAD=0`.
 
+### Stop-hook end-of-session nudge
+
+Anthropic's official memory-tool guidance is unambiguous: *"before a session ends, it updates the progress log."* SI nudges memory writes at zone crossover and at /compact, but neither fires for short sessions that end cleanly. The `Stop` hook (`hooks/si-stop.js`) closes that gap — when a session ends, it checks whether `session-context.md` was touched since the session began and, if not, emits a stderr nudge pointing at the file and the suggested sections to update. Trivial-session guard skips nudging for sessions with fewer than `stopHook.minToolCalls` PostToolUse records (default 5). Disable with `stopHook.enabled=false` or `CLAUDE_SI_STOP_HOOK=0`.
+
+### JIT memory loading via `MEMORY.index.md`
+
+By default the user-level CLAUDE.md auto-memory block inlines `MEMORY.md` (capped at 200 lines) into every session's context — bytes paid every cold start, regardless of whether memory is relevant to the current task. This contradicts Anthropic's just-in-time retrieval philosophy: *"rather than loading all relevant information upfront, agents store what they learn in memory and pull it back on demand."*
+
+SI now maintains a tiny `MEMORY.index.md` next to `MEMORY.md`: title + one-line description per entry, capped at 50 entries. Bootstrap regenerates it whenever `MEMORY.md` changes (sentinel-hash short-circuits no-ops). To opt into JIT loading, swap your auto-memory CLAUDE.md block to load `MEMORY.index.md` instead of `MEMORY.md` — Claude reads the catalog up front, then pulls the full body of any entry that looks relevant via `Read` on demand. Trims 1-2k tokens off every cold-start prefix and keeps the prompt cache more compact.
+
+### Memory hygiene audit
+
+`/si memory-audit` reports on the active project's memory directory. Anthropic's spec calls out file-size growth, expiration of unaccessed files, and duplicate detection as the three concerns to track. SI's audit covers all three plus frontmatter validation and MEMORY.md ↔ disk consistency:
+
+```
+Memory audit — /Users/me/.claude/projects/-Users-me-DWS-MyApp/memory
+
+  9 files, 8 index entries
+  Thresholds: stale > 60 days, oversized > 16.0kB
+
+  ✓ Frontmatter present on every doc
+  ✓ Type is one of user/feedback/project/reference
+  ✓ All docs listed in MEMORY.md
+  ✓ No dangling MEMORY.md entries
+  ✓ Files accessed within 60 days
+  ✗ Files under 16.0kB (1)
+      project_session_2026-04-18_5cb46331.md  — 21.1kB (consider splitting)
+
+VERDICT: 1 issue to address.
+```
+
+Read-only — never modifies files. Override thresholds via `--stale-days <N>` and `--size-bytes <N>`. Exits 0 when clean, 1 when issues found.
+
 ## Status Line
 
 Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw. Default `verbose` preset emits four lines:
@@ -463,6 +496,7 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 /si show                            # print the effective config
 /si status                          # runtime state: hooks, statusline, session counters
 /si doctor                          # is SI actually wired up for THIS project? whitelist + shape-log check
+/si memory-audit                    # hygiene report on the project's memory dir
 /si get compact.threshold           # read a single dotted key
 /si set compact.autoblock false     # stage + diff + confirm + write
 /si set taskChange.minTokens 150000

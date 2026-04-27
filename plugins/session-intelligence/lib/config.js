@@ -131,6 +131,17 @@ const DEFAULTS = {
     // CLAUDE_COMPACT_STABLE_PREFIX=0 to see the verbose metrics inline.
     stablePrefix: true,
   },
+  stopHook: {
+    // End-of-session memory-write nudge. Mirrors Anthropic's official
+    // memory-tool guidance ("before a session ends, update the progress
+    // log") and closes the only memory-write window we don't otherwise
+    // cover: short sessions that end without a /compact and without
+    // crossing a zone. Disable here or via CLAUDE_SI_STOP_HOOK=0.
+    enabled: true,
+    // Sessions with fewer than this many PostToolUse records are skipped
+    // — a 2-tool-call session has nothing worth recording. Clamp ≥0.
+    minToolCalls: 5,
+  },
   taskChange: {
     enabled: true,              // detect task-domain changes on UserPromptSubmit
     minTokens: 100000,          // don't bother below this
