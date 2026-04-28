@@ -834,11 +834,16 @@ function buildContinuationAdditionalContext(cwd) {
     const handoff = require(path.join(SI_LIB, 'handoff'));
     const block = handoff.readAndRenderHandoff(projectDir);
     if (!block) return '';
-    // Wrap with a model-echo directive so the resume banner actually reaches
-    // the user. On source=compact, Claude Code suppresses SessionStart hook
-    // stderr AND drops the systemMessage field — the only user-visible
-    // surface is the model's chat output. See wrapHandoffForModelEcho.
-    return handoff.wrapHandoffForModelEcho(block);
+    // Emit the clean banner only. Claude Code now surfaces SessionStart
+    // additionalContext to the user as "SessionStart:compact says: <body>",
+    // which means the prior wrapHandoffForModelEcho dance — instructing the
+    // model to print the banner verbatim — produces double-display: the
+    // user sees both the giant REQUIRED FIRST ACTION wrapper AND the
+    // model's echo of the banner. The wrapper is also redundant with the
+    // ## NEXT (to resume) footer that si-pre-compact already shows. The
+    // wrapHandoffForModelEcho function is kept in lib/handoff.js as a
+    // fallback in case Claude Code's display behavior changes back.
+    return handoff.renderHandoffStderr(block);
   } catch (err) {
     intelLog('bootstrap', errLogLevel(err), 'handoff read failed', {
       err: err && err.message,
