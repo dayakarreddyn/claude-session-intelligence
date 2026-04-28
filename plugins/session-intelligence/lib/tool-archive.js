@@ -152,6 +152,19 @@ function writeArchive(sid, id, meta, body, opts) {
     fs.appendFileSync(indexFile(safeSid), line, 'utf8');
   } catch { /* index is best-effort */ }
 
+  // Mirror to events DB. Powers /si stats — "how many archives kept,
+  // average size, how many recalled post-compact". Best-effort.
+  try {
+    const events = require('./events');
+    events.recordToolArchive({
+      sid: safeSid,
+      toolUseId: safeId,
+      tool: record.tool || null,
+      chars: record.chars,
+      t: record.t,
+    });
+  } catch { /* events lib optional */ }
+
   // LRU eviction on write — cheap because we only touch the index, not all
   // archives. readIndex caps at maxPerSession * 4 so runaway index growth
   // doesn't blow up memory.

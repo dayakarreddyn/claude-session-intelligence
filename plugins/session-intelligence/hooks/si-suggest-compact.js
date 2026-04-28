@@ -430,6 +430,20 @@ async function main() {
         costTightened: !!zonesCfg.costTightened,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
       });
+      // Mirror to events DB for /si stats. Best-effort.
+      try {
+        const events = require(path.join(SI_LIB, 'events'));
+        const cwdForEvent = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
+        events.recordZoneTransition({
+          sid: sessionId,
+          project: cwdForEvent ? path.basename(cwdForEvent) : null,
+          fromZone: lastZone,
+          toZone: zone,
+          tokens: tokenBudget,
+          cost: Number.isFinite(sessionCost) ? sessionCost : null,
+          reason: grewEnough ? 'refire' : 'crossing',
+        });
+      } catch { /* events lib optional */ }
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
     }
 

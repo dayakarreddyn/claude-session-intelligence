@@ -1,0 +1,13 @@
+{
+  "name": "session-intelligence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Session Intelligence plugin — context-shape tracking, strategic compaction, cost telemetry.",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0"
+  },
+  "optionalDependencies": {}
+}

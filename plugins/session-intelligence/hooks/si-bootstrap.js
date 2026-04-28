@@ -882,6 +882,19 @@ function main() {
         err: err && err.message, sessionId,
       });
     }
+    // Mirror to events DB. Best-effort — the JSON session-state file above is
+    // authoritative for in-session use; this row powers cross-session /si stats.
+    try {
+      const events = require(path.join(SI_LIB, 'events'));
+      const { projectRootOf } = require(path.join(SI_LIB, 'context-shape'));
+      const projectRoot = projectRootOf(cwd) || cwd;
+      events.recordSessionStart({
+        sid: sessionId,
+        project: path.basename(projectRoot),
+        cwd,
+        startedAt: Date.now(),
+      });
+    } catch { /* events lib optional */ }
   }
 
   // Ensure ~/.claude/ exists before we try to drop a lock file into it.

@@ -681,6 +681,25 @@ async function main() {
       if (costAtCompactUsd !== null) historyEntry.costAtCompactUsd = costAtCompactUsd;
       compactHistory.appendHistory(historyEntry);
 
+      // Mirror to durable events DB for /si stats + future dashboard. Optional —
+      // any failure (native module unavailable, write error) is swallowed by
+      // recordCompact and the JSONL above is authoritative.
+      try {
+        const events = require(path.join(SI_LIB, 'events'));
+        events.recordCompact({
+          sid: sessionId,
+          project: projectDir ? path.basename(projectDir) : null,
+          cwd,
+          t: historyEntry.t,
+          tokens,
+          cost: historyEntry.cost,
+          costAtCompactUsd,
+          hotDirs, warmDirs, droppedDirs,
+          hadShift: historyEntry.hadShift,
+          trigger: stdinInput.trigger || null,
+        });
+      } catch { /* events lib optional */ }
+
       // Snapshot drives post-compact regret monitoring for up to 30 calls
       // or 30 min — whichever first. si-token-budget.js consumes it.
       // warmDirs enables soft-regret detection: users compacting early
