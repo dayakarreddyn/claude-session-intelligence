@@ -117,7 +117,7 @@ test('clampMaxEntries enforces [50, 5000] band', () => {
 });
 
 test('DEFAULTS exposes compact.refireEveryTokens for /si discovery', () => {
-  assert.equal(DEFAULTS.compact.refireEveryTokens, 25000,
+  assert.equal(DEFAULTS.compact.refireEveryTokens, 0,
     'new knob must be in DEFAULTS so /si list and config seeding can surface it');
 });
 

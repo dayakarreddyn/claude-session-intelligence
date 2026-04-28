@@ -11,9 +11,10 @@
  *   node tools/expand.js --prune [--sid=<sid>]   # manual TTL sweep
  *
  * Without --sid, the tool tries (in order): CLAUDE_SESSION_ID env, the most
- * recently-modified archive dir under os.tmpdir(). That "most-recent" fallback
- * is the common case — the user just /compacted and wants the last session's
- * archive — but is noisy across concurrent sessions, hence the override.
+ * recently-modified archive dir under ~/.claude/state/. That "most-recent"
+ * fallback is the common case — the user just /compacted and wants the last
+ * session's archive — but is noisy across concurrent sessions, hence the
+ * override.
  */
 
 const fs = require('fs');
@@ -32,6 +33,14 @@ function resolveSiLibDir() {
 }
 const SI_LIB = resolveSiLibDir();
 const toolArchive = require(path.join(SI_LIB, 'tool-archive'));
+// Same archive root as the writer (lib/utils.getStateDir). Falls back to
+// os.tmpdir() so older archives written before the migration still resolve.
+function archiveRoots() {
+  const roots = new Set();
+  try { roots.add(require(path.join(SI_LIB, 'utils')).getStateDir()); } catch { /* ignore */ }
+  roots.add(os.tmpdir());
+  return [...roots];
+}
 
 function parseArgs(argv) {
   const args = { positional: [], flags: {} };
@@ -48,18 +57,19 @@ function parseArgs(argv) {
 }
 
 function findLatestSessionSid() {
-  const root = os.tmpdir();
-  let entries = [];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return null; }
-  const hits = entries
-    .filter((e) => e.isDirectory() && e.name.startsWith('claude-tool-archive-'))
-    .map((e) => {
+  const hits = [];
+  for (const root of archiveRoots()) {
+    let entries = [];
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || !e.name.startsWith('claude-tool-archive-')) continue;
       const full = path.join(root, e.name);
       let mtime = 0;
       try { mtime = fs.statSync(full).mtimeMs; } catch { /* ignore */ }
-      return { sid: e.name.slice('claude-tool-archive-'.length), mtime };
-    })
-    .sort((a, b) => b.mtime - a.mtime);
+      hits.push({ sid: e.name.slice('claude-tool-archive-'.length), mtime });
+    }
+  }
+  hits.sort((a, b) => b.mtime - a.mtime);
   return hits.length ? hits[0].sid : null;
 }
 
@@ -133,14 +143,15 @@ function cmdExpand(sid, id) {
 }
 
 function findArchiveAcrossSessions(id) {
-  const root = os.tmpdir();
-  let entries = [];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return null; }
-  for (const e of entries) {
-    if (!e.isDirectory() || !e.name.startsWith('claude-tool-archive-')) continue;
-    const sid = e.name.slice('claude-tool-archive-'.length);
-    const rec = toolArchive.readArchive(sid, id);
-    if (rec) return rec;
+  for (const root of archiveRoots()) {
+    let entries = [];
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory() || !e.name.startsWith('claude-tool-archive-')) continue;
+      const sid = e.name.slice('claude-tool-archive-'.length);
+      const rec = toolArchive.readArchive(sid, id);
+      if (rec) return rec;
+    }
   }
   return null;
 }

@@ -111,18 +111,27 @@ function compilePreserveGlobs(globs) {
   return globs.map(compileGlob).filter(Boolean);
 }
 
+// Persist under ~/.claude/state/ (lib/utils.getStateDir) instead of os.tmpdir().
+// macOS aggressively wipes /var/folders/.../T/ — sometimes within hours — and
+// losing the shape log mid-session means PreCompact's analyzeShape sees an
+// empty history and emits no observed-shape hints. Falls back to tmpdir on
+// partial-install paths where ./utils isn't loadable.
+function _stateRoot() {
+  try { return require('./utils').getStateDir(); }
+  catch { return os.tmpdir(); }
+}
+
 function shapeFilePath(sessionId) {
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.jsonl`);
+  return path.join(_stateRoot(), `claude-ctx-shape-${sid}.jsonl`);
 }
 
 // Rollup is the session-scoped persistent tally that survives shape-file
-// byte-cap truncation. Same sid normalization; sibling file in /tmp so it
-// shares lifetime with the shape log (both die on OS /tmp rotation together,
-// which is correct — restarting the session invalidates both).
+// byte-cap truncation. Same sid normalization; sibling file under the state
+// root so it shares lifetime with the shape log.
 function rollupFilePath(sessionId) {
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.rollup.json`);
+  return path.join(_stateRoot(), `claude-ctx-shape-${sid}.rollup.json`);
 }
 
 // Session state is the per-session anchor that survives subagent/worktree
@@ -134,7 +143,7 @@ function rollupFilePath(sessionId) {
 // subagent's worktree cwd that doesn't contain the file being read.
 function sessionStatePath(sessionId) {
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  return path.join(os.tmpdir(), `claude-ctx-shape-${sid}.session.json`);
+  return path.join(_stateRoot(), `claude-ctx-shape-${sid}.session.json`);
 }
 
 // Markers we trust as "this is a project root". Ordered roughly by how

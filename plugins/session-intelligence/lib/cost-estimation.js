@@ -87,7 +87,11 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
+  // v2: includes seenIds for streaming-snapshot dedupe. The transcript
+  // emits one row per stream chunk update with the same `message.id`, and
+  // the prior schema double-counted every snapshot (typically 4-7×).
+  // Old v1 cache files are abandoned (TMPDIR cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v2`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -96,6 +100,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedOutput = 0;
   let cachedCacheRead = 0;
   let cachedCreation = 0;
+  let cachedSeenIds = [];
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -107,13 +112,16 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
+      cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
+  const seen = new Set(cachedSeenIds);
 
   // File shrank (rotation / compact) → drop cache, re-read whole thing.
   if (stat.size < cachedOffset) {
     cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
     cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+    seen.clear();
   }
   if (stat.size === cachedOffset) {
     return {
@@ -145,6 +153,15 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
             const d = JSON.parse(line);
             const u = d && d.message && d.message.usage;
             if (u) {
+              // Dedupe streaming snapshots by message.id. The transcript
+              // contains one row per stream chunk for the same assistant
+              // message; without this guard the totals are over-counted
+              // by the chunk multiplier (typically 4-7×).
+              const mid = d.message && d.message.id;
+              if (mid) {
+                if (seen.has(mid)) continue;
+                seen.add(mid);
+              }
               newCost += costFromUsage(u, prices);
               newSaved += savedFromUsage(u, prices);
               newInput += u.input_tokens || 0;
@@ -170,6 +187,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       offset: newOffset, cost: newCost, saved: newSaved,
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
+      seenIds: Array.from(seen),
     }), 'utf8');
   } catch { /* best effort */ }
 

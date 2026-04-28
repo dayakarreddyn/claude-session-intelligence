@@ -50,7 +50,7 @@ function resolveSiLibDir() {
 const SI_LIB = resolveSiLibDir();
 
 const {
-  getTempDir,
+  getStateDir,
   writeFile,
   readStdinJson,
   readTranscriptTokens,
@@ -91,20 +91,15 @@ async function main() {
   } catch { /* fall back to top-level shape */ }
   const userGlobs = Array.isArray(shapeCfg.preserveGlobs) ? shapeCfg.preserveGlobs : [];
 
-  // ANSI styling for zone-crossover advisories. Two layers:
-  //   - foreground zone colour for the headline (bright + bold), so a
-  //     dim terminal scroll still registers the alert
-  //   - dark-grey background wrapping around the whole block so it
-  //     visually reads as a callout / code block distinct from the rest
-  //     of the conversation
+  // ANSI styling for zone-crossover advisories. Foreground-only: a bold
+  // zone-coloured headline plus dim body lines, no background block.
+  // The prior dark-grey BG painted unevenly when wrapped by Claude Code's
+  // hook-output indent (left gap to terminal edge, ragged right) and read
+  // as a layout glitch in /focus view.
   //
   // Respects:
   //   - NO_COLOR env (universal convention)
   //   - statusline.colors=false in user config (same flag the bar uses)
-  //
-  // Background rendering depends on the terminal / UI — if the host
-  // ignores the 48;5;N codes, the foreground colour still comes through,
-  // so the alert never disappears entirely.
   const colorsEnabled = process.env.NO_COLOR !== '1'
     && (!fullCfg.statusline || fullCfg.statusline.colors !== false);
   const ANSI = {
@@ -113,28 +108,23 @@ async function main() {
     yellow: colorsEnabled ? '\x1b[1;33m'       : '',         // bold bright yellow
     orange: colorsEnabled ? '\x1b[1;38;5;208m' : '',         // bold 256-color orange
     red:    colorsEnabled ? '\x1b[1;31m'       : '',         // bold bright red
-    bg:     colorsEnabled ? '\x1b[48;5;236m'   : '',         // subtle dark-grey BG
     dim:    colorsEnabled ? '\x1b[2;38;5;250m' : '',         // dim light-grey FG for body
   };
   function paintZone(zoneName, text) {
     const code = ANSI[zoneName] || ANSI.bold;
     return code ? `${code}${text}${ANSI.reset}` : text;
   }
-  // Render a multi-line block as a "callout": each line gets the dark
-  // grey background with a 2-space left pad, so the block reads as one
-  // cohesive surface even across multiple lines. Headline line keeps the
-  // zone colour on top of the BG; body lines use dim light-grey FG.
+  // Render a multi-line callout as plain indented text: bold + zone colour
+  // for the headline, dim grey for the body. No background block — keeps
+  // the message readable in any terminal/UI without the BG-painting quirks.
   function renderCallout(headlineZone, headline, bodyLines) {
     if (!colorsEnabled) {
-      // Plaintext fallback: single-line concat, same shape as before.
-      return [headline, ...bodyLines].join(' ');
+      return [headline, ...bodyLines.map((l) => `  ${l}`)].join('\n');
     }
-    const pad = '  ';
-    const padded = (text, fg) => `${ANSI.bg}${pad}${fg || ''}${text}${ANSI.reset}`;
     const headlineCode = ANSI[headlineZone] || ANSI.bold;
     const lines = [
-      padded(headline, headlineCode),
-      ...bodyLines.map((l) => padded(l, ANSI.dim)),
+      `${headlineCode}${headline}${ANSI.reset}`,
+      ...bodyLines.map((l) => `  ${ANSI.dim}${l}${ANSI.reset}`),
     ];
     return lines.join('\n');
   }
@@ -158,8 +148,8 @@ async function main() {
     || process.env.CLAUDE_SESSION_ID
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  const counterFile = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
-  const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
+  const counterFile = path.join(getStateDir(), `claude-tool-count-${sessionId}`);
+  const budgetFile = path.join(getStateDir(), `claude-token-budget-${sessionId}`);
   intelLog('suggest-compact', 'debug', 'hook fired',
     { sessionId, preserveGlobs: preserveGlobs.length });
   const threshold = Number.isFinite(cfg.threshold) && cfg.threshold > 0 && cfg.threshold <= 10000
@@ -287,7 +277,7 @@ async function main() {
     });
   }
   if (tokenBudget > 0 && cfg.autoblock !== false) {
-    const stateFile = path.join(getTempDir(), `claude-compact-state-${sessionId}`);
+    const stateFile = path.join(getStateDir(), `claude-compact-state-${sessionId}`);
     const rank = { green: 0, yellow: 1, orange: 2, red: 3 };
     // State is JSON: { zone, tok }. Read tolerantly — older builds wrote
     // a bare zone string, so plaintext fallback is treated as { zone, tok: 0 }
@@ -307,8 +297,11 @@ async function main() {
 
     // Refire interval — clamp to a sane band so a typo can't either flood
     // every tool call (1 token) or silence the feature for a million-token
-    // session (1B). Default 25k is roughly 8% of the 300k orange floor.
-    const rawRefire = Number.isFinite(cfg.refireEveryTokens) ? cfg.refireEveryTokens : 25000;
+    // session (1B). Default 0 (crossover-only) — the prior 25k default
+    // produced ~4 banners between yellow and orange thresholds, which read
+    // as PostToolUse spam in `/focus` view. Users who want periodic
+    // re-fires can set compact.refireEveryTokens to a positive value.
+    const rawRefire = Number.isFinite(cfg.refireEveryTokens) ? cfg.refireEveryTokens : 0;
     const refireEvery = rawRefire <= 0
       ? 0
       : Math.max(5000, Math.min(rawRefire, 200000));

@@ -116,11 +116,12 @@ const DEFAULTS = {
     autoblock: true,            // surface yellow/orange/red suggestion as PostToolUse feedback (non-blocking — legacy key name)
     memoryOffload: true,        // inject a "offload rich detail to auto-memory" directive into pre-compact stdout
     // Re-fire the zone callout after this many extra tokens accumulate while
-    // staying in the same at-risk zone. Without this, a single-shot crossing
-    // is the only signal — a session that plateaus in orange for 100k+ tokens
-    // sees one hint then nothing. 0 disables re-fire (crossings only).
-    // Clamped to [5000, 200000] at read time.
-    refireEveryTokens: 25000,
+    // staying in the same at-risk zone. 0 disables re-fire (crossings only) —
+    // the default. The prior 25000 default produced ~4 banners per zone band
+    // (yellow/orange) and read as PostToolUse spam in /focus view. Users who
+    // want periodic re-fires can set compact.refireEveryTokens to a positive
+    // value; clamped to [5000, 200000] at read time.
+    refireEveryTokens: 0,
     // When true, model-visible pre-compact/zone-crossover output omits
     // per-compact-volatile values (call counts, stale-token estimates,
     // dated filenames, dollar amounts, live token counts). Trades UX

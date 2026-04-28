@@ -23,6 +23,49 @@ function getTempDir() {
   return os.tmpdir();
 }
 
+/**
+ * Per-session state dir. Used for files that MUST survive across hooks within
+ * one Claude Code session — compact-zone state, cost snapshots, tool counters,
+ * tool-response archives, context-shape logs. Lives under ~/.claude/state/
+ * instead of os.tmpdir() because macOS aggressively wipes /var/folders/.../T/
+ * (sometimes within hours), and a missing state file mid-session re-fires the
+ * compact-zone callout as if it were a fresh crossing.
+ *
+ * Caches that are safe to lose (statusline cost cache, health probes) stay in
+ * os.tmpdir() — there's nothing to gain from durability there.
+ */
+function getStateDir() {
+  const dir = path.join(getClaudeDir(), 'state');
+  ensureDir(dir);
+  return dir;
+}
+
+/**
+ * Sweep entries under `dir` whose name matches `prefixRe` and whose mtime is
+ * older than `maxAgeDays`. Tolerates both files and directories (tool-archive
+ * dirs need recursive removal). Returns the count removed. Errors on any
+ * single entry are swallowed — never block the caller.
+ */
+function pruneStateDir(dir, prefixRe, maxAgeDays) {
+  if (!dir || !prefixRe || !Number.isFinite(maxAgeDays) || maxAgeDays <= 0) return 0;
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return 0; }
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  for (const name of entries) {
+    if (!prefixRe.test(name)) continue;
+    const full = path.join(dir, name);
+    try {
+      const st = fs.statSync(full);
+      if (st.mtimeMs >= cutoff) continue;
+      if (st.isDirectory()) fs.rmSync(full, { recursive: true, force: true });
+      else fs.unlinkSync(full);
+      removed++;
+    } catch { /* per-entry failure ignored */ }
+  }
+  return removed;
+}
+
 function ensureDir(dirPath) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
@@ -173,6 +216,8 @@ module.exports = {
   getClaudeDir,
   getSessionsDir,
   getTempDir,
+  getStateDir,
+  pruneStateDir,
   ensureDir,
   readFile,
   writeFile,

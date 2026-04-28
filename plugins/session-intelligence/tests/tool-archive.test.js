@@ -159,8 +159,10 @@ test('readArchive returns null for unknown id', () => {
   } finally { cleanup(sid); }
 });
 
-test('archiveDir is namespaced under os.tmpdir to avoid cross-session collision', () => {
+test('archiveDir is namespaced under getStateDir to avoid cross-session collision', () => {
+  const { getStateDir } = require('../lib/utils');
   const dir = toolArchive.archiveDir('abc-123');
-  assert.ok(dir.startsWith(os.tmpdir()));
+  assert.ok(dir.startsWith(getStateDir()),
+    `expected archiveDir under ${getStateDir()}, got ${dir}`);
   assert.ok(dir.endsWith('claude-tool-archive-abc-123'));
 });

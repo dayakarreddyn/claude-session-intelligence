@@ -11,7 +11,7 @@
  * exact payload from disk instead of re-fetching.
  *
  * Design:
- *   - Archive dir per session: ${tmpdir()}/claude-tool-archive-<sid>/
+ *   - Archive dir per session: ~/.claude/state/claude-tool-archive-<sid>/
  *   - One file per archive:    <tool_use_id>.json
  *   - Append-only index:       index.jsonl (one line per archive)
  *   - LRU eviction when count > maxPerSession (drop oldest by index order)
@@ -46,7 +46,14 @@ function sanitizeId(id) {
   return s.slice(0, 64) || null;
 }
 
-function tempRoot() { return os.tmpdir(); }
+// Resolve the archive root. Default is ~/.claude/state/ (see
+// lib/utils.getStateDir) so post-compact `/si expand` survives macOS tmpdir
+// cleanup. Falls back to os.tmpdir() if utils isn't loadable — partial
+// installs shouldn't crash the whole archive subsystem.
+function tempRoot() {
+  try { return require('./utils').getStateDir(); }
+  catch { return os.tmpdir(); }
+}
 
 function archiveDir(sid) {
   return path.join(tempRoot(), `claude-tool-archive-${sanitizeSid(sid)}`);

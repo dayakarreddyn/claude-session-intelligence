@@ -33,6 +33,10 @@ const PLUGIN_DIR_CANDIDATES = [
 ];
 const BASH_HOOK_DIR = path.join(CLAUDE_DIR, 'scripts', 'hooks');
 const TMP = os.tmpdir();
+// State dir mirrors lib/utils.getStateDir() — kept in sync. Per-session state
+// (tool counters, compact-zone state, cost snapshots, ctx-shape, tool archive)
+// moved out of TMP because macOS aggressively wipes /var/folders/.../T/.
+const STATE_DIR = path.join(CLAUDE_DIR, 'state');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -200,10 +204,13 @@ function collectStatusline() {
 }
 
 function collectSession(sid) {
+  // Per-session state moved to ~/.claude/state/ (see lib/utils.getStateDir).
+  // task-change file remains in TMP — it's a transient lookup with no
+  // cross-hook persistence requirement.
   const files = {
-    toolCount:  path.join(TMP, `claude-tool-count-${sid}`),
-    tokenBudget: path.join(TMP, `claude-token-budget-${sid}`),
-    compactState: path.join(TMP, `claude-compact-state-${sid}`),
+    toolCount:  path.join(STATE_DIR, `claude-tool-count-${sid}`),
+    tokenBudget: path.join(STATE_DIR, `claude-token-budget-${sid}`),
+    compactState: path.join(STATE_DIR, `claude-compact-state-${sid}`),
     taskChange: path.join(TMP, `claude-task-change-${sid}`),
   };
   const readInt = (f) => {

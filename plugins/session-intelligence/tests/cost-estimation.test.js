@@ -86,6 +86,27 @@ test('savedFromUsage computes delta × tokens / 1M', () => {
   assert.ok(Math.abs(saved - 1.35) < 1e-6, `got ${saved}`);
 });
 
+test('totalsFromTranscript dedupes streaming-snapshot duplicates by message.id', () => {
+  // Real Claude transcripts emit one row per stream chunk update with the
+  // same message.id. Without dedupe the totals were over-counted by the
+  // chunk multiplier (4-7× in practice).
+  const now = '2026-04-19T18:00:00.000Z';
+  const usage = { input_tokens: 1000, cache_read_input_tokens: 100_000, cache_creation_input_tokens: 5000, output_tokens: 500 };
+  const path_ = writeTranscript([
+    { type: 'assistant', timestamp: now, message: { id: 'msg_A', usage } },
+    { type: 'assistant', timestamp: now, message: { id: 'msg_A', usage } },
+    { type: 'assistant', timestamp: now, message: { id: 'msg_A', usage } },
+    { type: 'assistant', timestamp: now, message: { id: 'msg_A', usage } },
+    { type: 'assistant', timestamp: now, message: { id: 'msg_B', usage } },
+  ]);
+  const sid = 'dedupe-test-' + Date.now();
+  const out = costEst.totalsFromTranscript(path_, sid);
+  // 2 distinct message ids × per-turn savings, not 5
+  // saved = (100k × 2) / 1M × 13.5 = 2.7
+  assert.ok(Math.abs(out.saved - 2.7) < 1e-6, `expected 2 deduped turns, saved=${out.saved}`);
+  fs.unlinkSync(path_);
+});
+
 test('totalsFromTranscript accumulates cost + saved incrementally', () => {
   const now = '2026-04-19T18:00:00.000Z';
   const path_ = writeTranscript([

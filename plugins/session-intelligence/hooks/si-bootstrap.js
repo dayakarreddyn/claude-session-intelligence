@@ -613,39 +613,25 @@ function showFirstRunTips(state) {
 // for weeks of dead sessions. Sweep anything older than 7 days at SessionStart
 // — cheap (one readdir, lstat per match), best-effort (any failure logged at
 // debug and moved past), bounded (only matches our own filename prefix).
-const STALE_TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive)-/;
+const STALE_TEMP_MAX_AGE_DAYS = 7;
+const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot)-/;
+// Sweep both ~/.claude/state/ (current home, per-session state moved here so
+// macOS tmpdir cleanup can't strand stale-but-valid files) AND os.tmpdir()
+// (legacy home — clean up leftovers from pre-migration installs). pruneStateDir
+// is the shared helper; per-dir failures degrade silently.
 function sweepStaleTempFiles() {
-  let tempDir;
-  try {
-    const { getTempDir } = require(path.join(SI_LIB, 'utils'));
-    tempDir = getTempDir();
-  } catch { return 0; }
+  let utils;
+  try { utils = require(path.join(SI_LIB, 'utils')); }
+  catch { return 0; }
+  const dirs = [];
+  try { dirs.push(utils.getStateDir()); } catch { /* optional */ }
+  try { dirs.push(utils.getTempDir()); } catch { /* optional */ }
   let removed = 0;
-  let entries = [];
-  try { entries = fs.readdirSync(tempDir); }
-  catch (err) {
-    intelLog('bootstrap', 'debug', 'temp sweep readdir failed',
-      { err: err && err.message });
-    return 0;
-  }
-  const now = Date.now();
-  for (const name of entries) {
-    if (!STALE_TEMP_PREFIX_RE.test(name)) continue;
-    const full = path.join(tempDir, name);
+  for (const dir of dirs) {
     try {
-      const st = fs.statSync(full);
-      if (now - st.mtimeMs < STALE_TEMP_MAX_AGE_MS) continue;
-      // Tool-archive matches are directories; everything else is a file.
-      if (st.isDirectory()) {
-        fs.rmSync(full, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(full);
-      }
-      removed++;
+      removed += utils.pruneStateDir(dir, STALE_TEMP_PREFIX_RE, STALE_TEMP_MAX_AGE_DAYS);
     } catch (err) {
-      intelLog('bootstrap', 'debug', 'temp sweep entry failed',
-        { name, err: err && err.message });
+      intelLog('bootstrap', 'debug', 'temp sweep failed', { dir, err: err && err.message });
     }
   }
   if (removed > 0) {

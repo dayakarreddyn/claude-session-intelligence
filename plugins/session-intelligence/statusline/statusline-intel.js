@@ -686,6 +686,63 @@ function minutesSinceLastCompact(sessionId) {
 }
 
 /**
+ * Per-session snapshot of Claude Code's authoritative `total_cost_usd`.
+ * Statusline writes the latest value on every render that has an authoritative
+ * cost; PreCompact reads this at the moment of /compact and stamps it onto
+ * the history entry as `costAtCompactUsd`. Letting future statusline renders
+ * compute `since-compact = current_total - at_compact` — a strict subset of
+ * session cost, instead of the divergent transcript-priced estimate.
+ */
+function costSnapshotPath(sessionId) {
+  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  // Persist under ~/.claude/state/ so macOS tmpdir cleanup doesn't strand
+  // PreCompact reading a stale or absent snapshot mid-session. Falls back to
+  // os.tmpdir() when utils isn't loadable (partial install).
+  let stateDir;
+  try {
+    const dir = resolveLibDir();
+    if (dir) stateDir = require(path.join(dir, 'utils')).getStateDir();
+  } catch { /* fall through */ }
+  return path.join(stateDir || os.tmpdir(), `claude-cost-snapshot-${sid}.json`);
+}
+
+function writeCostSnapshot(sessionId, totalCostUsd) {
+  if (!sessionId || !Number.isFinite(totalCostUsd)) return;
+  try {
+    fs.writeFileSync(
+      costSnapshotPath(sessionId),
+      JSON.stringify({ t: Date.now(), total_cost_usd: totalCostUsd }),
+    );
+  } catch { /* best effort */ }
+}
+
+function readCostSnapshot(sessionId) {
+  try {
+    const data = JSON.parse(fs.readFileSync(costSnapshotPath(sessionId), 'utf8'));
+    return data && Number.isFinite(data.total_cost_usd) ? data : null;
+  } catch { return null; }
+}
+
+/**
+ * costAtCompactUsd for the current session's most recent compact, or null
+ * when the entry doesn't have one (older history written before the field
+ * existed) or the session hasn't compacted yet.
+ */
+function costAtLastCompact(sessionId) {
+  if (!sessionId) return null;
+  const lib = loadCompactHistoryLib();
+  if (!lib || typeof lib.readHistory !== 'function') return null;
+  const entries = lib.readHistory(50);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.sid === sessionId && Number.isFinite(e.costAtCompactUsd)) {
+      return e.costAtCompactUsd;
+    }
+  }
+  return null;
+}
+
+/**
  * Cost + cache-savings accrued since the last /compact IN THIS SESSION.
  * Returns zeroes when the session hasn't compacted yet — the cell renders
  * empty in that case, same as compactAge. Scans transcript JSONL lines
@@ -703,7 +760,11 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}`);
+  // v2: includes seenIds for streaming-snapshot dedupe. Same assistant
+  // message.id appears N times in the transcript (one row per stream chunk
+  // update), and the prior schema double-counted every snapshot. Old v1
+  // cache files are abandoned (TMPDIR cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v2`);
 
   let cache = null;
   try {
@@ -715,7 +776,8 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
     }
   } catch { /* miss or stale */ }
 
-  if (!cache) cache = { compactMs, offset: 0, cost: 0, saved: 0 };
+  if (!cache) cache = { compactMs, offset: 0, cost: 0, saved: 0, seenIds: [] };
+  const seen = new Set(Array.isArray(cache.seenIds) ? cache.seenIds : []);
   if (stat.size === cache.offset) return { cost: cache.cost, saved: cache.saved };
 
   try {
@@ -735,6 +797,14 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
             if (!u) continue;
             const ts = d.timestamp ? Date.parse(d.timestamp) : NaN;
             if (!Number.isFinite(ts) || ts < compactMs) continue;
+            // Dedupe streaming snapshots: same message.id appears once per
+            // stream chunk in the transcript. Without this guard the cost
+            // is over-counted by the chunk multiplier (typically 4-7×).
+            const mid = d.message && d.message.id;
+            if (mid) {
+              if (seen.has(mid)) continue;
+              seen.add(mid);
+            }
             cache.cost += costFromUsage(u, prices);
             cache.saved += savedFromUsage(u, prices);
           } catch { /* skip bad line */ }
@@ -746,8 +816,10 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
     return { cost: cache.cost, saved: cache.saved };
   }
 
-  try { fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8'); }
-  catch { /* best effort */ }
+  try {
+    cache.seenIds = Array.from(seen);
+    fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8');
+  } catch { /* best effort */ }
 
   return { cost: cache.cost, saved: cache.saved };
 }
@@ -1067,7 +1139,19 @@ function buildRenderers(C) {
      */
     costSaved: (_input, ctx) => {
       const cost = ctx.costUsd || 0;
-      const saved = ctx.cacheSavedUsd || 0;
+      // Cache-savings is transcript-priced (Anthropic doesn't expose a
+      // saved-by-cache field). DEFAULT_PRICES tracks list price for the
+      // top tier; for any session billed at a discount (newer model
+      // generations, plan caps), the raw transcript savings overstates by
+      // the same ratio the transcript-cost overstates `total_cost_usd`.
+      // Auto-calibrate by that ratio when both numbers are available, so
+      // savings stays denominated in the same currency the user sees on
+      // their bill.
+      const transcriptCost = ctx.tokenTotals && ctx.tokenTotals.cost;
+      const calibration = (ctx.officialCostUsd && transcriptCost > 0)
+        ? (ctx.officialCostUsd / transcriptCost)
+        : 1;
+      const saved = (ctx.cacheSavedUsd || 0) * calibration;
       const parts = [];
       if (cost > 0) parts.push(`c${fmtUsd(cost)}`);
       if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
@@ -1194,15 +1278,51 @@ function buildRenderers(C) {
      *  compactAge to answer "how much has this post-compact run cost so
      *  far, and how much is the prefix cache earning me." Hidden when
      *  both are trivially small (<$0.10) or when no compact has happened
-     *  yet. Always dim — volume signal, not a warning. */
+     *  yet. Always dim — volume signal, not a warning.
+     *
+     *  Cost source preference: when both Claude Code's authoritative
+     *  `total_cost_usd` AND a stamped `costAtCompactUsd` from history are
+     *  available, return `current - atCompact` — a strict subset of the
+     *  whole-session cost. Fallback to the transcript-priced estimate
+     *  when either is missing (pre-fix history entries, fresh sessions
+     *  before the snapshot writes, or environments where Claude Code
+     *  doesn't expose `total_cost_usd`). */
     compactCost: (input, ctx) => {
-      const { cost, saved } = costsSinceCompact(
+      const sid = input.session_id || input.sessionId || '';
+      const atCompact = costAtLastCompact(sid);
+      const haveAuthoritative = atCompact !== null
+        && ctx.officialCostUsd !== null
+        && Number.isFinite(ctx.officialCostUsd);
+      const tc = costsSinceCompact(
         input.transcript_path || input.transcriptPath || '',
-        input.session_id || input.sessionId || '',
+        sid,
         ctx.cfg.prices || DEFAULT_PRICES,
       );
+      // Calibrate transcript-derived numbers to billing reality. Preferred:
+      // post-compact ratio (cost-since-compact / transcript-since-compact)
+      // when authoritative is available. Fallback: whole-session ratio
+      // (officialCostUsd / tokenTotals.cost). Both apply to savings; the
+      // whole-session ratio also rescues the cost cell when authoritative
+      // post-compact isn't computable (e.g. compact entry predates the
+      // cost-stamp). Without dedupe this would have been wildly wrong;
+      // with dedupe (msg.id) the transcript token counts are accurate and
+      // the only remaining drift is the per-token price, which the ratio
+      // captures.
+      let calibration = 1;
+      let costSource = 'none';
+      let cost = 0;
+      if (haveAuthoritative) {
+        cost = Math.max(0, ctx.officialCostUsd - atCompact);
+        costSource = 'authoritative';
+        if (tc.cost > 0) calibration = cost / tc.cost;
+      } else if (ctx.officialCostUsd && ctx.tokenTotals && ctx.tokenTotals.cost > 0) {
+        calibration = ctx.officialCostUsd / ctx.tokenTotals.cost;
+        cost = tc.cost * calibration;
+        costSource = 'calibrated';
+      }
+      const saved = tc.saved * calibration;
       const parts = [];
-      if (cost >= 0.01) parts.push(`c${fmtUsd(cost)}`);
+      if (costSource !== 'none' && cost >= 0.01) parts.push(`c${fmtUsd(cost)}`);
       if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
       if (!parts.length) return '';
       // Tight `c$20/s$94` instead of `c$20.31 / s$94.59` — saves ~8 cols
@@ -1278,11 +1398,22 @@ function buildRenderers(C) {
       // Walk back from the latest entry to find a non-blank root. When
       // `activeRootShowAtRoot` is on we keep `.` so the field still
       // signals liveness while Claude is parked at cwd root.
+      // Also skip absolute paths outside the session cwd (e.g. tool
+      // calls touching ~/.claude/* would otherwise surface
+      // `/Users/<name>` and shadow real in-project navigation).
       const showAtRoot = !!ctx.cfg.activeRootShowAtRoot;
+      const cwdAbs = input.cwd || '';
+      const isInProject = (r) => {
+        if (!r || r === '.') return true;
+        if (!r.startsWith('/')) return true; // already a relative root
+        if (!cwdAbs) return true;
+        return r === cwdAbs || r.startsWith(cwdAbs + '/');
+      };
       let root = '';
       for (let i = entries.length - 1; i >= 0; i--) {
         const r = entries[i] && typeof entries[i].root === 'string' ? entries[i].root : '';
         if (!r) continue;
+        if (!isInProject(r)) continue;
         if (r !== '.' || showAtRoot) { root = r; break; }
       }
       if (!root) return '';
@@ -1415,7 +1546,9 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}`);
+  // v2: includes seenIds for streaming-snapshot dedupe. See note in
+  // costsSinceCompact() — old v1 cache files are abandoned.
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v2`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -1424,6 +1557,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedOutput = 0;
   let cachedCacheRead = 0;
   let cachedCreation = 0;
+  let cachedSeenIds = [];
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -1435,8 +1569,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
+      cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
+  const seen = new Set(cachedSeenIds);
 
   // File shrank (rotation / clear) → drop cache, re-read whole thing.
   if (stat.size < cachedOffset) {
@@ -1475,6 +1611,12 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
             const d = JSON.parse(line);
             const u = d && d.message && d.message.usage;
             if (u) {
+              // Dedupe streaming snapshots by message.id (see costsSinceCompact).
+              const mid = d.message && d.message.id;
+              if (mid) {
+                if (seen.has(mid)) continue;
+                seen.add(mid);
+              }
               newCost += costFromUsage(u, prices);
               newSaved += savedFromUsage(u, prices);
               newInput += u.input_tokens || 0;
@@ -1500,6 +1642,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       offset: newOffset, cost: newCost, saved: newSaved,
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
+      seenIds: Array.from(seen),
     }), 'utf8');
   } catch { /* best effort */ }
 
@@ -1627,23 +1770,40 @@ function main() {
   let costUsd = 0;
   let cacheSavedUsd = 0;
   let tokenTotals = null;
+  let officialCostUsd = null;
   const wantCostSaved = cfg.fields.includes('costSaved');
   const wantCost = cfg.fields.includes('cost') || wantCostSaved;
   const wantCacheSaved = cfg.fields.includes('cacheSaved') || wantCostSaved;
   const wantTokenFlow = cfg.fields.includes('tokenFlow');
+  const wantCompactCost = cfg.fields.includes('compactCost');
+  // Always parse Claude Code's authoritative cost when present — used both
+  // by cost cells and by compactCost (subtracts cost-at-compact for a strict
+  // subset of session cost). Hoisted out of the want-gates so the snapshot
+  // gets written even when only compactCost is in the field list.
+  const officialCost = input.cost && typeof input.cost === 'object'
+    ? Number(input.cost.total_cost_usd)
+    : Number(input.total_cost_usd);
+  if (Number.isFinite(officialCost) && officialCost > 0) {
+    officialCostUsd = officialCost;
+  }
   if (wantCost || wantCacheSaved || wantTokenFlow) {
-    const officialCost = input.cost && typeof input.cost === 'object'
-      ? Number(input.cost.total_cost_usd)
-      : Number(input.total_cost_usd);
-    if (wantCost && Number.isFinite(officialCost) && officialCost > 0
+    if (wantCost && officialCostUsd !== null
         && !wantCacheSaved && !wantTokenFlow) {
-      costUsd = officialCost;
+      costUsd = officialCostUsd;
     } else {
       tokenTotals = totalsFromTranscript(transcriptPath, sessionId, cfg.prices || DEFAULT_PRICES);
-      costUsd = (wantCost && Number.isFinite(officialCost) && officialCost > 0)
-        ? officialCost : tokenTotals.cost;
+      costUsd = (wantCost && officialCostUsd !== null)
+        ? officialCostUsd : tokenTotals.cost;
       cacheSavedUsd = tokenTotals.saved;
     }
+  }
+  // Persist the latest authoritative cost so PreCompact can stamp
+  // `costAtCompactUsd` onto the history entry. Cheap atomic JSON write —
+  // ~50 bytes, written at most once per render. Skipped when compactCost
+  // isn't configured (no consumer) or no authoritative cost is available
+  // (would write a stale value over a good one).
+  if (wantCompactCost && officialCostUsd !== null && sessionId) {
+    writeCostSnapshot(sessionId, officialCostUsd);
   }
 
   const projectDir = resolveProjectDir(cwd);
@@ -1673,10 +1833,12 @@ function main() {
     sessionDurationMs,
     costUsd,
     cacheSavedUsd,
+    officialCostUsd,
     tokenTotals,
     usedTranscript,
     usage,
     thinking,
+    sessionId,
   };
 
   const renderers = buildRenderers(C);

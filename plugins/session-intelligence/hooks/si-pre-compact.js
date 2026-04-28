@@ -12,6 +12,28 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+
+// Per-session cost-at-compact snapshot. Statusline writes this on every render
+// that has Claude Code's authoritative `total_cost_usd`; we read the latest
+// at compact time to stamp `costAtCompactUsd` onto the history entry. Letting
+// the statusline `compactCost` field render `current_total - costAtCompact`
+// — a strict subset of session cost, instead of the divergent transcript-
+// priced estimate. Path resolution defers to lib/utils.getStateDir() so writer
+// (statusline) and reader (this hook) share the same ~/.claude/state/ home.
+function readCostSnapshot(sessionId) {
+  if (!sessionId) return null;
+  const sid = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
+  // Lazy require — SI_LIB resolves below via resolveSiLibDir().
+  let stateDir;
+  try { stateDir = require(path.join(SI_LIB, 'utils')).getStateDir(); }
+  catch { stateDir = os.tmpdir(); /* legacy fallback */ }
+  const file = path.join(stateDir, `claude-cost-snapshot-${sid}.json`);
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return data && Number.isFinite(data.total_cost_usd) ? data : null;
+  } catch { return null; }
+}
 
 // Resolve SI lib dir. Source layout: ../lib (sibling of hooks/).
 // Installed layout: ./session-intelligence/lib (bundled under ECC scripts/hooks/).
@@ -503,23 +525,32 @@ async function main() {
   // Single top-level heading so the model knows this block came from the
   // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
   // mobile render it cleanly, no wide bars that wrap on narrow screens.
+  //
+  // PreCompact has no JSON output channel: `hookSpecificOutput` is rejected
+  // for this event (schema only accepts it for PreToolUse / UserPromptSubmit /
+  // PostToolUse / PostToolBatch). Raw stdout IS the contract here \u2014
+  // Claude Code surfaces it as "completed successfully: <stdout>" and folds
+  // it into the summariser's context. Don't try to wrap this in a JSON
+  // envelope; validation will reject the whole block and drop ALL guidance.
+  const emit = (chunk) => { if (chunk) process.stdout.write(chunk); };
+
   if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh || tipBlock) {
-    process.stdout.write(`\n# Session Intelligence \u2014 compaction guidance\n`);
+    emit(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
   // User-authored session-context.md hints first (manual curation, stronger
   // signal), then observed shape (grounded in what actually happened), then
   // the memory-offload directive (stands alone; doesn't depend on the others).
   if (hints) {
-    process.stdout.write(hints);
+    emit(hints);
     log('[PreCompact] Injected compaction hints from session-context.md');
   }
   if (shapeInjection) {
-    process.stdout.write(shapeInjection);
+    emit(shapeInjection);
     log('[PreCompact] Injected observed context-shape hints');
   }
   if (memoryOffload) {
-    process.stdout.write(memoryOffload);
+    emit(memoryOffload);
     log('[PreCompact] Injected memory-offload checkpoint directive');
     intelLog('pre-compact', 'info', 'memory offload directive emitted', {
       projectDir: path.basename(projectDir || ''),
@@ -527,7 +558,7 @@ async function main() {
     });
   }
   if (prioritiesReview) {
-    process.stdout.write(prioritiesReview);
+    emit(prioritiesReview);
     log('[PreCompact] Injected priorities-review directive');
     intelLog('pre-compact', 'info', 'priorities review directive emitted', {
       projectDir: path.basename(projectDir || ''),
@@ -535,7 +566,7 @@ async function main() {
     });
   }
   if (memoryCleanup) {
-    process.stdout.write(memoryCleanup);
+    emit(memoryCleanup);
     log('[PreCompact] Injected stale-memory-cleanup directive');
     intelLog('pre-compact', 'info', 'memory cleanup directive emitted', {
       projectDir: path.basename(projectDir || ''),
@@ -543,7 +574,7 @@ async function main() {
     });
   }
   if (gitNexusRefresh) {
-    process.stdout.write(gitNexusRefresh);
+    emit(gitNexusRefresh);
     log('[PreCompact] Injected git-nexus refresh note');
     intelLog('pre-compact', 'info', 'git-nexus refresh note emitted', {
       anchors: gitNexusStatus.anchors,
@@ -552,7 +583,7 @@ async function main() {
     });
   }
   if (tipBlock) {
-    process.stdout.write(tipBlock);
+    emit(tipBlock);
     intelLog('pre-compact', 'debug', 'tip block emitted', { bytes: tipBlock.length });
   }
 
@@ -595,7 +626,7 @@ async function main() {
   // END of the pre-compact block — it becomes the last thing the user sees
   // before the input prompt, which is exactly when they need it.
   if (hints || shapeInjection || memoryOffload) {
-    process.stdout.write(
+    emit(
       '\n## NEXT (to resume)\n'
       + 'Send any short message (e.g. `c` or `continue`) to show the post-compact '
       + 'resume banner and auto-continue the last task. Claude Code pauses for '
@@ -624,6 +655,17 @@ async function main() {
       const hotDirs     = analysis ? analysis.hot.map((h) => h.root) : [];
       const warmDirs    = analysis ? analysis.warm.map((w) => w.root) : [];
 
+      // Authoritative cost-at-compact, captured by the statusline's per-render
+      // snapshot. When present, the statusline `compactCost` field uses
+      // `current_total - costAtCompactUsd` for a strict subset of session
+      // cost. Falls back to the transcript-priced estimate when missing
+      // (fresh session, no statusline run yet, or `total_cost_usd` absent
+      // from stdin in this environment).
+      const costSnapshot = readCostSnapshot(sessionId);
+      const costAtCompactUsd = costSnapshot && Number.isFinite(costSnapshot.total_cost_usd)
+        ? Number(costSnapshot.total_cost_usd.toFixed(4))
+        : null;
+
       const historyEntry = {
         t: Date.now(),
         sid: sessionId,
@@ -636,6 +678,7 @@ async function main() {
         hadShift: !!(analysis && analysis.shift),
         regretCount: 0, // upgraded later when the snapshot window closes
       };
+      if (costAtCompactUsd !== null) historyEntry.costAtCompactUsd = costAtCompactUsd;
       compactHistory.appendHistory(historyEntry);
 
       // Snapshot drives post-compact regret monitoring for up to 30 calls
