@@ -165,6 +165,9 @@ function printExpand(rec) {
     try { console.log(`# input=${JSON.stringify(rec.tool_input)}`); } catch { /* ignore */ }
   }
   console.log(rec.body);
+  // Tag the events DB so /si stats can report archive recall rate. Best-effort.
+  try { require(path.join(SI_LIB, 'events')).markArchiveRecalled(rec.id); }
+  catch { /* events lib optional */ }
 }
 
 function main() {

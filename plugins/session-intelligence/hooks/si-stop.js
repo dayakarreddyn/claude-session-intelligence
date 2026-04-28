@@ -48,7 +48,7 @@ function loadSiConfig() {
 
 function intelLog(component, level, msg, data) {
   try {
-    const lib = require(path.join(SI_LIB, 'intel-log'));
+    const lib = require(path.join(SI_LIB, 'intel-debug'));
     if (typeof lib.intelLog === 'function') return lib.intelLog(component, level, msg, data);
   } catch { /* logging is best-effort */ }
 }
@@ -72,7 +72,13 @@ function resolveProjectDir(cwd) {
 
 function shapeLogStat(sid) {
   if (!sid) return null;
-  const file = path.join(os.tmpdir(), `claude-ctx-shape-${sid}.jsonl`);
+  // ctx-shape moved to ~/.claude/state/; fall back to tmpdir for legacy
+  // sessions whose state was written before the migration.
+  let stateDir;
+  try { stateDir = require(path.join(SI_LIB, 'utils')).getStateDir(); }
+  catch { stateDir = os.tmpdir(); }
+  let file = path.join(stateDir, `claude-ctx-shape-${sid}.jsonl`);
+  if (!fs.existsSync(file)) file = path.join(os.tmpdir(), `claude-ctx-shape-${sid}.jsonl`);
   try {
     const stat = fs.statSync(file);
     const buf = fs.readFileSync(file, 'utf8');
@@ -121,6 +127,35 @@ function main() {
     ? Math.floor(stopCfg.minToolCalls) : 5;
   const shape = shapeLogStat(sid);
   const toolCalls = shape ? shape.entries : 0;
+
+  // Roll up session totals into the events DB for /si stats. Pull peak
+  // tokens from the last token-budget file and total cost from the last
+  // cost-snapshot — both are best-effort; events.recordSessionEnd uses
+  // COALESCE so missing fields don't overwrite real data.
+  try {
+    const events = require(path.join(SI_LIB, 'events'));
+    const { getStateDir } = require(path.join(SI_LIB, 'utils'));
+    const safeSid = String(sid || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    let peakTokens = null;
+    let totalCostUsd = null;
+    if (safeSid) {
+      try {
+        const tok = parseInt(fs.readFileSync(path.join(getStateDir(), `claude-token-budget-${safeSid}`), 'utf8'), 10);
+        if (Number.isFinite(tok)) peakTokens = tok;
+      } catch { /* missing — leave null */ }
+      try {
+        const snap = JSON.parse(fs.readFileSync(path.join(getStateDir(), `claude-cost-snapshot-${safeSid}.json`), 'utf8'));
+        if (snap && Number.isFinite(snap.total_cost_usd)) totalCostUsd = snap.total_cost_usd;
+      } catch { /* missing — leave null */ }
+    }
+    events.recordSessionEnd({
+      sid: safeSid,
+      endedAt: Date.now(),
+      totalCostUsd,
+      peakTokens,
+      toolCalls,
+    });
+  } catch { /* events lib optional */ }
   if (toolCalls < minToolCalls) {
     intelLog('stop', 'debug', 'below minToolCalls — skipping', { toolCalls, minToolCalls });
     return;

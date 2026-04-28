@@ -23,6 +23,8 @@ Manage the unified config at `~/.claude/session-intelligence.json` from inside C
 /si tail                                  # show latest intel log + shape log for this session
 /si expand <tool_use_id>                  # replay a tool response archived by the PostToolUse hook
 /si archive-list                          # list tool responses archived this session
+/si stats [--since=N] [--project=X]       # session/compact/zone metrics from the events DB
+/si stats --recent                        # last 20 compacts (table form)
 ```
 
 Keys use dotted paths. Values parse as JSON when possible, else plain string.
@@ -117,6 +119,15 @@ ${CLAUDE_PLUGIN_ROOT}/tools/expand.js
 Invoke as `node <path> <tool_use_id> --sid=<sid>` using the current session id. Relay stdout verbatim. If the body is huge, warn the user it will inflate context before printing. No diff, no config write.
 
 **`archive-list`** — Print the tool-archive index for this session. Invoke the same CLI with `--list --sid=<sid>` and relay stdout. Rows are sorted oldest-first; `(missing)` marks files the LRU cap evicted.
+
+**`stats [--since=N] [--project=X]`** — Print aggregate metrics from the events DB at `~/.claude/state/si-events.db`. Resolve the path to the CLI in this order and invoke the first that exists:
+
+```
+${CLAUDE_PLUGIN_ROOT}/tools/stats.js
+~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/tools/stats.js
+```
+
+Invoke as `node <path>` plus any flags the user passed (`--since=N` for window, `--project=X` to filter, `--recent` for table form, `--json` for machine output). Relay stdout verbatim. If stderr says "events DB unavailable", point the user at the better-sqlite3 install (`npm install --prefix ${CLAUDE_PLUGIN_ROOT}`). No diff, no config write.
 
 ### `config` — show-all form
 
