@@ -348,8 +348,9 @@ async function main() {
         ? canonicalShape.warmScoreCutoff : undefined;
       const rootDirDepth = Number.isFinite(canonicalShape.rootDirDepth)
         ? canonicalShape.rootDirDepth : undefined;
+      const dropGlobs = Array.isArray(canonicalShape.dropGlobs) ? canonicalShape.dropGlobs : [];
       const shape = analyzeShape(readShape(sessionId), {
-        preserveGlobs, canonicalCwd, warmScoreCutoff, rootDirDepth,
+        preserveGlobs, dropGlobs, canonicalCwd, warmScoreCutoff, rootDirDepth,
       });
       const diagnosis = draftMessage(shape);
 

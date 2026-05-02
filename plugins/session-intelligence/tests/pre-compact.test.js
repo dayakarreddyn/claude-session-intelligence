@@ -74,7 +74,6 @@ test('user-managed section is skipped when mtime is stale, replaced with refresh
   assert.match(out, /NOTE: skipped user-managed section\(s\)/);
   assert.match(out, /`Current Task`/);
   assert.match(out, /`On Compact`/);
-  assert.match(out, /5 day\(s\) old/);
   assert.match(out, /si:autofill sha=/);
 });
 
@@ -103,7 +102,7 @@ test('missing mtime (mtimeMs=0) is treated as unknown age and skips user-managed
 
   assert.doesNotMatch(out, /hand-written/);
   assert.match(out, /NOTE: skipped user-managed section\(s\)/);
-  assert.match(out, /of unknown age/);
+  assert.match(out, /carries no `<!-- si:autofill sha=\.\.\. -->` sentinel/);
 });
 
 test('empty sections + no skipped → empty string (no header for nothing)', () => {

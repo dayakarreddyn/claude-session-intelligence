@@ -506,6 +506,10 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 /si explain taskChange.minTokens    # describe what a key does
 /si config                          # show all settings in one /config-style form
 /si migrate                         # fold legacy statusline-intel.json in
+/si stats [--days=N]                # spend / compact / zone / project usage report
+/si tail                            # latest intel + shape log for this session
+/si expand <tool_use_id>            # replay a tool response archived this session
+/si archive-list                    # list archived tool responses
 ```
 
 Every write shows a unified diff of the proposed change and waits for you to reply **YES** before touching the file. Anything else cancels cleanly. Post-write, Claude tells you whether a Claude Code restart is required.
@@ -517,6 +521,42 @@ For users who'd rather not memorize dotted keys. Prints every user-facing tunabl
 Edit any subset in one reply: one `key=value` per line, using either the friendly label (case-insensitive) or the dotted key. Values accept `true`/`false`, `Nk`/`Nm` for thousands/millions, or a raw JSON value. Reply `NONE` to exit cleanly or `QUIT` to abort.
 
 One combined diff, one **YES** confirmation, one write. Complex fields (`statusline.fields` array, `serviceHealth` URL list, `prices` overrides) stay under `/si set` because they're too freeform for the form.
+
+### `/si stats` — usage report
+
+Run `/si stats` (or `node tools/stats.js`) for a multi-section rollup of everything the events DB at `~/.claude/state/si-events.db` has captured. Defaults to the last 30 days; pass `--days=N` to widen or narrow the window, `--project=<basename>` to filter, `--recent` for the simple last-20-compacts table, `--json` for machine output.
+
+Sections, in order:
+
+- **Headline** — total spend, sessions, avg/session, avg/day, tool calls, peak tokens. If `usageBudget.daily` or `usageBudget.weekly` is set, two extra rows show `today / cap` and `this week / cap` with color-coded `%` of budget.
+- **Daily trend** — sparkline + 7-day table with `cost`, `%TOT` (share of period spend), `sessions`, `compacts`, optional `%BUDG`.
+- **Weekly rollup** — Monday-anchored buckets, leading-empty weeks trimmed, `WoW` (week-over-week % change in cost) with colored ▲/▼ deltas, optional `%BUDG`.
+- **Compacts** — count, total/avg cost, p50/p90/min/max tokens at compact, % with domain shift.
+- **Zone callouts** — yellow/orange/red bar chart with a one-line verdict ("9 red-zone events (20% of crossings) — sessions are routinely pushing past the recommended compact line").
+- **Tool-response archive** — snapshot count, recall %, total bytes; nudge if you're accumulating without recalling.
+- **Projects** — top 10 by spend, with sessions, cost, compacts, red-rate %, archive count, recall %.
+- **Recent compacts** — last 8 with when, project, tokens, cost, shift flag, trigger.
+
+#### Usage budgets (`usageBudget`)
+
+Three modes per period, configured in `~/.claude/session-intelligence.json`:
+
+```json
+{
+  "usageBudget": {
+    "daily":  100,           // USD cap → renders %-of-budget with color bands
+    "weekly": "unlimited"    // tracking on, no cap → renders "spend / unlimited (∞)"
+  }
+}
+```
+
+| Value | Effect |
+|---|---|
+| `0` (or unset) | Disabled — no row, no `%BUDG` column |
+| Positive number | USD cap. Color bands: <60% green, 60–85% yellow, 85–100% orange, ≥100% red |
+| `"unlimited"` | Tracking on with no cap. Renders `spend / unlimited` and `∞` in `%BUDG` cells |
+
+Env-var overrides (one-shot, no config file edit needed): `CLAUDE_USAGE_BUDGET_DAILY=100`, `CLAUDE_USAGE_BUDGET_WEEKLY=unlimited`.
 
 ## Auto-Compact Suggestions
 
@@ -615,7 +655,22 @@ Phase events flagged automatically: `git commit`, `git push`, `gh pr create`, `g
 }
 ```
 
-Useful when one repo's post-compact data shows WARM producing no soft-regret signal — tighten its cutoff without affecting other projects. `shape.perProject[cwd]` may also override `scoring`, `rootDirDepth`, and add to (unions) `preserveGlobs`; unknown keys are ignored.
+Useful when one repo's post-compact data shows WARM producing no soft-regret signal — tighten its cutoff without affecting other projects. `shape.perProject[cwd]` may also override `scoring`, `rootDirDepth`, and add to (unions) both `preserveGlobs` and `dropGlobs`; unknown keys are ignored.
+
+**Drop globs** (`shape.dropGlobs`) are the inverse of `preserveGlobs`: any root or sample file matching one of these globs is force-banded to **COLD**, regardless of how often it was touched or whether it would otherwise be allowlisted. The intent is hard exclusion of secrets/env content from anything the model sees post-compact. Defaults cover the obvious patterns:
+
+```json
+"shape": {
+  "dropGlobs": [
+    "**/.env", "**/.env.*",
+    "**/secrets*", "**/*secret*", "**/setup-secrets*",
+    "**/credentials*",
+    "**/*.pem", "**/*.key"
+  ]
+}
+```
+
+Per-project `dropGlobs` extend this list rather than replacing it (union semantics, identical to `preserveGlobs`). Roots that match the denylist render in the **Safe to drop** band tagged `[denylisted]` so it's clear *why* they were dropped.
 
 **Domain shift** — Jaccard overlap of the first-N vs last-N rootDir sets. < 0.3 = pivot detected.
 

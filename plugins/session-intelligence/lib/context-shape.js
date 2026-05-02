@@ -597,6 +597,7 @@ function analyzeShape(entries, opts) {
   if (span <= 0) return null;
 
   const preserveRegexes = compilePreserveGlobs(opts && opts.preserveGlobs);
+  const dropRegexes = compilePreserveGlobs(opts && opts.dropGlobs);
   const scoring = normalizeScoring(opts && opts.scoring);
   const persist = !!(opts && opts.persistAcrossCompacts && opts.sessionId);
   const sessionId = persist ? opts.sessionId : null;
@@ -620,13 +621,21 @@ function analyzeShape(entries, opts) {
 
     const cur = roots.get(e.root) || {
       root: e.root, first: e.tok, last: e.tok, count: 0, samples: [],
-      allowlisted: false,
+      allowlisted: false, denylisted: false,
     };
     cur.first = Math.min(cur.first, e.tok);
     cur.last  = Math.max(cur.last, e.tok);
     cur.count += 1;
     if (cur.samples.length < 3 && e.file && !cur.samples.includes(e.file)) {
       cur.samples.push(e.file);
+    }
+    // Denylist check — secrets/env files etc. that must never survive a
+    // compact via shape analysis. Wins over allowlist (checked at banding).
+    if (!cur.denylisted && dropRegexes.length) {
+      if (matchesAnyGlob(e.root, dropRegexes)
+          || (e.file && matchesAnyGlob(e.file, dropRegexes))) {
+        cur.denylisted = true;
+      }
     }
     // Allowlist check — match either the root itself or any file under it.
     // Idempotent: once set, no need to recompute.
@@ -689,7 +698,11 @@ function analyzeShape(entries, opts) {
 
   const hot = [], warm = [], cold = [];
   for (const info of rootsArr) {
-    if (info.allowlisted)                     hot.push(info);
+    // Denylist wins — drops secrets/env hits to COLD even if score or
+    // allowlist would have promoted them. Tag for downstream rendering so
+    // pre-compact can label the reason ("matches dropGlobs") if useful.
+    if (info.denylisted)                      { info.allowlisted = false; cold.push(info); }
+    else if (info.allowlisted)                hot.push(info);
     else if (info.score >= HOT_SCORE_CUTOFF)  hot.push(info);
     else if (info.score >= warmCutoff)        warm.push(info);
     else                                      cold.push(info);

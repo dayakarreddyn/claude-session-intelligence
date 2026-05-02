@@ -171,6 +171,22 @@ const DEFAULTS = {
     // field of each shape entry and against the `root` itself. Empty by
     // default — opt in per-repo.
     preserveGlobs: [],
+    // Inverse of preserveGlobs — files/roots matching these globs are
+    // force-banded to COLD (never HOT, never WARM, never allowlisted) so
+    // sensitive or low-signal content cannot survive a compact via the
+    // shape analysis. Match semantics identical to preserveGlobs (root or
+    // any sample file). Default covers common secrets/env file patterns;
+    // append per-project entries via the per-project override block.
+    dropGlobs: [
+      '**/.env',
+      '**/.env.*',
+      '**/secrets*',
+      '**/*secret*',
+      '**/setup-secrets*',
+      '**/credentials*',
+      '**/*.pem',
+      '**/*.key',
+    ],
     // How HOT/WARM/COLD bands are assigned.
     //   'recency'   → last-touch position (legacy behaviour: last 20% HOT)
     //   'frequency' → log-normalized call count
@@ -236,6 +252,18 @@ const DEFAULTS = {
     // starting blank. Self-gated: skipped when no directional signal
     // (fresh current-task or unresolved memory follow-up) exists.
     afterCompact: true,
+  },
+  // Plan-budget tracking surfaced by `/si stats`. Three modes per period:
+  //   0           → disabled (no budget row rendered, default)
+  //   "unlimited" → tracking ON with no cap; renders "spend / unlimited"
+  //                  in headline + tables so you see usage without alerts
+  //   <positive>  → USD cap; renders %-of-budget with color bands
+  //                  (<60% green, 60–85% yellow, 85–100% orange, >100% red).
+  // Set whichever matches your plan (Anthropic Max with no per-day cap →
+  // "unlimited"; pay-as-you-go with a target → number).
+  usageBudget: {
+    daily: 0,
+    weekly: 0,
   },
   toolArchive: {
     // PostToolUse hook writes tool_response payloads larger than
@@ -349,6 +377,22 @@ function applyEnvOverrides(cfg) {
 
   if (env.CLAUDE_TASK_CHANGE === '0') cfg.taskChange.enabled = false;
 
+  // Plan-budget overrides — useful for shells that don't want to write
+  // ~/.claude/session-intelligence.json. Accepts a USD number or the
+  // literal string "unlimited" (case-insensitive). Anything else falls
+  // through to the config-file value.
+  const parseBudget = (raw) => {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined;
+    if (raw.trim().toLowerCase() === 'unlimited') return 'unlimited';
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+    return undefined;
+  };
+  const dailyOverride = parseBudget(env.CLAUDE_USAGE_BUDGET_DAILY);
+  if (dailyOverride !== undefined) cfg.usageBudget.daily = dailyOverride;
+  const weeklyOverride = parseBudget(env.CLAUDE_USAGE_BUDGET_WEEKLY);
+  if (weeklyOverride !== undefined) cfg.usageBudget.weekly = weeklyOverride;
+
   if (env.CLAUDE_SHAPE_ROOT_DIR_DEPTH) {
     const n = parseInt(env.CLAUDE_SHAPE_ROOT_DIR_DEPTH, 10);
     if (Number.isFinite(n) && n >= 1 && n <= 5) cfg.shape.rootDirDepth = n;
@@ -450,6 +494,14 @@ function resolveShapeForCwd(cfg, cwd) {
   const projGlobs = Array.isArray(overrides.preserveGlobs) ? overrides.preserveGlobs : [];
   if (baseGlobs.length || projGlobs.length) {
     merged.preserveGlobs = [...new Set([...baseGlobs, ...projGlobs])];
+  }
+  // Same union semantics for dropGlobs — per-project additions extend the
+  // global denylist rather than replacing it (would otherwise unset secret
+  // patterns the moment any override exists).
+  const baseDrop = Array.isArray(base.dropGlobs) ? base.dropGlobs : [];
+  const projDrop = Array.isArray(overrides.dropGlobs) ? overrides.dropGlobs : [];
+  if (baseDrop.length || projDrop.length) {
+    merged.dropGlobs = [...new Set([...baseDrop, ...projDrop])];
   }
   // perProject itself is irrelevant once resolved — strip it to keep the
   // returned object shape tight.

@@ -245,7 +245,6 @@ function formatCompactionHints(sections, opts = {}) {
   const stalenessMs = Number.isFinite(opts.stalenessMs) ? opts.stalenessMs : STALENESS_MS;
   const ageMs = mtimeMs > 0 ? nowMs - mtimeMs : Infinity;
   const isStale = ageMs > stalenessMs;
-  const ageDays = Math.max(0, Math.round(ageMs / (24 * 60 * 60 * 1000)));
 
   const sectionMap = [
     // At compact-time the work under "## Current Task" is the task we were
@@ -286,10 +285,9 @@ function formatCompactionHints(sections, opts = {}) {
   const header = '## COMPACTION GUIDANCE (from session-context.md)';
   const notes = [];
   if (skipped.length > 0) {
-    const ageLabel = Number.isFinite(ageMs) ? `${ageDays} day(s) old` : 'of unknown age';
     notes.push(
       '',
-      `NOTE: skipped user-managed section(s) ${skipped.map((s) => `\`${s}\``).join(', ')} — session-context.md is ${ageLabel} and carries no \`<!-- si:autofill sha=... -->\` sentinel. Refresh the file or add the sentinel to have it surface here again.`,
+      `NOTE: skipped user-managed section(s) ${skipped.map((s) => `\`${s}\``).join(', ')} — session-context.md carries no \`<!-- si:autofill sha=... -->\` sentinel. Refresh the file or add the sentinel to have it surface here again.`,
     );
   }
 
@@ -378,6 +376,7 @@ async function main() {
     }
   }
   const preserveGlobs = [...userGlobs, ...nexusGlobs];
+  const dropGlobs = Array.isArray(resolvedShape.dropGlobs) ? resolvedShape.dropGlobs : [];
 
   // Shape hints pulled from the live tool-usage history for THIS session id
   // (same session id every other hook uses). Generated fresh at compact-time
@@ -425,6 +424,7 @@ async function main() {
   const rootDirDepth = Number.isFinite(shapeCfg.rootDirDepth) ? shapeCfg.rootDirDepth : 2;
   const analyzeOpts = {
     preserveGlobs,
+    dropGlobs,
     scoring: shapeCfg.scoring || 'hybrid',
     persistAcrossCompacts: shapeCfg.persistAcrossCompacts !== false,
     sessionId,
