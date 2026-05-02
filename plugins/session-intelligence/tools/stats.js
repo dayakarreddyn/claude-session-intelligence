@@ -29,6 +29,15 @@ try { siConfig = require(path.join(resolveSiLibDir(), 'config')).loadConfig() ||
 catch { /* config optional — budget features disable cleanly */ }
 const budget = (siConfig && siConfig.usageBudget) || { daily: 0, weekly: 0 };
 
+// Anthropic plan usage cache (read-only — refresh happens in detached
+// statusline child). Returns null if the cache file is missing — first
+// statusline render after install populates it within ~3 minutes.
+let planUsage = null;
+try {
+  const usageApi = require(path.join(resolveSiLibDir(), 'usage-api'));
+  planUsage = usageApi.readAndRefreshIfStale();
+} catch { /* lib optional */ }
+
 function parseArgs(argv) {
   const flags = {};
   for (const a of argv) {
@@ -72,6 +81,22 @@ function fmtAge(t) {
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+// Future-time countdown: "in 4d 12h" / "in 2h" / "in 18m". Mirrors fmtAge
+// in spirit but for forward-looking timestamps (plan reset windows).
+function fmtUntil(iso) {
+  if (!iso) return '—';
+  const target = typeof iso === 'string' ? Date.parse(iso) : iso;
+  if (!Number.isFinite(target)) return '—';
+  const diff = target - Date.now();
+  if (diff <= 0) return 'now';
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return `in ${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `in ${hr}h`;
+  const days = Math.floor(hr / 24);
+  return `in ${days}d ${hr - days * 24}h`;
 }
 
 function fmtPct(num, denom) {
@@ -237,19 +262,71 @@ function renderDailyTrend(daily, sinceDays) {
   const tail = window.slice(-7);
   if (tail.length > 1) {
     lines.push('');
+    // Per-day share of its containing week — answers "what % of my weekly
+    // burn happened on day X?" without needing absolute plan limits.
+    // Bucket every day in the full series by its Monday so the denominator
+    // is the parent week's total, not an arbitrary trailing window.
+    const mondayKey = (dStr) => {
+      const d = new Date(dStr + 'T00:00:00');
+      const dow = (d.getDay() + 6) % 7;
+      d.setDate(d.getDate() - dow);
+      return d.toISOString().slice(0, 10);
+    };
+    const weekTotalByMonday = new Map();
+    for (const d of daily) {
+      const k = mondayKey(d.day);
+      weekTotalByMonday.set(k, (weekTotalByMonday.get(k) || 0) + (d.cost || 0));
+    }
     const rows = tail.map((d) => {
+      const wkTot = weekTotalByMonday.get(mondayKey(d.day)) || 0;
+      const wkPct = wkTot > 0 ? d.cost / wkTot : 0;
       const row = {
         day: d.day.slice(5),
         cost: fmtUsd(d.cost),
         '%tot': fmtPctRaw(d.pct),
+        '%week': wkTot > 0 ? fmtPctRaw(wkPct) : c('dim', '—'),
         sessions: String(d.sessions),
         compacts: String(d.compacts),
       };
       if (isBudgetEnabled(budget.daily)) row['%budg'] = colorBudgetPct(d.cost, budget.daily);
       return row;
     });
-    lines.push('  ' + table(rows, { align: { cost: 'right', '%tot': 'right', '%budg': 'right', sessions: 'right', compacts: 'right' } }).replace(/\n/g, '\n  '));
+    lines.push('  ' + table(rows, { align: { cost: 'right', '%tot': 'right', '%week': 'right', '%budg': 'right', sessions: 'right', compacts: 'right' } }).replace(/\n/g, '\n  '));
   }
+  return lines.join('\n');
+}
+
+// Anthropic plan-usage snapshot (5-hour block + weekly quota) read from
+// the usage-api cache. Returns "" when no cache is on disk yet — first
+// statusline redraw populates it within ~3 minutes of install.
+function renderPlanUsage(p) {
+  if (!p) return '';
+  const lines = [header('PLAN USAGE (Anthropic)', 'live from /api/oauth/usage cache'), ''];
+  // Cache stores usage as whole-number percent (e.g. 55 = 55%), not a
+  // 0–1 fraction. Don't multiply.
+  const usagePct = (val) => {
+    if (!Number.isFinite(val)) return c('dim', '—');
+    const pct = Math.round(val);
+    const text = `${pct}%`;
+    if (pct >= 100) return c('red', text);
+    if (pct >= 85)  return c('orange', text);
+    if (pct >= 60)  return c('yellow', text);
+    return c('green', text);
+  };
+  const rows = [
+    ['5-hour block', `${usagePct(p.sessionUsage)}   resets ${fmtUntil(p.sessionResetAt)}`],
+    ['Weekly quota', `${usagePct(p.weeklyUsage)}   resets ${fmtUntil(p.weeklyResetAt)}`],
+  ];
+  if (p.extraUsageEnabled && Number.isFinite(p.extraUsageUtilization)) {
+    rows.push(['Extra usage',
+      `${usagePct(p.extraUsageUtilization)}   $${(p.extraUsageUsed || 0).toFixed(2)} / $${(p.extraUsageLimit || 0).toFixed(2)}`]);
+  }
+  if (p.error) rows.push(['Error', c('red', p.error)]);
+  if (Number.isFinite(p.fetchedAt)) {
+    rows.push(['Cache age', c('dim', fmtAge(p.fetchedAt))]);
+  }
+  const w = Math.max(...rows.map((r) => r[0].length));
+  for (const [k, v] of rows) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
   return lines.join('\n');
 }
 
@@ -432,6 +509,7 @@ function main() {
 
   const sections = [
     renderHeadline(stats, sinceDays, project),
+    renderPlanUsage(planUsage),
     renderDailyTrend(stats.dailySeries, sinceDays),
     renderWeeklyRollup(stats.weeklySeries),
     renderCompacts(stats),
