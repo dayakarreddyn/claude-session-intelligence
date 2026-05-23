@@ -27,6 +27,26 @@ const DEFAULT_PRICES = {
   output: 75,
 };
 
+// Per-model price tables. Lookup is by family prefix (the date suffix on
+// model IDs like `claude-haiku-4-5-20251001` varies). Subagents commonly
+// run on a different model than the parent (Haiku for Explore-class agents,
+// Sonnet for reviewers), so a per-model lookup is needed for honest cost.
+const PRICING_BY_MODEL = {
+  'claude-opus':   { input: 15,   cache_creation: 18.75, cache_read: 1.50,  output: 75 },
+  'claude-sonnet': { input: 3,    cache_creation: 3.75,  cache_read: 0.30,  output: 15 },
+  'claude-haiku':  { input: 1,    cache_creation: 1.25,  cache_read: 0.10,  output: 5  },
+};
+
+function priceForModel(modelId) {
+  if (!modelId || typeof modelId !== 'string') return DEFAULT_PRICES;
+  // Match longest family prefix first.
+  const keys = Object.keys(PRICING_BY_MODEL).sort((a, b) => b.length - a.length);
+  for (const k of keys) {
+    if (modelId.startsWith(k)) return PRICING_BY_MODEL[k];
+  }
+  return DEFAULT_PRICES;
+}
+
 /** Cost of one usage block in USD. */
 function costFromUsage(u, prices = DEFAULT_PRICES) {
   if (!u) return 0;
@@ -277,6 +297,8 @@ function formatUsd(n) {
 
 module.exports = {
   DEFAULT_PRICES,
+  PRICING_BY_MODEL,
+  priceForModel,
   costFromUsage,
   savedFromUsage,
   totalCostFromTranscript,

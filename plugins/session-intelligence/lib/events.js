@@ -85,6 +85,7 @@ function openDb() {
  *   compacts          — one row per /compact event (manual or auto)
  *   zone_transitions  — yellow/orange/red callouts from suggest-compact
  *   tool_archives     — large tool-response captures (post-compact recall)
+ *   agent_invocations — Task tool calls (subagent runs) — type, sizes, duration
  */
 function initSchema(db) {
   db.exec(`
@@ -145,7 +146,38 @@ function initSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS tool_archives_sid_idx ON tool_archives(sid);
     CREATE INDEX IF NOT EXISTS tool_archives_tuid_idx ON tool_archives(tool_use_id);
+
+    CREATE TABLE IF NOT EXISTS agent_invocations (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      sid            TEXT NOT NULL,
+      tool_use_id    TEXT,
+      subagent_type  TEXT,
+      description    TEXT,
+      prompt_chars   INTEGER,
+      response_chars INTEGER,
+      duration_ms    INTEGER,
+      t              INTEGER NOT NULL,
+      is_error       INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS agent_invocations_sid_idx ON agent_invocations(sid);
+    CREATE INDEX IF NOT EXISTS agent_invocations_t_idx ON agent_invocations(t);
+    CREATE INDEX IF NOT EXISTS agent_invocations_type_idx ON agent_invocations(subagent_type);
   `);
+
+  // Additive migration: new columns for derived usage/cost on agent_invocations.
+  // Wrapped in try/catch so existing rows aren't disturbed and a half-completed
+  // ALTER doesn't crash the open. Each column is independently added.
+  const addCols = [
+    "ALTER TABLE agent_invocations ADD COLUMN model TEXT",
+    "ALTER TABLE agent_invocations ADD COLUMN input_tokens INTEGER",
+    "ALTER TABLE agent_invocations ADD COLUMN output_tokens INTEGER",
+    "ALTER TABLE agent_invocations ADD COLUMN cache_creation_tokens INTEGER",
+    "ALTER TABLE agent_invocations ADD COLUMN cache_read_tokens INTEGER",
+    "ALTER TABLE agent_invocations ADD COLUMN cost_usd REAL",
+  ];
+  for (const sql of addCols) {
+    try { db.exec(sql); } catch { /* column already exists — expected */ }
+  }
 }
 
 // ─── Writers ────────────────────────────────────────────────────────────────
@@ -247,6 +279,40 @@ function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
   } catch { return false; }
 }
 
+function recordAgentInvocation({
+  sid, toolUseId, subagentType, description,
+  promptChars, responseChars, durationMs, t, isError,
+  model, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, costUsd,
+}) {
+  const db = openDb();
+  if (!db || !sid) return false;
+  try {
+    db.prepare(`
+      INSERT INTO agent_invocations
+        (sid, tool_use_id, subagent_type, description,
+         prompt_chars, response_chars, duration_ms, t, is_error,
+         model, input_tokens, output_tokens,
+         cache_creation_tokens, cache_read_tokens, cost_usd)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, toolUseId || null,
+      subagentType || null, description || null,
+      Number.isFinite(promptChars) ? promptChars : null,
+      Number.isFinite(responseChars) ? responseChars : null,
+      Number.isFinite(durationMs) ? durationMs : null,
+      Number.isFinite(t) ? t : Date.now(),
+      isError ? 1 : 0,
+      model || null,
+      Number.isFinite(inputTokens) ? inputTokens : null,
+      Number.isFinite(outputTokens) ? outputTokens : null,
+      Number.isFinite(cacheCreationTokens) ? cacheCreationTokens : null,
+      Number.isFinite(cacheReadTokens) ? cacheReadTokens : null,
+      Number.isFinite(costUsd) ? costUsd : null,
+    );
+    return true;
+  } catch { return false; }
+}
+
 function markArchiveRecalled(toolUseId) {
   const db = openDb();
   if (!db || !toolUseId) return false;
@@ -307,6 +373,35 @@ function aggregateStats({ sinceDays = 30, project = null } = {}) {
       FROM tool_archives WHERE t >= ?
         ${project ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : ''}
     `).get(cutoff, ...projectArgs);
+
+    // Agent (Task tool / subagent) usage. Aggregate totals + top-N by type.
+    const agentProjectClause = project
+      ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : '';
+    const agents = db.prepare(`
+      SELECT COUNT(*) AS n,
+             SUM(is_error) AS errors,
+             AVG(duration_ms) AS avg_ms,
+             SUM(duration_ms) AS total_ms,
+             SUM(prompt_chars) AS prompt_chars,
+             SUM(response_chars) AS response_chars,
+             SUM(input_tokens) AS input_tokens,
+             SUM(output_tokens) AS output_tokens,
+             SUM(cache_creation_tokens) AS cache_creation_tokens,
+             SUM(cache_read_tokens) AS cache_read_tokens,
+             SUM(cost_usd) AS cost_usd
+      FROM agent_invocations WHERE t >= ? ${agentProjectClause}
+    `).get(cutoff, ...projectArgs);
+    const agentTypes = db.prepare(`
+      SELECT subagent_type AS type, COUNT(*) AS n,
+             AVG(duration_ms) AS avg_ms,
+             SUM(is_error) AS errors,
+             SUM(input_tokens) AS input_tokens,
+             SUM(output_tokens) AS output_tokens,
+             SUM(cost_usd) AS cost_usd
+      FROM agent_invocations
+      WHERE t >= ? ${agentProjectClause} AND subagent_type IS NOT NULL
+      GROUP BY subagent_type ORDER BY cost_usd DESC NULLS LAST, n DESC LIMIT 10
+    `).all(cutoff, ...projectArgs);
 
     // Per-day series (cost + sessions + compacts). Local-day bucketed.
     // Day key: "YYYY-MM-DD" — small integer-ish key, easy to sort/render.
@@ -414,6 +509,9 @@ function aggregateStats({ sinceDays = 30, project = null } = {}) {
              (SELECT COUNT(*) FROM zone_transitions z
                 WHERE z.sid IN (SELECT sid FROM sessions WHERE project = s.project)
                   AND z.t >= ? AND z.to_zone = 'red') AS reds,
+             (SELECT COUNT(*) FROM zone_transitions z
+                WHERE z.sid IN (SELECT sid FROM sessions WHERE project = s.project)
+                  AND z.t >= ?) AS crossings,
              (SELECT COUNT(*) FROM tool_archives ta
                 WHERE ta.sid IN (SELECT sid FROM sessions WHERE project = s.project)
                   AND ta.t >= ?) AS archives,
@@ -423,7 +521,7 @@ function aggregateStats({ sinceDays = 30, project = null } = {}) {
       FROM sessions s
       WHERE s.started_at >= ? AND s.project IS NOT NULL
       GROUP BY s.project ORDER BY cost DESC NULLS LAST, sessions DESC LIMIT 10
-    `).all(cutoff, cutoff, cutoff, cutoff, cutoff);
+    `).all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff);
 
     // Recent compacts — same shape as listRecentCompacts but capped + project-scoped.
     const recentCompacts = db.prepare(`
@@ -434,6 +532,7 @@ function aggregateStats({ sinceDays = 30, project = null } = {}) {
 
     return {
       sessions, compacts, compactPercentiles, zones, archives,
+      agents, agentTypes,
       topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
       sinceDays, project,
     };
@@ -478,6 +577,7 @@ module.exports = {
   recordZoneTransition,
   recordToolArchive,
   markArchiveRecalled,
+  recordAgentInvocation,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,

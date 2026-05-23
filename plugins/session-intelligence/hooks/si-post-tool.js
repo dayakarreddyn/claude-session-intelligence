@@ -17,6 +17,7 @@ const { spawnSync } = require('child_process');
 const CHILDREN = [
   'si-token-budget.js',
   'si-tool-archive.js',
+  'si-agent-tracker.js',
   'si-suggest-compact.js',
 ];
 

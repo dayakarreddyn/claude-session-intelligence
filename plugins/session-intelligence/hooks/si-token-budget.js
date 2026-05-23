@@ -34,7 +34,7 @@ function resolveSiLibDir() {
 const SI_LIB = resolveSiLibDir();
 
 const {
-  getTempDir,
+  getStateDir,
   log
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
@@ -78,8 +78,12 @@ async function main() {
     || process.env.CLAUDE_SESSION_ID
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
-  const budgetFile = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
-  const countFile  = path.join(getTempDir(), `claude-tool-count-${sessionId}`);
+  // State dir, not tmp: macOS wipes /var/folders/.../T mid-session, which
+  // would zero peak-token/tool-count reads at session end. All readers
+  // (si-suggest-compact, si-stop, si-status-report) already use getStateDir();
+  // this writer was the last straggler from the incomplete state-dir migration.
+  const budgetFile = path.join(getStateDir(), `claude-token-budget-${sessionId}`);
+  const countFile  = path.join(getStateDir(), `claude-tool-count-${sessionId}`);
   intelLog('token-budget', 'debug', 'hook fired', { sessionId, budgetFile });
 
   // Unified tool counter — every PostToolUse call increments this file, so
