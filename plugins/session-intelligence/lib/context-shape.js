@@ -810,18 +810,30 @@ function formatCompactInjection(analysis, opts = {}) {
   lines.push('## OBSERVED CONTEXT SHAPE (auto-generated from tool usage)');
 
   if (analysis.shift) {
-    const from = analysis.shift.from.join(', ') || '(earlier context)';
-    const to = analysis.shift.to.join(', ') || '(current)';
-    const jac = stable ? '' : ` (Jaccard ${analysis.shift.jaccard})`;
     lines.push('');
-    lines.push(`**Domain shift:** ${from} \u2192 ${to}${jac}`);
+    if (stable) {
+      // from/to are the head/tail-diff of a rolling window \u2014 they rotate
+      // every session even when the working set is unchanged, so emitting
+      // them in the cache prefix busts the cache on every compact. Keep
+      // the presence signal, drop the volatile dir names.
+      lines.push('**Domain shift detected.**');
+    } else {
+      const from = analysis.shift.from.join(', ') || '(earlier context)';
+      const to = analysis.shift.to.join(', ') || '(current)';
+      lines.push(`**Domain shift:** ${from} \u2192 ${to} (Jaccard ${analysis.shift.jaccard})`);
+    }
   }
 
   if (analysis.hot.length) {
     lines.push('');
     lines.push('**Preserve** (recently active, still in use):');
     for (const h of analysis.hot) {
-      const files = h.samples.length ? ` \u2014 e.g. ${h.samples.slice(0, 2).join(', ')}` : '';
+      // `samples` are the first 2 files seen in that root \u2014 order
+      // depends on which tool calls happened to land first in the
+      // current window, which rotates per compact. Strip in stable mode.
+      const files = stable
+        ? ''
+        : (h.samples.length ? ` \u2014 e.g. ${h.samples.slice(0, 2).join(', ')}` : '');
       const tag = h.allowlisted ? ' [allowlisted]' : '';
       const count = stable ? '' : ` (${h.count} calls)`;
       lines.push(`- ${h.root}${count}${tag}${files}`);
@@ -835,7 +847,9 @@ function formatCompactInjection(analysis, opts = {}) {
       : `**Safe to drop** (~${Math.round(analysis.staleTokens / 1000)}k stale tokens):`;
     lines.push(header);
     for (const c of analysis.cold) {
-      const files = c.samples.length ? ` \u2014 e.g. ${c.samples.slice(0, 2).join(', ')}` : '';
+      const files = stable
+        ? ''
+        : (c.samples.length ? ` \u2014 e.g. ${c.samples.slice(0, 2).join(', ')}` : '');
       const count = stable ? '' : ` (${c.count} calls earlier)`;
       lines.push(`- ${c.root}${count}${files}`);
     }
