@@ -215,6 +215,14 @@ function listArchives(sid) {
   }));
 }
 
+// Drop the matching events-DB rows for ids whose files we just deleted, so
+// /si stats never counts an archive that can no longer be recalled. Lazy
+// require + swallow — the DB is an optional mirror, never load-bearing here.
+function dropDbRows(ids) {
+  if (!ids || !ids.length) return;
+  try { require('./events').deleteToolArchives(ids); } catch { /* optional */ }
+}
+
 /**
  * Keep only the `cap` newest archives for a session. Drops older files and
  * rewrites the index. No-op when under cap or cap is non-positive.
@@ -235,6 +243,7 @@ function enforceLruCap(sid, cap) {
       keep.map((r) => JSON.stringify(r)).join('\n') + (keep.length ? '\n' : ''),
       'utf8');
   } catch { /* index rewrite best-effort */ }
+  dropDbRows(drop.map((r) => r.id));
 }
 
 /** Remove archives older than ttlDays. Returns the count pruned. */
@@ -243,11 +252,13 @@ function sweepTtl(sid, ttlDays) {
   const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
   const idx = readIndex(sid);
   const keep = [];
+  const droppedIds = [];
   let pruned = 0;
   for (const row of idx) {
     if (Number.isFinite(row.t) && row.t < cutoff) {
       const f = archiveFile(sid, row.id);
       if (f) { try { fs.unlinkSync(f); } catch { /* ignore */ } }
+      droppedIds.push(row.id);
       pruned += 1;
     } else {
       keep.push(row);
@@ -259,8 +270,40 @@ function sweepTtl(sid, ttlDays) {
         keep.map((r) => JSON.stringify(r)).join('\n') + (keep.length ? '\n' : ''),
         'utf8');
     } catch { /* ignore */ }
+    dropDbRows(droppedIds);
   }
   return pruned;
+}
+
+/**
+ * Reconcile the events-DB archive table with what's actually on disk. The
+ * per-session LRU/TTL sweeps and the SessionStart dir-pruner delete files but
+ * historically left their DB rows behind, so /si stats reported phantom
+ * archives (size + count + recall%). This walks every DB row and removes the
+ * ones whose backing file is gone — dir-existence is memoized per sid so a
+ * wiped session is one stat() call, not one per row. Returns rows pruned.
+ * Best-effort: any failure leaves the DB untouched.
+ */
+function reconcileDb() {
+  let keys;
+  try { keys = require('./events').allToolArchiveKeys(); }
+  catch { return 0; }
+  if (!keys || !keys.length) return 0;
+  const dirAlive = new Map();
+  const dead = [];
+  for (const { sid, id } of keys) {
+    let alive = dirAlive.get(sid);
+    if (alive === undefined) {
+      try { alive = fs.existsSync(archiveDir(sid)); } catch { alive = false; }
+      dirAlive.set(sid, alive);
+    }
+    if (!alive) { dead.push(id); continue; }
+    const f = archiveFile(sid, id);
+    if (!f || !fs.existsSync(f)) dead.push(id);
+  }
+  if (!dead.length) return 0;
+  try { return require('./events').deleteToolArchives(dead); }
+  catch { return 0; }
 }
 
 module.exports = {
@@ -275,4 +318,5 @@ module.exports = {
   listArchives,
   enforceLruCap,
   sweepTtl,
+  reconcileDb,
 };

@@ -20,8 +20,11 @@ const {
   formatCompactionHints,
   buildMemoryCleanupBlock,
   buildGitNexusRefreshBlock,
+  buildArchiveRecallBlock,
   STALENESS_MS,
 } = require('../hooks/si-pre-compact');
+
+const toolArchive = require('../lib/tool-archive');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = Date.UTC(2026, 3, 22); // 2026-04-22, anchor for deterministic age math
@@ -176,4 +179,28 @@ test('buildGitNexusRefreshBlock emits refresh note with anchor count + sinceDays
   assert.match(out, /last 90d of commit history/);
   assert.match(out, /12 anchor\(s\) cached/);
   assert.match(out, /preserveGlobs/);
+});
+
+// ─── Recallable-archives block ────────────────────────────────────────────────
+
+test('buildArchiveRecallBlock is empty when the session has no archives', () => {
+  assert.equal(buildArchiveRecallBlock(''), '');
+  assert.equal(buildArchiveRecallBlock(`pc-none-${Date.now()}`), '');
+});
+
+test('buildArchiveRecallBlock lists recallable ids largest-first with /si expand', () => {
+  const sid = `pc-recall-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    toolArchive.writeArchive(sid, 'toolu_small', { tool_name: 'Bash' }, 'a'.repeat(5000));
+    toolArchive.writeArchive(sid, 'toolu_big', { tool_name: 'Read' }, 'b'.repeat(20000));
+    const out = buildArchiveRecallBlock(sid);
+    assert.match(out, /RECALLABLE ARCHIVES \(post-compact\)/);
+    assert.match(out, /\/si expand <id>/);
+    assert.match(out, /toolu_big/);
+    assert.match(out, /toolu_small/);
+    // Largest body must be listed before the smaller one.
+    assert.ok(out.indexOf('toolu_big') < out.indexOf('toolu_small'), 'largest archive listed first');
+  } finally {
+    try { fs.rmSync(toolArchive.archiveDir(sid), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 });

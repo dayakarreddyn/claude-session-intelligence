@@ -166,3 +166,87 @@ test('archiveDir is namespaced under getStateDir to avoid cross-session collisio
     `expected archiveDir under ${getStateDir()}, got ${dir}`);
   assert.ok(dir.endsWith('claude-tool-archive-abc-123'));
 });
+
+// ─── DB ↔ disk reconciliation ────────────────────────────────────────────────
+// writeArchive mirrors each archive into the events DB. Historically the DB row
+// outlived its file (LRU/TTL eviction, dir wipe), so /si stats reported phantom
+// archives. Point events at a sandbox DB and assert the row count tracks disk.
+
+const events = require('../lib/events');
+const BIG = 'z'.repeat(5000); // > 4096 default threshold
+
+function withSandboxDb(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-archdb-'));
+  events._setDbPathForTest(path.join(dir, 'si-events.db'));
+  try { fn(); }
+  finally {
+    events._resetForTest();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+test('reconcileDb prunes rows whose files are gone, keeps live ones', () => {
+  withSandboxDb(() => {
+    const live = uniqSid('rec-live');
+    const dead = uniqSid('rec-dead');
+    try {
+      toolArchive.writeArchive(live, 'toolu_live1', { tool_name: 'Read' }, BIG);
+      toolArchive.writeArchive(dead, 'toolu_dead1', { tool_name: 'Bash' }, BIG);
+      assert.equal(events.allToolArchiveKeys().length, 2, 'both rows mirrored to DB');
+
+      // Simulate the SessionStart dir-pruner wiping the dead session's dir,
+      // leaving its DB row orphaned.
+      fs.rmSync(toolArchive.archiveDir(dead), { recursive: true, force: true });
+
+      const pruned = toolArchive.reconcileDb();
+      assert.equal(pruned, 1, 'one orphan row pruned');
+      const keys = events.allToolArchiveKeys();
+      assert.equal(keys.length, 1, 'live row survives');
+      assert.equal(keys[0].id, 'toolu_live1');
+    } finally { cleanup(live); cleanup(dead); }
+  });
+});
+
+test('enforceLruCap removes evicted archives from the events DB', () => {
+  withSandboxDb(() => {
+    const sid = uniqSid('lru-db');
+    try {
+      for (let i = 0; i < 5; i++) {
+        toolArchive.writeArchive(sid, `toolu_lru${i}`, { tool_name: 'Read' }, BIG);
+      }
+      assert.equal(events.allToolArchiveKeys().length, 5);
+      toolArchive.enforceLruCap(sid, 2); // keep 2 newest, evict 3
+      assert.equal(toolArchive.readIndex(sid).length, 2, 'index trimmed to cap');
+      assert.equal(events.allToolArchiveKeys().length, 2, 'DB rows trimmed in lockstep');
+    } finally { cleanup(sid); }
+  });
+});
+
+test('sweepTtl removes expired archives from the events DB', () => {
+  withSandboxDb(() => {
+    const sid = uniqSid('ttl-db');
+    try {
+      toolArchive.writeArchive(sid, 'toolu_old', { tool_name: 'Read' }, BIG);
+      toolArchive.writeArchive(sid, 'toolu_new', { tool_name: 'Read' }, BIG);
+      // Backdate the old archive's index row past the TTL cutoff.
+      const idxFile = toolArchive.indexFile(sid);
+      const rows = fs.readFileSync(idxFile, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+      rows[0].t = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      fs.writeFileSync(idxFile, rows.map(JSON.stringify).join('\n') + '\n');
+
+      assert.equal(events.allToolArchiveKeys().length, 2);
+      const pruned = toolArchive.sweepTtl(sid, 7);
+      assert.equal(pruned, 1);
+      const keys = events.allToolArchiveKeys();
+      assert.equal(keys.length, 1, 'expired DB row removed');
+      assert.equal(keys[0].id, 'toolu_new');
+    } finally { cleanup(sid); }
+  });
+});
+
+test('deleteToolArchives is a no-op on empty input and never throws', () => {
+  withSandboxDb(() => {
+    assert.equal(events.deleteToolArchives([]), 0);
+    assert.equal(events.deleteToolArchives(null), 0);
+  });
+});

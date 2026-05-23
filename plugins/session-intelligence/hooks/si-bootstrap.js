@@ -902,6 +902,13 @@ function main() {
   // Sweep stale per-session temp files BEFORE acquiring the lock — failure
   // here is cosmetic and shouldn't gate the rest of bootstrap.
   try { sweepStaleTempFiles(); } catch { /* best effort */ }
+  // Reconcile the events-DB archive table with disk AFTER the sweep above has
+  // removed stale archive dirs/files — drops phantom rows so /si stats reports
+  // real (recallable) archive count + size + recall%, not lifetime totals.
+  try {
+    const pruned = require(path.join(SI_LIB, 'tool-archive')).reconcileDb();
+    if (pruned > 0) intelLog('bootstrap', 'info', 'archive DB reconciled', { pruned });
+  } catch { /* best effort */ }
   const locked = acquireStateLock();
   try {
     const state = loadState();
