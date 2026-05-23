@@ -322,6 +322,41 @@ function markArchiveRecalled(toolUseId) {
   } catch { return false; }
 }
 
+// Every (sid, tool_use_id) pair in the archive table. Used by the disk
+// reconciler to find rows whose on-disk file has been evicted/swept so the
+// DB stops reporting archives that can no longer be recalled.
+function allToolArchiveKeys() {
+  const db = openDb();
+  if (!db) return [];
+  try {
+    return db.prepare('SELECT sid, tool_use_id AS id FROM tool_archives').all();
+  } catch { return []; }
+}
+
+// Batch-delete archive rows by tool_use_id. Called when LRU/TTL eviction or a
+// reconcile removes the backing file — keeps the events DB a faithful mirror
+// of what's actually retrievable. Chunked to stay under SQLite's variable
+// limit. Returns the number of rows deleted.
+function deleteToolArchives(ids) {
+  const db = openDb();
+  if (!db || !Array.isArray(ids) || ids.length === 0) return 0;
+  let deleted = 0;
+  try {
+    const CHUNK = 400;
+    const stmt = (n) => db.prepare(
+      `DELETE FROM tool_archives WHERE tool_use_id IN (${Array(n).fill('?').join(',')})`,
+    );
+    const run = db.transaction((batch) => {
+      for (let i = 0; i < batch.length; i += CHUNK) {
+        const slice = batch.slice(i, i + CHUNK);
+        deleted += stmt(slice.length).run(...slice).changes;
+      }
+    });
+    run(ids);
+    return deleted;
+  } catch { return deleted; }
+}
+
 // ─── Readers ────────────────────────────────────────────────────────────────
 
 function aggregateStats({ sinceDays = 30, project = null } = {}) {
@@ -577,6 +612,8 @@ module.exports = {
   recordZoneTransition,
   recordToolArchive,
   markArchiveRecalled,
+  allToolArchiveKeys,
+  deleteToolArchives,
   recordAgentInvocation,
   aggregateStats,
   listRecentCompacts,

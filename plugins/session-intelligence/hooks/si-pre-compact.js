@@ -193,6 +193,43 @@ function buildTipBlock(sessionId) {
   ].join('\n');
 }
 
+// List this session's largest recallable tool-response archives so the model
+// reaches for `/si expand <id>` after compact instead of re-running the tool.
+// These bodies (big Read/Bash/Grep outputs) are about to be summarised out of
+// context, but the full text is on disk keyed by tool_use_id. Recall rate has
+// historically been ~0% mostly because the ids were never surfaced here.
+const ARCHIVE_RECALL_MAX = 6;
+function buildArchiveRecallBlock(sessionId) {
+  if (!sessionId) return '';
+  let toolArchive;
+  try { toolArchive = require(path.join(SI_LIB, 'tool-archive')); }
+  catch { return ''; }
+  let rows;
+  try { rows = toolArchive.listArchives(sessionId); }
+  catch { return ''; }
+  if (!rows || !rows.length) return '';
+  // Only archives whose file still exists are recallable; largest first, since
+  // the biggest bodies are the most expensive to re-fetch.
+  const recallable = rows
+    .filter((r) => r.exists && r.id)
+    .sort((a, b) => (b.chars || 0) - (a.chars || 0))
+    .slice(0, ARCHIVE_RECALL_MAX);
+  if (!recallable.length) return '';
+  const fmtKB = (n) => (Number.isFinite(n) && n > 0 ? `${(n / 1024).toFixed(0)}KB` : '—');
+  const lines = recallable.map((r) => {
+    const tool = r.tool || 'tool';
+    const preview = r.preview ? ` — ${String(r.preview).slice(0, 80)}` : '';
+    return `  - \`${r.id}\` (${tool}, ${fmtKB(r.chars)})${preview}`;
+  });
+  return [
+    '',
+    '## RECALLABLE ARCHIVES (post-compact)',
+    'These large tool outputs are about to leave context but their full bodies are on disk. After compact, run `/si expand <id>` to replay one verbatim instead of re-running the tool:',
+    ...lines,
+    '',
+  ].join('\n');
+}
+
 function buildPrioritiesReviewBlock(projectDir) {
   if (!projectDir) return '';
   const memoryDir = path.join(projectDir, 'memory');
@@ -522,6 +559,11 @@ async function main() {
   // design: a single line, skipped if the tips module isn't on disk.
   const tipBlock = buildTipBlock(sessionId);
 
+  // Recallable-archives list — names the tool_use_ids the model can `/si expand`
+  // after compact rather than re-running the tool. Empty when the session
+  // captured no surviving archives.
+  const archiveRecall = buildArchiveRecallBlock(sessionId);
+
   // Single top-level heading so the model knows this block came from the
   // plugin (vs. arbitrary user text). Plain H1 markdown — both terminal and
   // mobile render it cleanly, no wide bars that wrap on narrow screens.
@@ -534,7 +576,7 @@ async function main() {
   // envelope; validation will reject the whole block and drop ALL guidance.
   const emit = (chunk) => { if (chunk) process.stdout.write(chunk); };
 
-  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh || tipBlock) {
+  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh || tipBlock || archiveRecall) {
     emit(`\n# Session Intelligence \u2014 compaction guidance\n`);
   }
 
@@ -585,6 +627,11 @@ async function main() {
   if (tipBlock) {
     emit(tipBlock);
     intelLog('pre-compact', 'debug', 'tip block emitted', { bytes: tipBlock.length });
+  }
+  if (archiveRecall) {
+    emit(archiveRecall);
+    log('[PreCompact] Injected recallable-archives list');
+    intelLog('pre-compact', 'info', 'archive recall list emitted', { bytes: archiveRecall.length });
   }
 
   // stablePrefix drift check — when the opt-in cache-friendly mode is on,
@@ -769,6 +816,7 @@ module.exports = {
   formatCompactionHints,
   buildMemoryCleanupBlock,
   buildGitNexusRefreshBlock,
+  buildArchiveRecallBlock,
   STALENESS_MS,
 };
 
