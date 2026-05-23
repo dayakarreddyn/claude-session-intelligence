@@ -673,11 +673,19 @@ test('formatCompactInjection stablePrefix strips every per-compact volatile valu
   assert.match(out, /\[allowlisted\]/);
   assert.match(out, /tests\/fixtures/);
   assert.match(out, /commit/);
+  // Shift presence must still be advertised, but without the volatile names.
+  assert.match(out, /Domain shift detected/);
   // Volatile fragments must be gone.
   assert.ok(!/\bcalls\b/.test(out), 'no call-count tallies');
   assert.ok(!/stale tokens/.test(out), 'no stale-token estimate');
   assert.ok(!/Jaccard/.test(out), 'no Jaccard coefficient');
   assert.ok(!/~\d+k tokens/.test(out), 'no phase-marker token positions');
+  // Shift from/to names are window-end diffs and rotate per compact —
+  // makeAnalysis() sets from=['a'], to=['b']; neither must appear.
+  assert.ok(!/Domain shift:\s/.test(out), 'no from/to dir names');
+  // Hot/cold "e.g. <path>" samples are first-seen-in-window and rotate
+  // per compact — must not appear in the stable prefix.
+  assert.ok(!/e\.g\./.test(out), 'no sample file lists');
 });
 
 test('formatCompactInjection stablePrefix output is byte-identical across changing counts', () => {
@@ -696,6 +704,35 @@ test('formatCompactInjection stablePrefix output is byte-identical across changi
     staleTokens: 90000,
     events: [{ event: 'commit', tok: 999000 }],
     shift: null,
+  }), { stablePrefix: true });
+  assert.equal(a, b);
+});
+
+test('formatCompactInjection stablePrefix is byte-identical when shift names + samples rotate', () => {
+  // Real-world drift case observed in CSM pre-compact WARN logs: the
+  // rolling-window head/tail diff (shift.from / shift.to) and the
+  // first-seen sample paths rotate compact-to-compact even when the
+  // working set hasn't meaningfully changed. The stable prefix must
+  // suppress both so post-compact prompt cache stays warm.
+  const a = formatCompactInjection(makeAnalysis({
+    hot: [
+      { root: 'src/auth', count: 47, allowlisted: false, samples: ['src/auth/login.ts', 'src/auth/session.ts'] },
+      { root: 'src/api',  count: 12, allowlisted: true,  samples: ['src/api/users.ts'] },
+    ],
+    cold: [{ root: 'tests/fixtures', count: 30, samples: ['tests/fixtures/users.json'] }],
+    staleTokens: 35000,
+    events: [{ event: 'commit', tok: 123000 }],
+    shift: { from: ['scripts/deploy.d'], to: ['.cl'], jaccard: 0.25 },
+  }), { stablePrefix: true });
+  const b = formatCompactInjection(makeAnalysis({
+    hot: [
+      { root: 'src/auth', count: 9999, allowlisted: false, samples: ['src/auth/oauth.ts', 'src/auth/mfa.ts'] },
+      { root: 'src/api',  count: 1,    allowlisted: true,  samples: ['src/api/orders.ts'] },
+    ],
+    cold: [{ root: 'tests/fixtures', count: 1, samples: ['tests/fixtures/orders.json'] }],
+    staleTokens: 90000,
+    events: [{ event: 'commit', tok: 999000 }],
+    shift: { from: ['scripts/deploy.d'], to: ['/Users/0xd/.claude'], jaccard: 0.18 },
   }), { stablePrefix: true });
   assert.equal(a, b);
 });
