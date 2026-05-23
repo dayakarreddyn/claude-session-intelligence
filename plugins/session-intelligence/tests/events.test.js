@@ -132,6 +132,28 @@ test('aggregateStats with project filter scopes correctly', () => {
   } finally { cleanup(sb); }
 });
 
+test('perProject red% denominator is total crossings, not compacts', () => {
+  // Regression: renderProjects divided reds by compacts (different event
+  // types), so red% could exceed 100%. perProject must expose `crossings`
+  // (all zone transitions) so reds/crossings stays bounded at ≤100%.
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: now });
+    // Two reds but only one compact — the old reds/compacts math gave 200%.
+    events.recordCompact({ sid: 's1', project: 'p', t: now, tokens: 100000 });
+    events.recordZoneTransition({ sid: 's1', project: 'p', t: now, toZone: 'yellow' });
+    events.recordZoneTransition({ sid: 's1', project: 'p', t: now, toZone: 'red' });
+    events.recordZoneTransition({ sid: 's1', project: 'p', t: now, toZone: 'red' });
+    const stats = events.aggregateStats({ sinceDays: 30 });
+    const p = stats.perProject.find((r) => r.project === 'p');
+    assert.ok(p, 'project row present');
+    assert.equal(p.reds, 2, 'two red crossings');
+    assert.equal(p.crossings, 3, 'three total crossings');
+    assert.ok(p.reds <= p.crossings, 'reds never exceed total crossings → red% ≤ 100%');
+  } finally { cleanup(sb); }
+});
+
 test('recordSessionEnd updates totals without overwriting NULLs with NULLs', () => {
   const sb = mkSandboxDb();
   try {
@@ -150,5 +172,92 @@ test('writers are no-ops when sid is missing — never throw', () => {
     assert.equal(events.recordCompact({}), false);
     assert.equal(events.recordZoneTransition({ toZone: 'yellow' }), false);
     assert.equal(events.recordToolArchive({}), false);
+    assert.equal(events.recordAgentInvocation({}), false);
+  } finally { cleanup(sb); }
+});
+
+test('recordAgentInvocation tracks type, sizes, and error flag', () => {
+  const sb = mkSandboxDb();
+  try {
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: Date.now() });
+    assert.ok(events.recordAgentInvocation({
+      sid: 's1', toolUseId: 'toolu_ag_1',
+      subagentType: 'Explore', description: 'find auth code',
+      promptChars: 320, responseChars: 4800, t: Date.now(), isError: false,
+    }));
+    assert.ok(events.recordAgentInvocation({
+      sid: 's1', toolUseId: 'toolu_ag_2',
+      subagentType: 'Explore', description: 'find routes',
+      promptChars: 280, responseChars: 9200, t: Date.now(), isError: false,
+    }));
+    assert.ok(events.recordAgentInvocation({
+      sid: 's1', toolUseId: 'toolu_ag_3',
+      subagentType: 'code-reviewer', description: 'review diff',
+      promptChars: 150, responseChars: 0, t: Date.now(), isError: true,
+    }));
+    const stats = events.aggregateStats({ sinceDays: 30 });
+    assert.equal(stats.agents.n, 3);
+    assert.equal(stats.agents.errors, 1);
+    assert.equal(stats.agents.prompt_chars, 750);
+    assert.equal(stats.agents.response_chars, 14000);
+    const byType = Object.fromEntries(stats.agentTypes.map((t) => [t.type, t.n]));
+    assert.equal(byType.Explore, 2);
+    assert.equal(byType['code-reviewer'], 1);
+  } finally { cleanup(sb); }
+});
+
+test('recordAgentInvocation captures model, tokens, duration, cost', () => {
+  const sb = mkSandboxDb();
+  try {
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: Date.now() });
+    assert.ok(events.recordAgentInvocation({
+      sid: 's1', toolUseId: 'toolu_1',
+      subagentType: 'Explore', description: 'find x',
+      promptChars: 100, responseChars: 2000, durationMs: 12500,
+      t: Date.now(), isError: false,
+      model: 'claude-haiku-4-5-20251001',
+      inputTokens: 1500, outputTokens: 300,
+      cacheCreationTokens: 5000, cacheReadTokens: 80000,
+      costUsd: 0.0156,
+    }));
+    assert.ok(events.recordAgentInvocation({
+      sid: 's1', toolUseId: 'toolu_2',
+      subagentType: 'code-reviewer', description: 'review',
+      promptChars: 80, responseChars: 4500, durationMs: 45000,
+      t: Date.now(), isError: false,
+      model: 'claude-sonnet-4-6',
+      inputTokens: 2000, outputTokens: 600,
+      cacheCreationTokens: 0, cacheReadTokens: 200000,
+      costUsd: 0.075,
+    }));
+    const stats = events.aggregateStats({ sinceDays: 30 });
+    assert.equal(stats.agents.input_tokens, 3500);
+    assert.equal(stats.agents.output_tokens, 900);
+    assert.equal(stats.agents.cache_read_tokens, 280000);
+    assert.equal(stats.agents.total_ms, 57500);
+    assert.ok(Math.abs(stats.agents.cost_usd - 0.0906) < 1e-9,
+      `cost ${stats.agents.cost_usd}`);
+    // agentTypes ranks by cost desc → code-reviewer first
+    assert.equal(stats.agentTypes[0].type, 'code-reviewer');
+    assert.equal(stats.agentTypes[0].cost_usd, 0.075);
+  } finally { cleanup(sb); }
+});
+
+test('agent stats respect project filter via session join', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 'a', project: 'proj-a', startedAt: now });
+    events.recordSessionStart({ sid: 'b', project: 'proj-b', startedAt: now });
+    events.recordAgentInvocation({ sid: 'a', subagentType: 'Explore', t: now });
+    events.recordAgentInvocation({ sid: 'a', subagentType: 'Explore', t: now });
+    events.recordAgentInvocation({ sid: 'b', subagentType: 'code-reviewer', t: now });
+    const a = events.aggregateStats({ sinceDays: 7, project: 'proj-a' });
+    assert.equal(a.agents.n, 2);
+    assert.equal(a.agentTypes.length, 1);
+    assert.equal(a.agentTypes[0].type, 'Explore');
+    const b = events.aggregateStats({ sinceDays: 7, project: 'proj-b' });
+    assert.equal(b.agents.n, 1);
+    assert.equal(b.agentTypes[0].type, 'code-reviewer');
   } finally { cleanup(sb); }
 });

@@ -49,6 +49,7 @@ const SI_LIB = resolveSiLibDir();
 
 const {
   getTempDir,
+  getStateDir,
   writeFile,
   log,
   resolveProjectDir,
@@ -306,7 +307,8 @@ function combineSignals(signals) {
 // ─── Token budget ────────────────────────────────────────────────────────────
 
 function readTokenBudget(sessionId) {
-  const file = path.join(getTempDir(), `claude-token-budget-${sessionId}`);
+  // Matches si-token-budget.js writer: state dir, not tmp (see getStateDir).
+  const file = path.join(getStateDir(), `claude-token-budget-${sessionId}`);
   try {
     const n = parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
     return Number.isFinite(n) && n > 0 ? n : 0;

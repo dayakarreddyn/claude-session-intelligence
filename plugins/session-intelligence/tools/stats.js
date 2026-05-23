@@ -432,6 +432,51 @@ function renderArchives(a) {
   return lines.join('\n');
 }
 
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+
+function renderAgents(stats) {
+  const a = stats.agents || {};
+  const types = stats.agentTypes || [];
+  if (!a.n) return '';
+  const lines = [header('AGENT INVOCATIONS', 'Task tool / subagent runs'), ''];
+  const errPct = fmtPct(a.errors, a.n);
+  const totalTokens = (a.input_tokens || 0) + (a.output_tokens || 0)
+                    + (a.cache_creation_tokens || 0) + (a.cache_read_tokens || 0);
+  const summary = [
+    ['Invocations', String(a.n)],
+    ['Errors',      `${a.errors || 0} (${errPct})`],
+    ['Cost',        fmtUsd(a.cost_usd)],
+    ['Tokens',      `${fmtTokens(totalTokens)}  (in ${fmtTokens(a.input_tokens)} · out ${fmtTokens(a.output_tokens)} · cache_r ${fmtTokens(a.cache_read_tokens)})`],
+    ['Duration',    `${fmtDuration(a.total_ms)} total · avg ${fmtDuration(a.avg_ms)}`],
+    ['Prompt I/O',  `${fmtBytes(a.prompt_chars)} in / ${fmtBytes(a.response_chars)} out`],
+  ];
+  const w = Math.max(...summary.map((r) => r[0].length));
+  for (const [k, v] of summary) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
+  if (types.length) {
+    lines.push('');
+    const tableRows = types.map((r) => ({
+      agent:  String(r.type).slice(0, 28),
+      calls:  String(r.n),
+      cost:   fmtUsd(r.cost_usd),
+      'avg dur': fmtDuration(r.avg_ms),
+      tokens: fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0)),
+      'err%': fmtPct(r.errors, r.n),
+    }));
+    lines.push('  ' + table(tableRows, {
+      align: { calls: 'right', cost: 'right', 'avg dur': 'right', tokens: 'right', 'err%': 'right' },
+    }).replace(/\n/g, '\n  '));
+  }
+  return lines.join('\n');
+}
+
 function renderProjects(rows) {
   if (!rows || !rows.length) return '';
   const lines = [header('PROJECTS', 'top 10 by spend'), ''];
@@ -440,7 +485,10 @@ function renderProjects(rows) {
     sessions: String(p.sessions),
     cost:     fmtUsd(p.cost),
     compacts: String(p.compacts || 0),
-    'red%':   fmtPct(p.reds, p.compacts),
+    // red% = red-zone crossings as a share of ALL zone crossings for the
+    // project — same denominator as the global ZONE CALLOUTS section. Dividing
+    // by compacts (a different event type) let this exceed 100%.
+    'red%':   fmtPct(p.reds, p.crossings),
     archives: String(p.archives || 0),
     'recall%': fmtPct(p.archives_recalled, p.archives),
   }));
@@ -515,6 +563,7 @@ function main() {
     renderCompacts(stats),
     renderZones(stats),
     renderArchives(stats.archives),
+    renderAgents(stats),
     renderProjects(stats.perProject),
     renderRecentCompacts(stats.recentCompacts),
   ].filter(Boolean);

@@ -100,14 +100,15 @@ function resolveSessionId() {
     const sid = String(c).replace(/[^a-zA-Z0-9_-]/g, '');
     if (sid) return { id: sid, source: 'provided' };
   }
-  // Newest counter file in tmp.
+  // Newest counter file in the state dir (counters moved out of tmp — see
+  // lib/utils.getStateDir and si-token-budget.js).
   try {
-    const names = fs.readdirSync(TMP)
+    const names = fs.readdirSync(STATE_DIR)
       .filter((n) => n.startsWith('claude-tool-count-'))
-      .map((n) => ({ name: n, mtime: fs.statSync(path.join(TMP, n)).mtimeMs }))
+      .map((n) => ({ name: n, mtime: fs.statSync(path.join(STATE_DIR, n)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
     if (names.length) {
-      return { id: names[0].name.replace(/^claude-tool-count-/, ''), source: 'newest-tmp' };
+      return { id: names[0].name.replace(/^claude-tool-count-/, ''), source: 'newest-state' };
     }
   } catch { /* ignore */ }
   return { id: 'default', source: 'fallback' };
