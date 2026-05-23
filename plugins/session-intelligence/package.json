@@ -4,7 +4,9 @@
   "private": true,
   "description": "Session Intelligence plugin — context-shape tracking, strategic compaction, cost telemetry.",
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/",
+    "sync": "bash ../../install.sh --refresh-only",
+    "test:sync": "npm test && npm run sync"
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0"

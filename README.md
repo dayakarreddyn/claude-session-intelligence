@@ -113,6 +113,18 @@ The install script copies files from `plugins/session-intelligence/` into `~/.cl
 
 Restores backed-up hooks, removes `si:*` registrations from settings, deletes statusline scripts, leaves your `session-context.md` files and debug logs intact.
 
+### Development / dogfooding
+
+Editing the plugin in this repo doesn't change what Claude Code runs — `${CLAUDE_PLUGIN_ROOT}` resolves to a separate cache copy under `~/.claude/plugins/cache/...`. To push working-tree edits into the live runtime:
+
+```bash
+cd plugins/session-intelligence
+npm run sync          # rsync working tree → live cache + marketplace mirror
+npm run test:sync     # run tests, then sync only if they pass
+```
+
+`npm run sync` calls `install.sh --refresh-only`, which mirrors to both the cache that `CLAUDE_PLUGIN_ROOT` points at *and* the marketplace source (so a future `/plugin install` doesn't resurrect stale code). New hook files or `lib/` modules added since the last install land automatically — no need to edit `install.sh`.
+
 ## Usage
 
 ### 1. Add rules to your CLAUDE.md
