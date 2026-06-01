@@ -65,6 +65,10 @@ function main() {
 
   const toolName = payload.tool_name || payload.toolName || '';
   // Subagent-spawn tool is `Task` in some builds, `Agent` in others. Match both.
+  // NOTE: the `Workflow` tool fires NO PostToolUse hook (it returns a launch ack
+  // and runs agents in a background runtime), so workflow-spawned agents cannot
+  // be captured here — they're reconciled from transcripts at SessionStart via
+  // lib/workflow-usage.js + events.reconcileWorkflowAgents().
   if (toolName !== 'Task' && toolName !== 'Agent') { process.exit(0); return; }
 
   const sid = payload.session_id || payload.sessionId || process.env.CLAUDE_SESSION_ID;

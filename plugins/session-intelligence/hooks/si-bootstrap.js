@@ -908,6 +908,12 @@ function main() {
     const pruned = require(path.join(SI_LIB, 'tool-archive')).reconcileDb();
     if (pruned > 0) intelLog('bootstrap', 'info', 'archive DB reconciled', { pruned });
   } catch { /* best effort */ }
+  // Backfill workflow-spawned agents — the `Workflow` tool fires no PostToolUse
+  // hook, so si-agent-tracker can't see them; reconcile from transcripts here.
+  try {
+    const wfAgents = require(path.join(SI_LIB, 'events')).reconcileWorkflowAgents({ cwd });
+    if (wfAgents > 0) intelLog('bootstrap', 'info', 'workflow agents reconciled', { recorded: wfAgents });
+  } catch { /* best effort */ }
   const locked = acquireStateLock();
   try {
     const state = loadState();

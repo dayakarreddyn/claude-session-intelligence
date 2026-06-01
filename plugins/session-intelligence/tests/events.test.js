@@ -133,6 +133,48 @@ test('user_version migration backfills compacts/zone project from sessions via s
   } finally { cleanup(sb); }
 });
 
+test('reconcileWorkflowAgents backfills workflow agents + dedups + attributes by sid', () => {
+  const sb = mkSandboxDb();
+  const agentUsage = require('../lib/agent-usage');
+  const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'si-wf-recon-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    // The launching session must exist so the sid-join attributes the agent
+    // row to project=CSM.
+    events.recordSessionStart({ sid: 'sid-1', project: 'CSM', cwd, startedAt: Date.now() });
+
+    const wfAgent = path.join(projRoot, enc, 'sid-1', 'subagents', 'workflows', 'wf_aaa', 'agent-111.jsonl');
+    fs.mkdirSync(path.dirname(wfAgent), { recursive: true });
+    fs.writeFileSync(wfAgent, JSON.stringify({
+      type: 'assistant',
+      agentId: 'agent-111',
+      timestamp: '2026-06-01T10:00:00.000Z',
+      message: {
+        id: 'm1', model: 'claude-opus-4-8',
+        usage: { input_tokens: 13890, cache_creation_input_tokens: 19028, cache_read_input_tokens: 0, output_tokens: 1 },
+      },
+    }) + '\n');
+
+    // First reconcile inserts the row.
+    assert.equal(events.reconcileWorkflowAgents({ cwd, projectsRoot: projRoot }), 1);
+    // Second reconcile is idempotent — agentId already recorded.
+    assert.equal(events.reconcileWorkflowAgents({ cwd, projectsRoot: projRoot }), 0);
+
+    // It lands in the agent stats, attributed to project=CSM, typed 'workflow'.
+    const stats = events.aggregateStats({ sinceDays: 3650, project: 'CSM' });
+    assert.equal(stats.agents.n, 1, 'workflow agent counted under project=CSM');
+    assert.equal(stats.agents.input_tokens, 13890);
+    const wf = stats.agentTypes.find((a) => a.type === 'workflow');
+    assert.ok(wf && wf.n === 1, 'subagent_type recorded as workflow');
+    assert.ok(stats.agents.cost_usd > 0, 'cost computed from opus pricing');
+  } finally {
+    events._resetForTest();
+    try { fs.rmSync(projRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    cleanup(sb);
+  }
+});
+
 test('recordToolArchive + markArchiveRecalled track recall counts', () => {
   const sb = mkSandboxDb();
   try {

@@ -340,6 +340,60 @@ function recordAgentInvocation({
   } catch { return false; }
 }
 
+/**
+ * Backfill agent_invocations from workflow-agent transcripts on disk.
+ *
+ * The `Workflow` tool fires no PostToolUse hook, so si-agent-tracker never
+ * sees workflow-spawned agents. We reconcile them at SessionStart instead:
+ * walk every workflow transcript for the project, and insert a row for each
+ * agentId not already recorded (dedup keyed on tool_use_id = agentId, so this
+ * is safe to re-run every session). Rows are attributed to the launching
+ * (parent) session's sid, which already carries the right project for the
+ * sid-join used by aggregateStats. Returns the number of new rows inserted.
+ */
+function reconcileWorkflowAgents({ cwd, projectsRoot } = {}) {
+  const db = openDb();
+  if (!db || !cwd) return 0;
+  let agentUsage;
+  try { agentUsage = require('./agent-usage'); } catch { return 0; }
+
+  let transcripts;
+  try { transcripts = agentUsage.listWorkflowAgentTranscripts({ cwd, projectsRoot }); }
+  catch { return 0; }
+  if (!transcripts || !transcripts.length) return 0;
+
+  let inserted = 0;
+  try {
+    const exists = db.prepare('SELECT 1 FROM agent_invocations WHERE tool_use_id = ? LIMIT 1');
+    for (const tr of transcripts) {
+      let parsed;
+      try { parsed = agentUsage.readSubagentTranscript(tr.path); } catch { continue; }
+      if (!parsed || !parsed.agentId) continue;
+      if (exists.get(parsed.agentId)) continue; // already recorded — idempotent
+      const u = parsed.usage || {};
+      const ok = recordAgentInvocation({
+        sid: tr.sid,
+        toolUseId: parsed.agentId,
+        subagentType: 'workflow',
+        description: tr.wfRunId || null,
+        promptChars: null,
+        responseChars: null,
+        durationMs: parsed.durationMs,
+        t: parsed.lastTs || Date.now(),
+        isError: 0,
+        model: parsed.model,
+        inputTokens: u.input_tokens,
+        outputTokens: u.output_tokens,
+        cacheCreationTokens: u.cache_creation_input_tokens,
+        cacheReadTokens: u.cache_read_input_tokens,
+        costUsd: parsed.costUsd,
+      });
+      if (ok) inserted += 1;
+    }
+  } catch { /* best-effort — partial backfill is fine, next session retries */ }
+  return inserted;
+}
+
 function markArchiveRecalled(toolUseId) {
   const db = openDb();
   if (!db || !toolUseId) return false;
@@ -642,6 +696,7 @@ module.exports = {
   allToolArchiveKeys,
   deleteToolArchives,
   recordAgentInvocation,
+  reconcileWorkflowAgents,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,
