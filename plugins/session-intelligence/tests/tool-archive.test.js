@@ -250,3 +250,35 @@ test('deleteToolArchives is a no-op on empty input and never throws', () => {
     assert.equal(events.deleteToolArchives(null), 0);
   });
 });
+
+// ─── expand CLI arg parsing — recall-path reliability ─────────────────────
+//
+// A mis-parsed --sid resolves the wrong session, the archive lookup misses,
+// and markArchiveRecalled is never reached — silently zeroing recall stats.
+
+const { parseArgs } = require('../tools/expand');
+
+test('parseArgs accepts --sid=<v> (equals form)', () => {
+  const a = parseArgs(['toolu_x', '--sid=abc123']);
+  assert.equal(a.flags.sid, 'abc123');
+  assert.deepEqual(a.positional, ['toolu_x']);
+});
+
+test('parseArgs accepts --sid <v> (space form)', () => {
+  const a = parseArgs(['toolu_x', '--sid', 'abc123']);
+  assert.equal(a.flags.sid, 'abc123', 'space-form value is consumed, not left positional');
+  assert.deepEqual(a.positional, ['toolu_x'], 'sid value must NOT leak into positionals');
+});
+
+test('parseArgs does not let --sid swallow a following flag', () => {
+  const a = parseArgs(['--sid', '--list']);
+  assert.equal(a.flags.sid, true, 'bare --sid before another flag stays boolean');
+  assert.equal(a.flags.list, true);
+});
+
+test('parseArgs keeps boolean flags boolean (--list, --prune)', () => {
+  const a = parseArgs(['--list', '--prune']);
+  assert.equal(a.flags.list, true);
+  assert.equal(a.flags.prune, true);
+  assert.deepEqual(a.positional, []);
+});

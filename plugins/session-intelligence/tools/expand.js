@@ -42,13 +42,30 @@ function archiveRoots() {
   return [...roots];
 }
 
+// Flags that take a value, so both `--sid=<v>` and `--sid <v>` work. Without
+// this, a space-form `--sid <v>` parsed `--sid` as boolean `true` and pushed
+// the sid into positionals — resolveSid then silently used the wrong session,
+// the archive lookup missed, and the recall counter was never incremented.
+const VALUE_FLAGS = new Set(['sid']);
+
 function parseArgs(argv) {
   const args = { positional: [], flags: {} };
-  for (const a of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq > -1) args.flags[a.slice(2, eq)] = a.slice(eq + 1);
-      else args.flags[a.slice(2)] = true;
+      if (eq > -1) {
+        args.flags[a.slice(2, eq)] = a.slice(eq + 1);
+      } else {
+        const name = a.slice(2);
+        // Consume the next token as the value for known value-flags, but only
+        // when it isn't itself a flag (so `--sid --list` doesn't eat --list).
+        if (VALUE_FLAGS.has(name) && i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+          args.flags[name] = argv[++i];
+        } else {
+          args.flags[name] = true;
+        }
+      }
     } else {
       args.positional.push(a);
     }
@@ -187,4 +204,7 @@ function main() {
   cmdExpand(sid, id);
 }
 
-main();
+// Run as a CLI; stay importable (without side effects) for unit tests.
+if (require.main === module) main();
+
+module.exports = { parseArgs, resolveSid };

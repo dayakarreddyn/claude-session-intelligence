@@ -864,6 +864,7 @@ After `/compact` wipes the body from context, replay it with:
 ```
 /si expand <tool_use_id>                  # slash command — dispatches to the CLI
 node tools/expand.js <tool_use_id>        # direct invocation (uses the latest session by default)
+node tools/expand.js <tool_use_id> --sid=<sid>   # pin a session (--sid <sid> space form also works)
 node tools/expand.js --list               # index rows, oldest first, with previews
 node tools/expand.js --prune              # manual TTL sweep
 ```

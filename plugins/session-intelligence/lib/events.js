@@ -178,6 +178,33 @@ function initSchema(db) {
   for (const sql of addCols) {
     try { db.exec(sql); } catch { /* column already exists — expected */ }
   }
+
+  // One-time project-key normalization (user_version 0 → 1).
+  // Writers historically disagreed on the `project` value: sessions stored
+  // the repo-root basename (CSM), compacts stored the encoded projects-dir
+  // slug (-Users-0xd-DWS-CSM), and zone_transitions stored the cwd leaf
+  // (mm/e2e/providers). That broke `/si stats --project=<name>` and any raw
+  // per-project query. Backfill compacts + zone_transitions from the
+  // authoritative sessions.project via sid so existing rows become usable.
+  // Rows whose sid has no session (e.g. subagent `agent-*` ids) are left as-is.
+  try {
+    const ver = db.pragma('user_version', { simple: true });
+    if (!ver || ver < 1) {
+      db.exec(`
+        UPDATE compacts SET project = (
+          SELECT s.project FROM sessions s WHERE s.sid = compacts.sid
+        ) WHERE EXISTS (
+          SELECT 1 FROM sessions s WHERE s.sid = compacts.sid AND s.project IS NOT NULL
+        );
+        UPDATE zone_transitions SET project = (
+          SELECT s.project FROM sessions s WHERE s.sid = zone_transitions.sid
+        ) WHERE EXISTS (
+          SELECT 1 FROM sessions s WHERE s.sid = zone_transitions.sid AND s.project IS NOT NULL
+        );
+      `);
+      db.pragma('user_version = 1');
+    }
+  } catch { /* backfill is best-effort — the sid-join read path still works */ }
 }
 
 // ─── Writers ────────────────────────────────────────────────────────────────

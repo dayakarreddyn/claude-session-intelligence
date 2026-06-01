@@ -886,11 +886,10 @@ function main() {
     // authoritative for in-session use; this row powers cross-session /si stats.
     try {
       const events = require(path.join(SI_LIB, 'events'));
-      const { projectRootOf } = require(path.join(SI_LIB, 'context-shape'));
-      const projectRoot = projectRootOf(cwd) || cwd;
+      const { projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
       events.recordSessionStart({
         sid: sessionId,
-        project: path.basename(projectRoot),
+        project: projectKeyOf(cwd),
         cwd,
         startedAt: Date.now(),
       });

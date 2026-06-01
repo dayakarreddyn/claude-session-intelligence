@@ -23,7 +23,7 @@ const {
   analyzeShape, rootDirOf,
   rollupShape, readRollup, rollupFilePath,
   shapeFilePath, appendShape,
-  projectRootOf, _resetProjectRootCache,
+  projectRootOf, projectKeyOf, _resetProjectRootCache,
   sessionStatePath, readSessionState, writeSessionState, resolveSessionCwd,
   formatCompactInjection,
 } = require('../lib/context-shape');
@@ -430,6 +430,37 @@ test('projectRootOf returns null for relative paths', () => {
   assert.equal(projectRootOf('relative/path.ts'), null);
   assert.equal(projectRootOf(''), null);
   assert.equal(projectRootOf(null), null);
+});
+
+// ─── projectKeyOf — canonical events-DB project key ───────────────────────
+//
+// Every telemetry writer must produce the same key for a given repo so the
+// sessions / compacts / zone_transitions tables join and filter together.
+
+test('projectKeyOf maps repo root and its subdirs to the same basename', () => {
+  _resetProjectRootCache();
+  const base = mkTempDir('ctx-shape-pk1');
+  try {
+    const repo = path.join(base, 'CSM');
+    fs.mkdirSync(path.join(repo, 'products', 'mm'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.git'), 'gitdir: ignored\n');
+    // Root, a nested subdir, and a leaf all collapse to the repo basename.
+    assert.equal(projectKeyOf(repo), 'CSM');
+    assert.equal(projectKeyOf(path.join(repo, 'products')), 'CSM');
+    assert.equal(projectKeyOf(path.join(repo, 'products', 'mm')), 'CSM');
+  } finally { rmRf(base); }
+});
+
+test('projectKeyOf falls back to cwd basename when no repo root exists', () => {
+  _resetProjectRootCache();
+  // No marker anywhere up the tree → basename of the cwd itself.
+  assert.equal(projectKeyOf('/definitely/not/a/repo/leafdir'), 'leafdir');
+});
+
+test('projectKeyOf returns null for empty / non-string input', () => {
+  assert.equal(projectKeyOf(''), null);
+  assert.equal(projectKeyOf(null), null);
+  assert.equal(projectKeyOf(undefined), null);
 });
 
 // ─── session-state round-trip ─────────────────────────────────────────────
