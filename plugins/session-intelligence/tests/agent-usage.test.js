@@ -168,3 +168,46 @@ test('findUsageForTask prefers exact parentToolUseId match over mtime', () => {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
+
+test('listWorkflowAgentTranscripts finds agent files under subagents/workflows', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'si-wf-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    // Two sessions, each with a workflow run; plus a normal (non-workflow)
+    // subagent that must NOT be picked up by the workflow lister.
+    const base = path.join(root, enc);
+    writeTranscript(
+      path.join(base, 'sid-1', 'subagents', 'workflows', 'wf_aaa', 'agent-111.jsonl'),
+      [assistantRow({ ts: '2026-06-01T10:00:00.000Z', model: 'claude-opus-4-8', msgId: 'm1', usage: { input_tokens: 100, output_tokens: 2 } })],
+    );
+    writeTranscript(
+      path.join(base, 'sid-2', 'subagents', 'workflows', 'wf_bbb', 'agent-222.jsonl'),
+      [assistantRow({ ts: '2026-06-01T11:00:00.000Z', model: 'claude-opus-4-8', msgId: 'm2', usage: { input_tokens: 200, output_tokens: 3 } })],
+    );
+    writeTranscript(
+      path.join(base, 'sid-1', 'subagents', 'agent-999.jsonl'),
+      [assistantRow({ ts: '2026-06-01T10:30:00.000Z', model: 'claude-opus-4-8', msgId: 'm3', usage: { input_tokens: 50, output_tokens: 1 } })],
+    );
+
+    const list = agentUsage.listWorkflowAgentTranscripts({ cwd, projectsRoot: root });
+    const files = list.map((r) => path.basename(r.path)).sort();
+    assert.deepEqual(files, ['agent-111.jsonl', 'agent-222.jsonl'], 'only workflow agents, not the plain subagent');
+    const byFile = Object.fromEntries(list.map((r) => [path.basename(r.path), r]));
+    assert.equal(byFile['agent-111.jsonl'].sid, 'sid-1');
+    assert.equal(byFile['agent-111.jsonl'].wfRunId, 'wf_aaa');
+    assert.equal(byFile['agent-222.jsonl'].sid, 'sid-2');
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+test('listWorkflowAgentTranscripts returns [] when no workflow dirs exist', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'si-wf-empty-'));
+  try {
+    assert.deepEqual(agentUsage.listWorkflowAgentTranscripts({ cwd: '/Users/x/DWS/CSM', projectsRoot: root }), []);
+    assert.deepEqual(agentUsage.listWorkflowAgentTranscripts({ cwd: null, projectsRoot: root }), []);
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});

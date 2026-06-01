@@ -57,7 +57,7 @@ const {
   resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
-const { readShape, analyzeShape, draftMessage, readSessionState } = require(path.join(SI_LIB, 'context-shape'));
+const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 let costEst = null;
@@ -437,7 +437,9 @@ async function main() {
         const cwdForEvent = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
         events.recordZoneTransition({
           sid: sessionId,
-          project: cwdForEvent ? path.basename(cwdForEvent) : null,
+          // Canonical repo-root basename — NOT basename(cwd), which fragments a
+          // monorepo into its leaf subdirs (mm, e2e, providers, …).
+          project: projectKeyOf(cwdForEvent),
           fromZone: lastZone,
           toZone: zone,
           tokens: tokenBudget,

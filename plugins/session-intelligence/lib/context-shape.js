@@ -247,6 +247,27 @@ function projectRootOf(filePath) {
 function _resetProjectRootCache() { _projectRootCache.clear(); }
 
 /**
+ * Canonical project key for the events DB. Every telemetry writer
+ * (session start, compact, zone transition) MUST agree on this so the
+ * three tables join and filter on the same value.
+ *
+ * It is the basename of the repo root containing `cwd` — e.g. both
+ * `/Users/x/DWS/CSM` and `/Users/x/DWS/CSM/products/mm` map to `CSM`.
+ * Falls back to the basename of `cwd` when no repo root is found.
+ *
+ * History: writers previously disagreed — session-start used this key,
+ * pre-compact used `basename(~/.claude/projects/<encoded-slug>)` (the
+ * encoded path), and suggest-compact used `basename(cwd)` (the leaf
+ * subdir). That fragmented CSM into `-Users-0xd-DWS-CSM`, `mm`, `e2e`,
+ * etc. and broke `/si stats --project=<name>`.
+ */
+function projectKeyOf(cwd) {
+  if (!cwd || typeof cwd !== 'string') return null;
+  const root = projectRootOf(cwd) || cwd;
+  return path.basename(root) || null;
+}
+
+/**
  * Read the session-state file. Returns an empty object on missing / malformed.
  * Shape: { cwd, sessionId, projectRoot, startedAt, lastPayloadCwd }
  */
@@ -883,6 +904,7 @@ module.exports = {
   readRollup,     // exported for tests
   compileGlob,    // exported for tests
   projectRootOf,
+  projectKeyOf,
   sessionStatePath,
   readSessionState,
   writeSessionState,

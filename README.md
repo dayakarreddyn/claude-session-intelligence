@@ -864,6 +864,7 @@ After `/compact` wipes the body from context, replay it with:
 ```
 /si expand <tool_use_id>                  # slash command — dispatches to the CLI
 node tools/expand.js <tool_use_id>        # direct invocation (uses the latest session by default)
+node tools/expand.js <tool_use_id> --sid=<sid>   # pin a session (--sid <sid> space form also works)
 node tools/expand.js --list               # index rows, oldest first, with previews
 node tools/expand.js --prune              # manual TTL sweep
 ```
@@ -935,7 +936,8 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `si-bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules |
+| `si-bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules, reconciles the archive + workflow-agent telemetry tables |
+| `si-agent-tracker.js` | PostToolUse | Records each `Task`/`Agent` subagent run (type, tokens, cost, duration) from its transcript. The `Workflow` tool fires no hook, so workflow-spawned agents are backfilled from transcripts at SessionStart instead |
 | `si-pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
 | `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
 | `si-tool-archive.js` | PostToolUse | Archives tool responses above `toolArchive.thresholdChars` so `/si expand <tool_use_id>` can replay them after `/compact` |

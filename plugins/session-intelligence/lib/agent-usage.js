@@ -142,6 +142,48 @@ function readSubagentTranscript(filePath) {
 }
 
 /**
+ * List every workflow-spawned subagent transcript for a project.
+ *
+ * The `Workflow` tool fires NO PostToolUse hook (it returns a launch ack and
+ * runs agents in a background runtime), so these can't be captured live like
+ * Task/Agent calls. Instead each workflow agent leaves a transcript at:
+ *   ~/.claude/projects/<encoded-cwd>/<parent-sid>/subagents/workflows/<wf-run>/agent-<id>.jsonl
+ *
+ * We walk every <parent-sid> under the project's encoded dir so a SessionStart
+ * reconcile picks up workflows launched in earlier sessions too. Returns
+ * `[{ path, sid, wfRunId }]`. v1 limitation: a workflow launched from a
+ * subdirectory of the project encodes under that subdir's dir and won't be
+ * found from the root cwd — same cwd-encoding assumption as findUsageForTask.
+ */
+function listWorkflowAgentTranscripts({ cwd, projectsRoot: projectsRootOverride } = {}) {
+  const enc = encodeProjectPath(cwd);
+  if (!enc) return [];
+  const projDir = path.join(projectsRoot(projectsRootOverride), enc);
+  let sidEntries;
+  try { sidEntries = fs.readdirSync(projDir, { withFileTypes: true }); } catch { return []; }
+
+  const out = [];
+  for (const sidEnt of sidEntries) {
+    if (!sidEnt.isDirectory()) continue;
+    const wfRoot = path.join(projDir, sidEnt.name, 'subagents', 'workflows');
+    let wfDirs;
+    try { wfDirs = fs.readdirSync(wfRoot, { withFileTypes: true }); } catch { continue; }
+    for (const wf of wfDirs) {
+      if (!wf.isDirectory()) continue;
+      const wfDir = path.join(wfRoot, wf.name);
+      let files;
+      try { files = fs.readdirSync(wfDir); } catch { continue; }
+      for (const f of files) {
+        if (f.startsWith('agent-') && f.endsWith('.jsonl')) {
+          out.push({ path: path.join(wfDir, f), sid: sidEnt.name, wfRunId: wf.name });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Find the subagent transcript most likely to belong to the Task call we
  * just observed. `windowMs` is how far back to look; the default is wide
  * enough to cover slow subagents but tight enough that an unrelated older
@@ -176,4 +218,5 @@ module.exports = {
   listCandidates,
   readSubagentTranscript,
   findUsageForTask,
+  listWorkflowAgentTranscripts,
 };

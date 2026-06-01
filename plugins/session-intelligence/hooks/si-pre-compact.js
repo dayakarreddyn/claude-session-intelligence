@@ -733,9 +733,12 @@ async function main() {
       // recordCompact and the JSONL above is authoritative.
       try {
         const events = require(path.join(SI_LIB, 'events'));
+        // Canonical project key (repo-root basename) so this row joins/filters
+        // with sessions + zone_transitions. NOT basename(projectDir) — that's
+        // the encoded ~/.claude/projects slug (e.g. -Users-0xd-DWS-CSM).
         events.recordCompact({
           sid: sessionId,
-          project: projectDir ? path.basename(projectDir) : null,
+          project: ctxShape ? ctxShape.projectKeyOf(cwd) : null,
           cwd,
           t: historyEntry.t,
           tokens,

@@ -117,7 +117,7 @@ ${CLAUDE_PLUGIN_ROOT}/tools/expand.js
 ~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/tools/expand.js
 ```
 
-Invoke as `node <path> <tool_use_id> --sid=<sid>` using the current session id. Relay stdout verbatim. If the body is huge, warn the user it will inflate context before printing. No diff, no config write.
+Invoke as `node <path> <tool_use_id> --sid=<sid>` using the current session id (the `--sid <sid>` space form also works). Relay stdout verbatim. If the body is huge, warn the user it will inflate context before printing. No diff, no config write.
 
 **`archive-list`** — Print the tool-archive index for this session. Invoke the same CLI with `--list --sid=<sid>` and relay stdout. Rows are sorted oldest-first; `(missing)` marks files the LRU cap evicted.
 
@@ -128,7 +128,7 @@ ${CLAUDE_PLUGIN_ROOT}/tools/stats.js
 ~/.claude/plugins/cache/session-intelligence/session-intelligence/1.0.0/tools/stats.js
 ```
 
-Invoke as `node <path>` plus any flags the user passed (`--days=N` or alias `--since=N` for window, `--project=X` to filter, `--recent` for the simple last-20-compacts table, `--json` for machine output). Relay stdout verbatim. If stderr says "events DB unavailable", point the user at the better-sqlite3 install (`npm install --prefix ${CLAUDE_PLUGIN_ROOT}`). Honors `usageBudget.daily` / `usageBudget.weekly` from the unified config — values may be `0` (disabled), a positive USD number (cap with %-of-budget colors), or `"unlimited"` (track without alerting; renders `spend / unlimited (∞)`). No diff, no config write.
+Invoke as `node <path>` plus any flags the user passed (`--days=N` or alias `--since=N` for window, `--project=X` to filter, `--recent` for the simple last-20-compacts table, `--json` for machine output). `--project=X` matches the **repo-root basename** (e.g. `CSM`, not the encoded `-Users-…-CSM` slug or a subdir like `mm`) — all writer tables key on the same canonical value. Relay stdout verbatim. If stderr says "events DB unavailable", point the user at the better-sqlite3 install (`npm install --prefix ${CLAUDE_PLUGIN_ROOT}`). Honors `usageBudget.daily` / `usageBudget.weekly` from the unified config — values may be `0` (disabled), a positive USD number (cap with %-of-budget colors), or `"unlimited"` (track without alerting; renders `spend / unlimited (∞)`). No diff, no config write.
 
 ### `config` — show-all form
 

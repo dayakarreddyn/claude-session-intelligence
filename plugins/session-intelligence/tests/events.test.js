@@ -90,6 +90,91 @@ test('recordZoneTransition stores from/to/tokens/reason', () => {
   } finally { cleanup(sb); }
 });
 
+test('user_version migration backfills compacts/zone project from sessions via sid', () => {
+  const sb = mkSandboxDb();
+  try {
+    const Sqlite = require('better-sqlite3');
+    // First open creates the schema + sets user_version=1 (no rows to backfill).
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+
+    // Hand-seed rows the way the OLD, disagreeing writers would have: the
+    // session has the canonical basename, but compacts/zone have the encoded
+    // slug and the cwd leaf respectively. Then force the migration to re-run.
+    const raw = new Sqlite(sb.dbPath);
+    const now = Date.now();
+    raw.prepare('INSERT INTO sessions (sid, project, cwd, started_at) VALUES (?,?,?,?)')
+      .run('s1', 'CSM', '/Users/x/DWS/CSM', now);
+    raw.prepare('INSERT INTO compacts (sid, project, t, tokens) VALUES (?,?,?,?)')
+      .run('s1', '-Users-x-DWS-CSM', now, 100000);
+    raw.prepare('INSERT INTO zone_transitions (sid, project, t, to_zone) VALUES (?,?,?,?)')
+      .run('s1', 'mm', now, 'red');
+    // A row from a subagent sid with no session — must be left untouched.
+    raw.prepare('INSERT INTO zone_transitions (sid, project, t, to_zone) VALUES (?,?,?,?)')
+      .run('agent-xyz', 'orphan', now, 'orange');
+    raw.pragma('user_version = 0');
+    raw.close();
+
+    // Re-open through the events module → initSchema runs the backfill.
+    events._setDbPathForTest(sb.dbPath);
+    assert.equal(events.isAvailable(), true);
+
+    // The single-project filter (the path that was broken) now matches.
+    const stats = events.aggregateStats({ sinceDays: 365, project: 'CSM' });
+    assert.equal(stats.compacts.n, 1, 'compact row now filters under project=CSM');
+    const red = stats.zones.find((z) => z.zone === 'red');
+    assert.ok(red && red.n === 1, 'zone transition now filters under project=CSM');
+
+    // Orphan (no session) row keeps its original key.
+    const verify = new Sqlite(sb.dbPath);
+    const orphan = verify.prepare("SELECT project FROM zone_transitions WHERE sid='agent-xyz'").get();
+    verify.close();
+    assert.equal(orphan.project, 'orphan', 'sid without a session is left untouched');
+  } finally { cleanup(sb); }
+});
+
+test('reconcileWorkflowAgents backfills workflow agents + dedups + attributes by sid', () => {
+  const sb = mkSandboxDb();
+  const agentUsage = require('../lib/agent-usage');
+  const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'si-wf-recon-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    // The launching session must exist so the sid-join attributes the agent
+    // row to project=CSM.
+    events.recordSessionStart({ sid: 'sid-1', project: 'CSM', cwd, startedAt: Date.now() });
+
+    const wfAgent = path.join(projRoot, enc, 'sid-1', 'subagents', 'workflows', 'wf_aaa', 'agent-111.jsonl');
+    fs.mkdirSync(path.dirname(wfAgent), { recursive: true });
+    fs.writeFileSync(wfAgent, JSON.stringify({
+      type: 'assistant',
+      agentId: 'agent-111',
+      timestamp: '2026-06-01T10:00:00.000Z',
+      message: {
+        id: 'm1', model: 'claude-opus-4-8',
+        usage: { input_tokens: 13890, cache_creation_input_tokens: 19028, cache_read_input_tokens: 0, output_tokens: 1 },
+      },
+    }) + '\n');
+
+    // First reconcile inserts the row.
+    assert.equal(events.reconcileWorkflowAgents({ cwd, projectsRoot: projRoot }), 1);
+    // Second reconcile is idempotent — agentId already recorded.
+    assert.equal(events.reconcileWorkflowAgents({ cwd, projectsRoot: projRoot }), 0);
+
+    // It lands in the agent stats, attributed to project=CSM, typed 'workflow'.
+    const stats = events.aggregateStats({ sinceDays: 3650, project: 'CSM' });
+    assert.equal(stats.agents.n, 1, 'workflow agent counted under project=CSM');
+    assert.equal(stats.agents.input_tokens, 13890);
+    const wf = stats.agentTypes.find((a) => a.type === 'workflow');
+    assert.ok(wf && wf.n === 1, 'subagent_type recorded as workflow');
+    assert.ok(stats.agents.cost_usd > 0, 'cost computed from opus pricing');
+  } finally {
+    events._resetForTest();
+    try { fs.rmSync(projRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    cleanup(sb);
+  }
+});
+
 test('recordToolArchive + markArchiveRecalled track recall counts', () => {
   const sb = mkSandboxDb();
   try {
