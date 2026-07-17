@@ -712,6 +712,17 @@ function fmtUsd(n) {
   return `$${n.toFixed(2)}`;
 }
 
+// Denser USD for the per-model split, where a long session stacks several
+// figures on one line: roll to `k` past $1000 so `$1727` reads `$1.7k`,
+// `$12480` reads `$12k`. Small values keep cents.
+function fmtUsdShort(n) {
+  if (!Number.isFinite(n) || n <= 0) return '$0';
+  if (n >= 10000) return `$${Math.round(n / 1000)}k`;
+  if (n >= 1000)  return `$${(n / 1000).toFixed(1)}k`;
+  if (n >= 10)    return `$${Math.round(n)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 // Single-letter duration formatter for tight cells (compactAge, session).
 // `3hr 23m` -> `3h23m`, `11hr` -> `11h`, `45m` -> `45m`. Spans over 1d
 // keep the day component and skip minutes — the precision isn't useful at
@@ -1519,7 +1530,7 @@ function buildRenderers(C) {
       return `${C.dim}tps:${v}${C.reset}`;
     },
 
-    modelSplit: (input, ctx) => {
+    modelSplit: (_input, ctx) => {
       // Parent-conversation turns from the transcript accumulator...
       const byModel = (ctx.tokenTotals && ctx.tokenTotals.byModel) || {};
       const merged = { ...byModel };
@@ -1534,45 +1545,28 @@ function buildRenderers(C) {
       if (!entries.length || total <= 0) return '';
       entries.sort((a, b) => b[1] - a[1]);
 
-      const events = loadEventsLib();
-      // Persist this session's per-model split so weeklyModelSpend can see
-      // parent-session spend across sessions (agents are already in the DB).
+      // Persist this session's per-model split for cross-session analytics
+      // (/si stats) — the only surviving record of parent-session splits
+      // once a transcript ages out.
       try {
+        const events = loadEventsLib();
         if (events && typeof events.upsertSessionModelCosts === 'function' && ctx.sessionId) {
           events.upsertSessionModelCosts(ctx.sessionId, byModel);
         }
       } catch { /* telemetry is best-effort */ }
 
-      // Per-model weekly-remaining ESTIMATE (`wr:~61%`): Anthropic exposes
-      // no per-model weekly quota (seven_day_<model> buckets are null on
-      // plans without per-model limits — verified 2026-07-17), so attribute
-      // the account weekly used% across models by their share of this
-      // week's tracked spend: wr(model) = 100 − weeklyUsed × spendShare.
-      // `~` marks it as SI's estimate, not an Anthropic number.
-      let weeklyUsed = null;
-      const sd = input && input.rate_limits && input.rate_limits.seven_day;
-      if (sd && typeof sd.used_percentage === 'number') weeklyUsed = sd.used_percentage;
-      let weekSpend = null;
-      if (weeklyUsed !== null && events && typeof events.weeklyModelSpend === 'function') {
-        try { weekSpend = events.weeklyModelSpend(); } catch { weekSpend = null; }
-      }
-      const weekTotal = weekSpend ? weekSpend.reduce((sum, r) => sum + (r.cost_usd || 0), 0) : 0;
-      const weekByModel = weekSpend
-        ? Object.fromEntries(weekSpend.map((r) => [r.model, r.cost_usd || 0]))
-        : {};
-
-      const parts = entries.slice(0, 4).map(([m, c]) => {
+      // Self-labelling `$·%`: session spend + share of session spend. No
+      // per-model quota shown — Anthropic exposes only the account-wide
+      // weekly window (the separate `w:` cell), so a per-model "weekly
+      // remaining" would be fabricated. Models rounding to 0% are dropped.
+      const parts = [];
+      for (const [m, c] of entries.slice(0, 4)) {
+        const share = Math.round((c / total) * 100);
+        if (share < 1) continue;
         const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
-        const usd = fmtUsd(c);
-        let cell = `${name}:sc${usd || '$0'}\u00b7sp${Math.round((c / total) * 100)}%`;
-        if (weeklyUsed !== null && weekTotal > 0) {
-          const share = (weekByModel[m] || 0) / weekTotal;
-          const wr = Math.max(0, Math.min(100, Math.round(100 - weeklyUsed * share)));
-          cell += `\u00b7wr:~${wr}%`;
-        }
-        return cell;
-      });
-      return `${C.dim}${parts.join(' ')}${C.reset}`;
+        parts.push(`${name}:${fmtUsdShort(c)}·${share}%`);
+      }
+      return parts.length ? `${C.dim}${parts.join(' ')}${C.reset}` : '';
     },
 
     /** Per-model QUOTA used/available — dormant until real data exists.
