@@ -162,6 +162,15 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS agent_invocations_sid_idx ON agent_invocations(sid);
     CREATE INDEX IF NOT EXISTS agent_invocations_t_idx ON agent_invocations(t);
     CREATE INDEX IF NOT EXISTS agent_invocations_type_idx ON agent_invocations(subagent_type);
+
+    CREATE TABLE IF NOT EXISTS session_model_costs (
+      sid       TEXT NOT NULL,
+      model     TEXT NOT NULL,
+      cost_usd  REAL,
+      t         INTEGER NOT NULL,
+      PRIMARY KEY (sid, model)
+    );
+    CREATE INDEX IF NOT EXISTS session_model_costs_t_idx ON session_model_costs(t);
   `);
 
   // Additive migration: new columns for derived usage/cost on agent_invocations.
@@ -537,6 +546,55 @@ function agentModelCosts(sid) {
   } catch { return []; }
 }
 
+/**
+ * Upsert the CURRENT per-model transcript spend for a session — written by
+ * the statusline each redraw (cheap: one WAL upsert per model). This is the
+ * cross-session record that weeklyModelSpend aggregates; parent-session
+ * per-model splits exist nowhere else once the transcript ages out.
+ */
+function upsertSessionModelCosts(sid, byModel) {
+  const db = openDb();
+  if (!db || !sid || !byModel || typeof byModel !== 'object') return false;
+  try {
+    const up = db.prepare(`
+      INSERT INTO session_model_costs (sid, model, cost_usd, t)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(sid, model) DO UPDATE SET cost_usd = excluded.cost_usd, t = excluded.t
+    `);
+    const now = Date.now();
+    const tx = db.transaction((entries) => {
+      for (const [model, cost] of entries) {
+        if (!model || !(cost > 0)) continue;
+        up.run(sid, model, cost, now);
+      }
+    });
+    tx(Object.entries(byModel));
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Per-model tracked spend over the trailing window: parent-session splits
+ * (session_model_costs) + subagent runs (agent_invocations). Feeds the
+ * statusline's per-model weekly-remaining estimate. [{ model, cost_usd }],
+ * highest spend first. Never throws.
+ */
+function weeklyModelSpend({ days = 7 } = {}) {
+  const db = openDb();
+  if (!db) return [];
+  try {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return db.prepare(`
+      SELECT model, SUM(cost_usd) AS cost_usd FROM (
+        SELECT model, cost_usd FROM session_model_costs WHERE t > ? AND cost_usd > 0
+        UNION ALL
+        SELECT model, cost_usd FROM agent_invocations
+        WHERE t > ? AND model IS NOT NULL AND model != '' AND cost_usd > 0
+      ) GROUP BY model ORDER BY cost_usd DESC
+    `).all(cutoff, cutoff);
+  } catch { return []; }
+}
+
 function markArchiveRecalled(toolUseId) {
   const db = openDb();
   if (!db || !toolUseId) return false;
@@ -842,6 +900,8 @@ module.exports = {
   reconcileWorkflowAgents,
   reconcileSubagentUsage,
   agentModelCosts,
+  upsertSessionModelCosts,
+  weeklyModelSpend,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,

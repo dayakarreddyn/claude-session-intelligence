@@ -122,20 +122,28 @@ function loadTokenSpeedLib() {
 // statusline never blocks on sqlite. Subagents bill in their own
 // transcripts — without this the modelSplit line only ever showed the
 // parent conversation's model.
+let _eventsLibCached = undefined;
+function loadEventsLib() {
+  if (_eventsLibCached !== undefined) return _eventsLibCached;
+  _eventsLibCached = null;
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  try {
+    const p = path.join(dir, 'events.js');
+    if (fs.existsSync(p)) _eventsLibCached = require(p);
+  } catch { _eventsLibCached = null; }
+  return _eventsLibCached;
+}
+
 let _agentCostsCached = undefined;
 function agentModelCostsSafe(sid) {
   if (_agentCostsCached !== undefined) return _agentCostsCached;
   _agentCostsCached = [];
   if (!sid) return _agentCostsCached;
-  const dir = resolveLibDir();
-  if (!dir) return _agentCostsCached;
+  const events = loadEventsLib();
   try {
-    const p = path.join(dir, 'events.js');
-    if (fs.existsSync(p)) {
-      const events = require(p);
-      if (typeof events.agentModelCosts === 'function') {
-        _agentCostsCached = events.agentModelCosts(sid) || [];
-      }
+    if (events && typeof events.agentModelCosts === 'function') {
+      _agentCostsCached = events.agentModelCosts(sid) || [];
     }
   } catch { _agentCostsCached = []; }
   return _agentCostsCached;
@@ -1511,9 +1519,10 @@ function buildRenderers(C) {
       return `${C.dim}tps:${v}${C.reset}`;
     },
 
-    modelSplit: (_input, ctx) => {
+    modelSplit: (input, ctx) => {
       // Parent-conversation turns from the transcript accumulator...
-      const merged = { ...((ctx.tokenTotals && ctx.tokenTotals.byModel) || {}) };
+      const byModel = (ctx.tokenTotals && ctx.tokenTotals.byModel) || {};
+      const merged = { ...byModel };
       // ...plus subagent runs from the events DB (their usage lives in
       // separate transcripts and never appears in the parent transcript).
       for (const row of agentModelCostsSafe(ctx.sessionId)) {
@@ -1524,10 +1533,44 @@ function buildRenderers(C) {
       const total = entries.reduce((sum, [, c]) => sum + c, 0);
       if (!entries.length || total <= 0) return '';
       entries.sort((a, b) => b[1] - a[1]);
+
+      const events = loadEventsLib();
+      // Persist this session's per-model split so weeklyModelSpend can see
+      // parent-session spend across sessions (agents are already in the DB).
+      try {
+        if (events && typeof events.upsertSessionModelCosts === 'function' && ctx.sessionId) {
+          events.upsertSessionModelCosts(ctx.sessionId, byModel);
+        }
+      } catch { /* telemetry is best-effort */ }
+
+      // Per-model weekly-remaining ESTIMATE (`wr:~61%`): Anthropic exposes
+      // no per-model weekly quota (seven_day_<model> buckets are null on
+      // plans without per-model limits — verified 2026-07-17), so attribute
+      // the account weekly used% across models by their share of this
+      // week's tracked spend: wr(model) = 100 − weeklyUsed × spendShare.
+      // `~` marks it as SI's estimate, not an Anthropic number.
+      let weeklyUsed = null;
+      const sd = input && input.rate_limits && input.rate_limits.seven_day;
+      if (sd && typeof sd.used_percentage === 'number') weeklyUsed = sd.used_percentage;
+      let weekSpend = null;
+      if (weeklyUsed !== null && events && typeof events.weeklyModelSpend === 'function') {
+        try { weekSpend = events.weeklyModelSpend(); } catch { weekSpend = null; }
+      }
+      const weekTotal = weekSpend ? weekSpend.reduce((sum, r) => sum + (r.cost_usd || 0), 0) : 0;
+      const weekByModel = weekSpend
+        ? Object.fromEntries(weekSpend.map((r) => [r.model, r.cost_usd || 0]))
+        : {};
+
       const parts = entries.slice(0, 4).map(([m, c]) => {
         const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
         const usd = fmtUsd(c);
-        return `${name}:${usd ? usd + '\u00b7' : ''}${Math.round((c / total) * 100)}%`;
+        let cell = `${name}:sc${usd || '$0'}\u00b7sp${Math.round((c / total) * 100)}%`;
+        if (weeklyUsed !== null && weekTotal > 0) {
+          const share = (weekByModel[m] || 0) / weekTotal;
+          const wr = Math.max(0, Math.min(100, Math.round(100 - weeklyUsed * share)));
+          cell += `\u00b7wr:~${wr}%`;
+        }
+        return cell;
       });
       return `${C.dim}${parts.join(' ')}${C.reset}`;
     },
