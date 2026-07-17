@@ -107,6 +107,16 @@ function loadUsageApiLib() {
   return null;
 }
 
+function loadTokenSpeedLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'token-speed.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 // Per-session subagent spend by model, from the events DB. Lazy + cached
 // per process; returns [] when the lib or DB is unavailable so the
 // statusline never blocks on sqlite. Subagents bill in their own
@@ -666,6 +676,7 @@ function zoneFor(tokens, zones) {
 }
 
 function fmtTokens(n) {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`; // 2.42B
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;  // 1.25M
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;      // 425.3k
   return String(n);
@@ -673,8 +684,12 @@ function fmtTokens(n) {
 
 // Tight token formatter for cells that need every column (bar numerics,
 // tokenFlow). Drops decimals when the value is large enough that they read
-// as noise — `124k` instead of `124.2k`, `26M` instead of `26.08M`.
+// as noise — `124k` instead of `124.2k`, `26M` instead of `26.08M`, and
+// rolls to B past a billion — `2.4B` instead of `2422M` (10-day sessions
+// really do get there).
 function fmtTokensTight(n) {
+  if (n >= 10_000_000_000) return `${Math.round(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000_000)  return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 10_000_000) return `${Math.round(n / 1_000_000)}M`;
   if (n >= 1_000_000)  return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 10_000)     return `${Math.round(n / 1_000)}k`;
@@ -1470,6 +1485,34 @@ function buildRenderers(C) {
      *  is no per-model QUOTA — stdin rate_limits only carries the two
      *  account-wide windows — so share-of-session-spend is the honest
      *  per-model percentage. Top 4 models; empty until usage exists. */
+    /** Output-token generation speed, `tps:235` (tokens/sec). Median of
+     *  the last few streamed turns — per-message chunk-timestamp spans are
+     *  pure generation time, so this tracks the model's real throughput
+     *  (fast mode, load, long-output turns all show up). Falls back to the
+     *  whole-session average (total output / total API time from stdin)
+     *  when no streamed turn in the tail is usable. */
+    tokenSpeed: (input, ctx) => {
+      let tps = null;
+      const lib = loadTokenSpeedLib();
+      if (lib && typeof lib.estimateTokenSpeed === 'function') {
+        try {
+          const est = lib.estimateTokenSpeed(input.transcript_path || input.transcriptPath);
+          if (est && Number.isFinite(est.tps) && est.tps > 0) tps = est.tps;
+        } catch { /* degrade to fallback */ }
+      }
+      if (tps === null) {
+        const apiMs = input && input.cost && input.cost.total_api_duration_ms;
+        const outTok = (ctx.tokenTotals && ctx.tokenTotals.output)
+          || (input && input.context_window && input.context_window.total_output_tokens);
+        if (Number.isFinite(apiMs) && apiMs > 0 && Number.isFinite(outTok) && outTok > 0) {
+          tps = outTok / (apiMs / 1000);
+        }
+      }
+      if (tps === null || !(tps > 0)) return '';
+      const v = tps >= 10 ? String(Math.round(tps)) : tps.toFixed(1);
+      return `${C.dim}tps:${v}${C.reset}`;
+    },
+
     modelSplit: (_input, ctx) => {
       // Parent-conversation turns from the transcript accumulator...
       const merged = { ...((ctx.tokenTotals && ctx.tokenTotals.byModel) || {}) };

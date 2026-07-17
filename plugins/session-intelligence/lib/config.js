@@ -47,7 +47,7 @@ const STATUSLINE_PRESETS = {
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
-    'session', 'sessionId', 'costSaved', 'tools', 'tokenFlow',
+    'session', 'sessionId', 'costSaved', 'tools', 'tokenFlow', 'tokenSpeed',
     'newline',
     'branch', 'diffstat', 'cwd', 'activeRoot',
     'newline',
@@ -59,7 +59,7 @@ const STATUSLINE_PRESETS = {
   'verbose-cache':  [
     'tokens', 'compactAge', 'compactCost',
     'newline',
-    'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens',
+    'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens', 'tokenSpeed',
     'newline',
     'cwd',
     'newline',
