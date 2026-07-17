@@ -473,3 +473,27 @@ test('reconcileSubagentUsage pairs via parent transcript when parentToolUseId is
     cleanup(sb);
   }
 });
+
+test('agentModelCosts aggregates per-model subagent spend for one session', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: now });
+    events.recordAgentInvocation({ sid: 's1', toolUseId: 't1', subagentType: 'Explore', t: now,
+      model: 'claude-opus-4-8', inputTokens: 1000, outputTokens: 100, costUsd: 0.5 });
+    events.recordAgentInvocation({ sid: 's1', toolUseId: 't2', subagentType: 'Explore', t: now,
+      model: 'claude-opus-4-8', inputTokens: 1000, outputTokens: 100, costUsd: 0.25 });
+    events.recordAgentInvocation({ sid: 's1', toolUseId: 't3', subagentType: 'reviewer', t: now,
+      model: 'claude-haiku-4-5-20251001', costUsd: 0.05 });
+    // Blind row (no usage yet) and another session's row must not appear.
+    events.recordAgentInvocation({ sid: 's1', toolUseId: 't4', subagentType: 'bg', t: now });
+    events.recordAgentInvocation({ sid: 's2', toolUseId: 't5', subagentType: 'x', t: now,
+      model: 'claude-fable-5', costUsd: 9.9 });
+    const rows = events.agentModelCosts('s1');
+    const byModel = Object.fromEntries(rows.map((r) => [r.model, r.cost_usd]));
+    assert.ok(Math.abs(byModel['claude-opus-4-8'] - 0.75) < 1e-9);
+    assert.ok(Math.abs(byModel['claude-haiku-4-5-20251001'] - 0.05) < 1e-9);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(events.agentModelCosts(null), []);
+  } finally { cleanup(sb); }
+});

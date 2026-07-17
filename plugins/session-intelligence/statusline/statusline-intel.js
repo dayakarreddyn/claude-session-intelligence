@@ -107,6 +107,30 @@ function loadUsageApiLib() {
   return null;
 }
 
+// Per-session subagent spend by model, from the events DB. Lazy + cached
+// per process; returns [] when the lib or DB is unavailable so the
+// statusline never blocks on sqlite. Subagents bill in their own
+// transcripts — without this the modelSplit line only ever showed the
+// parent conversation's model.
+let _agentCostsCached = undefined;
+function agentModelCostsSafe(sid) {
+  if (_agentCostsCached !== undefined) return _agentCostsCached;
+  _agentCostsCached = [];
+  if (!sid) return _agentCostsCached;
+  const dir = resolveLibDir();
+  if (!dir) return _agentCostsCached;
+  try {
+    const p = path.join(dir, 'events.js');
+    if (fs.existsSync(p)) {
+      const events = require(p);
+      if (typeof events.agentModelCosts === 'function') {
+        _agentCostsCached = events.agentModelCosts(sid) || [];
+      }
+    }
+  } catch { _agentCostsCached = []; }
+  return _agentCostsCached;
+}
+
 // Per-model price lookup from lib/cost-estimation.js — keeps the pricing
 // table in ONE place. Optional like every lib load here: when absent, the
 // accumulators fall back to the flat `prices` argument for every turn.
@@ -1447,9 +1471,15 @@ function buildRenderers(C) {
      *  account-wide windows — so share-of-session-spend is the honest
      *  per-model percentage. Top 4 models; empty until usage exists. */
     modelSplit: (_input, ctx) => {
-      const bm = ctx.tokenTotals && ctx.tokenTotals.byModel;
-      if (!bm) return '';
-      const entries = Object.entries(bm).filter(([, c]) => c > 0);
+      // Parent-conversation turns from the transcript accumulator...
+      const merged = { ...((ctx.tokenTotals && ctx.tokenTotals.byModel) || {}) };
+      // ...plus subagent runs from the events DB (their usage lives in
+      // separate transcripts and never appears in the parent transcript).
+      for (const row of agentModelCostsSafe(ctx.sessionId)) {
+        if (!row || !row.model || !(row.cost_usd > 0)) continue;
+        merged[row.model] = (merged[row.model] || 0) + row.cost_usd;
+      }
+      const entries = Object.entries(merged).filter(([, c]) => c > 0);
       const total = entries.reduce((sum, [, c]) => sum + c, 0);
       if (!entries.length || total <= 0) return '';
       entries.sort((a, b) => b[1] - a[1]);

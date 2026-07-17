@@ -516,6 +516,27 @@ function reconcileSubagentUsage({ cwd, projectsRoot, maxAgeDays = 45 } = {}) {
   return updated;
 }
 
+/**
+ * Per-model subagent spend for one session — feeds the statusline
+ * modelSplit field so the "all models" line includes agent runs, whose
+ * usage lives in their own transcripts and never appears in the parent
+ * session transcript. Returns [{ model, cost_usd, n }] (rows with usage
+ * only; background agents not yet reconciled contribute nothing until the
+ * next SessionStart backfill). Never throws.
+ */
+function agentModelCosts(sid) {
+  const db = openDb();
+  if (!db || !sid) return [];
+  try {
+    return db.prepare(`
+      SELECT model, SUM(cost_usd) AS cost_usd, COUNT(*) AS n
+      FROM agent_invocations
+      WHERE sid = ? AND model IS NOT NULL AND model != '' AND cost_usd IS NOT NULL
+      GROUP BY model
+    `).all(sid);
+  } catch { return []; }
+}
+
 function markArchiveRecalled(toolUseId) {
   const db = openDb();
   if (!db || !toolUseId) return false;
@@ -820,6 +841,7 @@ module.exports = {
   recordAgentInvocation,
   reconcileWorkflowAgents,
   reconcileSubagentUsage,
+  agentModelCosts,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,
