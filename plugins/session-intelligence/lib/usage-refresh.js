@@ -98,7 +98,15 @@ function fetchUsage(token) {
       res.setEncoding('utf8');
       res.on('data', (chunk) => { body += chunk; });
       res.on('end', () => {
-        if (res.statusCode === 429) return resolve({ error: 'rate-limited' });
+        if (res.statusCode === 429) {
+          // Honor the server's backoff hint — usage-api.js suppresses
+          // refresh attempts until fetchedAt + retryAfterMs. Without this
+          // we re-hit the endpoint every ~30s for the whole outage.
+          return resolve({
+            error: 'rate-limited',
+            retryAfterMs: parseRetryAfterMs(res.headers['retry-after']),
+          });
+        }
         if (res.statusCode !== 200) return resolve({ error: 'api-error' });
         try {
           const parsed = JSON.parse(body);
@@ -125,16 +133,58 @@ function numOrNull(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+/** `Retry-After` is either delta-seconds or an HTTP-date. Null when absent/garbage. */
+function parseRetryAfterMs(header) {
+  if (header === undefined || header === null || header === '') return null;
+  const secs = Number(header);
+  if (Number.isFinite(secs) && secs >= 0) return Math.round(secs * 1000);
+  const date = Date.parse(String(header));
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  return null;
+}
+
+// Fields worth surviving an API outage — the statusline renders these (with
+// a stale marker) instead of blanking the usage cells for the whole outage.
+const CARRY_FIELDS = [
+  'sessionUsage', 'sessionResetAt', 'weeklyUsage', 'weeklyResetAt',
+  'extraUsageEnabled', 'extraUsageLimit', 'extraUsageUsed', 'extraUsageUtilization',
+];
+
+/**
+ * Build the cache payload for a fetch result. Success stamps `goodAt` (when
+ * these numbers were actually true). Errors carry the previous cache's good
+ * values forward — `goodAt` survives from the last success (older caches
+ * that predate the field fall back to the previous `fetchedAt`).
+ * Pure; exported for tests.
+ */
+function buildCachePayload(result, prev, now = Date.now()) {
+  if (!result || !result.error) return { ...result, goodAt: now };
+  const carried = {};
+  if (prev && typeof prev === 'object') {
+    for (const k of CARRY_FIELDS) {
+      if (prev[k] !== undefined && prev[k] !== null) carried[k] = prev[k];
+    }
+    const prevGoodAt = numOrNull(prev.goodAt) ?? (prev.error ? null : numOrNull(prev.fetchedAt));
+    if (prevGoodAt !== null) carried.goodAt = prevGoodAt;
+  }
+  return { ...carried, ...result };
+}
+
+function readPrevCache() {
+  try { return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); }
+  catch { return null; }
+}
+
 async function main() {
   if (isLockActive()) return;
   writeLock();
 
   try {
     const token = readToken();
-    if (!token) { writeCache({ error: 'no-credentials' }); return; }
+    if (!token) { writeCache(buildCachePayload({ error: 'no-credentials' }, readPrevCache())); return; }
 
     const result = await fetchUsage(token);
-    writeCache(result);
+    writeCache(buildCachePayload(result, readPrevCache()));
   } finally {
     clearLock();
   }
@@ -144,4 +194,4 @@ if (require.main === module) {
   main().catch(() => clearLock());
 }
 
-module.exports = { readToken, fetchUsage };
+module.exports = { readToken, fetchUsage, parseRetryAfterMs, buildCachePayload };

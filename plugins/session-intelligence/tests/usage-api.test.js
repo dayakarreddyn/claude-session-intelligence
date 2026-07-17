@@ -143,3 +143,39 @@ test('readAndRefreshIfStale returns whatever cache currently holds', () => {
     assert.equal(res.weeklyUsage, 10);
   });
 });
+
+test('readUsageCache passes through goodAt, retryAfterMs, and carried values on error caches', () => {
+  withTempCache(({ api }) => {
+    fs.writeFileSync(api.cacheFilePath(), JSON.stringify({
+      error: 'rate-limited', retryAfterMs: 3111000, fetchedAt: Date.now(),
+      sessionUsage: 42, weeklyUsage: 61, goodAt: Date.now() - 60 * 60 * 1000,
+    }));
+    const got = api.readUsageCache();
+    assert.equal(got.error, 'rate-limited');
+    assert.equal(got.retryAfterMs, 3111000);
+    assert.equal(got.sessionUsage, 42, 'carried value still renders');
+    assert.equal(got.weeklyUsage, 61);
+    assert.ok(typeof got.goodAt === 'number');
+  });
+});
+
+test('triggerRefresh backs off while an error cache is inside its retry window', () => {
+  withTempCache(({ api }) => {
+    // Recent 429 with a long Retry-After — a refresh now would just hammer
+    // the endpoint again. Must return false even though error caches are
+    // normally refresh-eligible.
+    fs.writeFileSync(api.cacheFilePath(), JSON.stringify({
+      error: 'rate-limited', retryAfterMs: 60 * 60 * 1000, fetchedAt: Date.now() - 1000,
+    }));
+    assert.equal(api.triggerRefresh(), false);
+  });
+});
+
+test('triggerRefresh applies the default backoff to errors without Retry-After', () => {
+  withTempCache(({ api }) => {
+    fs.writeFileSync(api.cacheFilePath(), JSON.stringify({
+      error: 'network', fetchedAt: Date.now() - 60 * 1000, // 1 min ago < 5 min floor
+    }));
+    assert.equal(api.triggerRefresh(), false);
+  });
+});

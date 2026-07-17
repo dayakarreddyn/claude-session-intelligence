@@ -346,3 +346,130 @@ test('agent stats respect project filter via session join', () => {
     assert.equal(b.agentTypes[0].type, 'code-reviewer');
   } finally { cleanup(sb); }
 });
+
+test('reconcileSubagentUsage backfills blind tracker rows by parentToolUseId', () => {
+  const sb = mkSandboxDb();
+  const agentUsage = require('../lib/agent-usage');
+  const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'si-plain-recon-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    events.recordSessionStart({ sid: 'sid-1', project: 'CSM', cwd, startedAt: Date.now() });
+
+    // What si-agent-tracker records for a background-run agent: the row
+    // exists but the transcript hadn't flushed, so usage columns are NULL.
+    assert.ok(events.recordAgentInvocation({
+      sid: 'sid-1', toolUseId: 'toolu_bg_1',
+      subagentType: 'Explore', description: 'sweep', t: Date.now(),
+    }));
+
+    // By next SessionStart the transcript is complete on disk.
+    const tPath = path.join(projRoot, enc, 'sid-1', 'subagents', 'agent-777.jsonl');
+    fs.mkdirSync(path.dirname(tPath), { recursive: true });
+    fs.writeFileSync(tPath, JSON.stringify({
+      type: 'assistant',
+      agentId: 'agent-777',
+      parentToolUseId: 'toolu_bg_1',
+      timestamp: '2026-07-17T09:00:00.000Z',
+      message: {
+        id: 'm1', model: 'claude-haiku-4-5-20251001',
+        usage: { input_tokens: 2000, cache_creation_input_tokens: 100, cache_read_input_tokens: 50000, output_tokens: 400 },
+      },
+    }) + '\n');
+
+    assert.equal(events.reconcileSubagentUsage({ cwd, projectsRoot: projRoot }), 1);
+    // Second run: the row is filled, nothing left to reconcile.
+    assert.equal(events.reconcileSubagentUsage({ cwd, projectsRoot: projRoot }), 0);
+
+    const stats = events.aggregateStats({ sinceDays: 30, project: 'CSM' });
+    assert.equal(stats.agents.n, 1);
+    assert.equal(stats.agents.input_tokens, 2000);
+    assert.equal(stats.agents.cache_read_tokens, 50000);
+    assert.ok(stats.agents.cost_usd > 0, 'cost filled from haiku pricing');
+  } finally {
+    events._resetForTest();
+    try { fs.rmSync(projRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    cleanup(sb);
+  }
+});
+
+test('user_version 2 migration reprices agent costs from the per-model table', () => {
+  const sb = mkSandboxDb();
+  try {
+    const Sqlite = require('better-sqlite3');
+    // First open creates schema and lands on the current user_version.
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+
+    // Seed a row costed at the old flat Opus table ($15/MTok input), then
+    // rewind user_version so the reprice migration re-runs on next open.
+    const raw = new Sqlite(sb.dbPath);
+    raw.prepare(`
+      INSERT INTO agent_invocations
+        (sid, tool_use_id, subagent_type, t, model, input_tokens, output_tokens,
+         cache_creation_tokens, cache_read_tokens, cost_usd)
+      VALUES (?,?,?,?,?,?,?,?,?,?)
+    `).run('s1', 'toolu_rp_1', 'Explore', Date.now(), 'claude-opus-4-8', 1000000, 0, 0, 0, 15.0);
+    // A row without tokens must be left untouched.
+    raw.prepare(`
+      INSERT INTO agent_invocations (sid, tool_use_id, subagent_type, t, model, cost_usd)
+      VALUES (?,?,?,?,?,?)
+    `).run('s1', 'toolu_rp_2', 'Explore', Date.now(), 'claude-opus-4-8', 9.99);
+    raw.pragma('user_version = 1');
+    raw.close();
+
+    events._setDbPathForTest(sb.dbPath);
+    assert.equal(events.isAvailable(), true);
+
+    const verify = new Sqlite(sb.dbPath);
+    const repriced = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_1'").get();
+    const untouched = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_2'").get();
+    const ver = verify.pragma('user_version', { simple: true });
+    verify.close();
+    // 1M input tokens at Opus 4.8's real $5/MTok — was $15 under the old table.
+    assert.ok(Math.abs(repriced.cost_usd - 5.0) < 1e-9, `repriced=${repriced.cost_usd}`);
+    assert.equal(untouched.cost_usd, 9.99, 'token-less row not touched');
+    assert.ok(ver >= 2, 'user_version advanced');
+  } finally { cleanup(sb); }
+});
+
+test('reconcileSubagentUsage pairs via parent transcript when parentToolUseId is absent', () => {
+  const sb = mkSandboxDb();
+  const agentUsage = require('../lib/agent-usage');
+  const projRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'si-pair-recon-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    events.recordSessionStart({ sid: 'sid-9', project: 'CSM', cwd, startedAt: Date.now() });
+    assert.ok(events.recordAgentInvocation({
+      sid: 'sid-9', toolUseId: 'toolu_pair_1',
+      subagentType: 'Explore', t: Date.now(),
+    }));
+
+    // Modern (2.1.x) subagent transcript: has agentId but NO parentToolUseId.
+    const tPath = path.join(projRoot, enc, 'sid-9', 'subagents', 'agent-zzz9.jsonl');
+    fs.mkdirSync(path.dirname(tPath), { recursive: true });
+    fs.writeFileSync(tPath, JSON.stringify({
+      type: 'assistant', agentId: 'zzz9', timestamp: '2026-07-17T09:00:00.000Z',
+      message: { id: 'm1', model: 'claude-fable-5',
+        usage: { input_tokens: 1000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 100000 } },
+    }) + '\n');
+    // Parent transcript carries the pairing via the launch ack.
+    fs.writeFileSync(path.join(projRoot, enc, 'sid-9.jsonl'), JSON.stringify({
+      type: 'user', message: { content: [{
+        type: 'tool_result', tool_use_id: 'toolu_pair_1',
+        content: [{ type: 'text', text: 'Async agent launched successfully. agentId: zzz9 (internal)' }],
+      }] },
+    }) + '\n');
+
+    assert.equal(events.reconcileSubagentUsage({ cwd, projectsRoot: projRoot }), 1);
+    const stats = events.aggregateStats({ sinceDays: 30, project: 'CSM' });
+    assert.equal(stats.agents.input_tokens, 1000);
+    // 100k output tokens at Fable's $50/MTok = $5.01 with the input cents.
+    assert.ok(Math.abs(stats.agents.cost_usd - 5.01) < 1e-6, `cost=${stats.agents.cost_usd}`);
+  } finally {
+    events._resetForTest();
+    try { fs.rmSync(projRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+    cleanup(sb);
+  }
+});

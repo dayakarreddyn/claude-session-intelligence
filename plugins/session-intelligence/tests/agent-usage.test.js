@@ -211,3 +211,62 @@ test('listWorkflowAgentTranscripts returns [] when no workflow dirs exist', () =
     try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
+
+test('listPlainSubagentTranscripts finds plain agent files, skips workflow layer, honors sinceMs', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'si-plain-list-'));
+  try {
+    const cwd = '/Users/x/DWS/CSM';
+    const enc = agentUsage.encodeProjectPath(cwd);
+    const subDir = path.join(root, enc, 'sid-1', 'subagents');
+    fs.mkdirSync(path.join(subDir, 'workflows', 'wf_a'), { recursive: true });
+    fs.writeFileSync(path.join(subDir, 'agent-fresh.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(subDir, 'agent-old.jsonl'), '{}\n');
+    // Workflow-layer transcript must NOT appear — that's the other lister's job.
+    fs.writeFileSync(path.join(subDir, 'workflows', 'wf_a', 'agent-wf.jsonl'), '{}\n');
+    // Age one file out of the window.
+    const old = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(path.join(subDir, 'agent-old.jsonl'), old, old);
+
+    const all = agentUsage.listPlainSubagentTranscripts({ cwd, projectsRoot: root });
+    assert.deepEqual(all.map((t) => path.basename(t.path)).sort(), ['agent-fresh.jsonl', 'agent-old.jsonl']);
+    assert.equal(all[0].sid, 'sid-1');
+
+    const recent = agentUsage.listPlainSubagentTranscripts({
+      cwd, projectsRoot: root, sinceMs: Date.now() - 60 * 60 * 1000,
+    });
+    assert.deepEqual(recent.map((t) => path.basename(t.path)), ['agent-fresh.jsonl']);
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+test('mapAgentToolUseIds pairs agentId to tool_use_id from launch ack and task notification', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-pairmap-'));
+  const p = path.join(dir, 'parent.jsonl');
+  try {
+    fs.writeFileSync(p, [
+      // Launch ack: tool_result whose text carries the agentId.
+      JSON.stringify({ type: 'user', message: { content: [{
+        type: 'tool_result', tool_use_id: 'toolu_ack_1',
+        content: [{ type: 'text', text: 'Async agent launched successfully. agentId: abc123 (internal ID)' }],
+      }] } }),
+      // Completion notification: task-id + tool-use-id in one text block.
+      JSON.stringify({ type: 'user', message: { content: [{
+        type: 'text',
+        text: '<task-notification><task-id>def456</task-id><tool-use-id>toolu_notif_2</tool-use-id></task-notification>',
+      }] } }),
+      // Noise lines the prefilter must skip without throwing.
+      '{broken json with agentId inside',
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'no ids here' }] } }),
+    ].join('\n') + '\n');
+
+    const map = agentUsage.mapAgentToolUseIds(p);
+    assert.equal(map.get('abc123'), 'toolu_ack_1');
+    assert.equal(map.get('def456'), 'toolu_notif_2');
+    assert.equal(map.size, 2);
+    // Missing file → empty map, no throw.
+    assert.equal(agentUsage.mapAgentToolUseIds(path.join(dir, 'nope.jsonl')).size, 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});

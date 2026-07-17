@@ -856,7 +856,7 @@ Large tool responses (Read on a big file, Bash log dump, Grep with many hits) si
 `si-tool-archive.js` is a **PostToolUse** hook that snapshots tool responses larger than `toolArchive.thresholdChars` (default 4096) to:
 
 ```
-${TMPDIR}/claude-tool-archive-<sid>/<tool_use_id>.json
+~/.claude/state/claude-tool-archive-<sid>/<tool_use_id>.json
 ```
 
 After `/compact` wipes the body from context, replay it with:

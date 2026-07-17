@@ -66,10 +66,21 @@ function readUsageCache() {
     extraUsageUtilization: typeof data.extraUsageUtilization === 'number' ? data.extraUsageUtilization : null,
     error: typeof data.error === 'string' ? data.error : null,
     fetchedAt: typeof data.fetchedAt === 'number' ? data.fetchedAt : null,
+    // When these numbers were last actually true — error caches carry the
+    // previous good values forward, so goodAt can be much older than
+    // fetchedAt during an API outage.
+    goodAt: typeof data.goodAt === 'number' ? data.goodAt : null,
+    retryAfterMs: typeof data.retryAfterMs === 'number' ? data.retryAfterMs : null,
     age,
     stale: age > CACHE_MAX_AGE_MS,
   };
 }
+
+// Minimum wait after a failed fetch before trying again. A 429's
+// Retry-After extends this; without the floor, an erroring cache retried
+// on every redraw (gated only by the 30 s spawn lock), which hammered a
+// rate-limited endpoint for the whole outage.
+const ERROR_BACKOFF_MS = 5 * 60 * 1000;
 
 /**
  * Spawn the refresh worker (usage-refresh.js) in a detached child. Returns
@@ -79,6 +90,13 @@ function readUsageCache() {
 function triggerRefresh({ force = false } = {}) {
   const cached = readUsageCache();
   if (!force && cached && !cached.stale && !cached.error) return false;
+
+  // Back off after errors: wait out max(Retry-After, ERROR_BACKOFF_MS)
+  // from the failed fetch before spawning another worker. `force` bypasses.
+  if (!force && cached && cached.error && Number.isFinite(cached.fetchedAt)) {
+    const backoff = Math.max(cached.retryAfterMs || 0, ERROR_BACKOFF_MS);
+    if (Date.now() < cached.fetchedAt + backoff) return false;
+  }
 
   // Respect an active lock so we don't spawn a pile of workers when the
   // statusline redraws five times in a second.
@@ -116,4 +134,5 @@ module.exports = {
   cacheFilePath,
   lockFilePath,
   CACHE_MAX_AGE_MS,
+  ERROR_BACKOFF_MS,
 };

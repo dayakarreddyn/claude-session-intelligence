@@ -914,6 +914,14 @@ function main() {
     const wfAgents = require(path.join(SI_LIB, 'events')).reconcileWorkflowAgents({ cwd });
     if (wfAgents > 0) intelLog('bootstrap', 'info', 'workflow agents reconciled', { recorded: wfAgents });
   } catch { /* best effort */ }
+  // Backfill usage on rows the live tracker recorded blind — background-run
+  // Agent/Task calls fire PostToolUse before the subagent transcript has
+  // flushed usage, so model/tokens/cost land NULL. The transcripts are
+  // complete by now; fill the gaps from them.
+  try {
+    const filled = require(path.join(SI_LIB, 'events')).reconcileSubagentUsage({ cwd });
+    if (filled > 0) intelLog('bootstrap', 'info', 'subagent usage backfilled', { updated: filled });
+  } catch { /* best effort */ }
   const locked = acquireStateLock();
   try {
     const state = loadState();

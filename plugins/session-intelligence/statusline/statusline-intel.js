@@ -107,6 +107,25 @@ function loadUsageApiLib() {
   return null;
 }
 
+// Per-model price lookup from lib/cost-estimation.js — keeps the pricing
+// table in ONE place. Optional like every lib load here: when absent, the
+// accumulators fall back to the flat `prices` argument for every turn.
+let _costLibCached = undefined;
+function knownPriceForModelSafe(modelId) {
+  if (_costLibCached === undefined) {
+    const dir = resolveLibDir();
+    _costLibCached = null;
+    if (dir) {
+      const p = path.join(dir, 'cost-estimation.js');
+      try { if (fs.existsSync(p)) _costLibCached = require(p); }
+      catch { _costLibCached = null; }
+    }
+  }
+  if (!_costLibCached || typeof _costLibCached.knownPriceForModel !== 'function') return null;
+  try { return _costLibCached.knownPriceForModel(modelId); }
+  catch { return null; }
+}
+
 // Cached per-process so blockUsage + weekUsage share one disk read + one
 // "should we kick off a background refresh" decision per render.
 let _usageCached = undefined;
@@ -124,7 +143,7 @@ function loadUsage() {
 // soon-to-exhaust quota reads at a glance (weekly, where the signal is
 // load-bearing). 'dim' keeps the cell muted to match the rest of the row
 // (5h block, where the percent matters less than the countdown).
-function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
+function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', stale = false) {
   if (typeof pctRaw !== 'number' || !Number.isFinite(pctRaw)) return '';
   const pct = Math.round(pctRaw);
   let resetStr = '';
@@ -132,15 +151,18 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
+  // `~` marks a value carried over from the last successful fetch while the
+  // usage API is erroring (rate-limited etc.) — stale but better than blank.
+  const pctStr = `${stale ? '~' : ''}${pct}%`;
   let head;
   if (colourMode === 'dim') {
-    head = `${C.dim}${label}:${pct}%${C.reset}`;
+    head = `${C.dim}${label}:${pctStr}${C.reset}`;
   } else {
     let col = C.green;
     if (pct >= 95) col = C.red;
     else if (pct >= 85) col = C.orange;
     else if (pct >= 60) col = C.yellow;
-    head = `${col}${label}:${pct}%${C.reset}`;
+    head = `${col}${label}:${pctStr}${C.reset}`;
   }
   // `r:` prefix on the reset duration keeps the cell self-explanatory.
   // Plain-space separator inside the cell — the outer `·` between fields
@@ -523,10 +545,11 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
  *
  *   1. Explicit `statusline.contextCap` in config wins (escape hatch).
  *   2. Legacy `[1m]` / `-1m` marker in the model id → 1M.
- *   3. Any Opus 4.x / 5.x or Sonnet 4.x — 1M. Newer Claude Code builds
- *      dropped the `[1m]` marker once 1M became the default for these
- *      models, so key off the family name instead.
- *   4. Fallback 200k.
+ *   3. Any Opus 4.x / 5.x, Sonnet 4.x / 5.x, or the Claude 5 family
+ *      (Fable / Mythos) — 1M. Newer Claude Code builds dropped the `[1m]`
+ *      marker once 1M became the default for these models, so key off the
+ *      family name instead.
+ *   4. Fallback 200k (Haiku-class models).
  */
 function contextCap(input, cfg) {
   if (cfg && Number.isFinite(cfg.contextCap) && cfg.contextCap > 0) {
@@ -536,7 +559,7 @@ function contextCap(input, cfg) {
     (input && input.model && (input.model.id || input.model.display_name)) || ''
   ).toLowerCase();
   if (/\[1m\]|-1m|\b1m\b|1000k|1000000/.test(id)) return 1000000;
-  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]/.test(id)) return 1000000;
+  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]|fable|mythos/.test(id)) return 1000000;
   return 200000;
 }
 
@@ -760,11 +783,11 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v2: includes seenIds for streaming-snapshot dedupe. Same assistant
-  // message.id appears N times in the transcript (one row per stream chunk
-  // update), and the prior schema double-counted every snapshot. Old v1
-  // cache files are abandoned (TMPDIR cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v2`);
+  // v3: per-turn model pricing (each line's message.model is looked up;
+  // the flat `prices` arg only covers unknown models). v2 accumulated at
+  // one flat price list — mixing modes in one cache would blend pricing.
+  // Old v1/v2 cache files are abandoned (TMPDIR cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v3`);
 
   let cache = null;
   try {
@@ -805,8 +828,9 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
               if (seen.has(mid)) continue;
               seen.add(mid);
             }
-            cache.cost += costFromUsage(u, prices);
-            cache.saved += savedFromUsage(u, prices);
+            const linePrices = knownPriceForModelSafe(d.message && d.message.model) || prices;
+            cache.cost += costFromUsage(u, linePrices);
+            cache.saved += savedFromUsage(u, linePrices);
           } catch { /* skip bad line */ }
         }
         cache.offset += lastNl + 1;
@@ -1333,10 +1357,14 @@ function buildRenderers(C) {
 
     /** Percentage of the context window consumed. Replaces ccstatusline's
      *  `93.0%` signal so we can retire the 1.5 s `npx` spend. Uses zones.red
-     *  as the 100% reference — matches the token-bar cap. Zone-colored:
-     *    <60% green · 60-85% yellow · 85-95% orange · >=95% red */
-    contextPct: (_input, ctx) => {
-      const max = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
+     *  as the 100% reference (the compact-advisory ceiling from context-rot
+     *  research), clamped to 90% of the model's real window so a 200k-cap
+     *  model can actually reach 100% — with a 400k red line it never would.
+     *  Zone-colored: <60% green · 60-85% yellow · 85-95% orange · >=95% red */
+    contextPct: (input, ctx) => {
+      const zoneRed = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
+      const cap = contextCap(input, ctx.cfg);
+      const max = Math.min(zoneRed, Math.round(cap * 0.9));
       if (!ctx.tokens || ctx.tokens <= 0) return '';
       const pct = Math.round((ctx.tokens / max) * 100);
       let col = C.green;
@@ -1348,12 +1376,14 @@ function buildRenderers(C) {
 
     /** Claude Code 5-hour block usage + time until reset. Data from the
      *  cached usage API (180 s TTL, refreshed by a detached worker). Shown
-     *  as `5h:47% · 3hr 12m` — percent then "resets in" duration. Empty
-     *  when the cache is absent or has an error marker. */
+     *  as `b:47% · 3hr 12m` — percent then "resets in" duration. While the
+     *  API errors (rate-limited), the cache carries the last good values
+     *  and the cell renders them with a `~` marker instead of vanishing.
+     *  Empty only when no successful fetch has ever populated the cache. */
     blockUsage: (_input, _ctx) => {
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
-      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim');
+      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!u.error);
     },
 
     /** Weekly (7-day) usage + time until reset. Same shape as blockUsage
@@ -1361,7 +1391,7 @@ function buildRenderers(C) {
     weekUsage: (_input, _ctx) => {
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
-      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone');
+      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
     },
 
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
@@ -1546,9 +1576,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v2: includes seenIds for streaming-snapshot dedupe. See note in
-  // costsSinceCompact() — old v1 cache files are abandoned.
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v2`);
+  // v3: per-turn model pricing — see note in costsSinceCompact(). Shares
+  // the cache name with lib/cost-estimation.js so both renderers see the
+  // same offsets; the version MUST bump in both files together.
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v3`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -1617,8 +1648,9 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
                 if (seen.has(mid)) continue;
                 seen.add(mid);
               }
-              newCost += costFromUsage(u, prices);
-              newSaved += savedFromUsage(u, prices);
+              const linePrices = knownPriceForModelSafe(d.message && d.message.model) || prices;
+              newCost += costFromUsage(u, linePrices);
+              newSaved += savedFromUsage(u, linePrices);
               newInput += u.input_tokens || 0;
               newOutput += u.output_tokens || 0;
               newCacheRead += u.cache_read_input_tokens || 0;

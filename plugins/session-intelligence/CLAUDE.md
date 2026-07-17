@@ -58,7 +58,7 @@ Always update `MEMORY.md` with a one-line pointer. Don't duplicate prior memory 
 Disable either surface with `compact.memoryOffload: false` in `~/.claude/session-intelligence.json` or `CLAUDE_COMPACT_MEMORY_OFFLOAD=0`.
 
 #### Tool-Response Archive (post-compact retrieval)
-`si-tool-archive.js` snapshots any tool response larger than `toolArchive.thresholdChars` (default 4096) to `${TMPDIR}/claude-tool-archive-<sid>/<tool_use_id>.json`. After `/compact` erases the body from context, replay it with `/si expand <tool_use_id>` instead of re-running the tool.
+`si-tool-archive.js` snapshots any tool response larger than `toolArchive.thresholdChars` (default 4096) to `~/.claude/state/claude-tool-archive-<sid>/<tool_use_id>.json`. After `/compact` erases the body from context, replay it with `/si expand <tool_use_id>` instead of re-running the tool.
 
 When to reach for this:
 - After `/compact`, when you need the full body of a `Read`/`Bash`/`Grep` result that just got summarised away.

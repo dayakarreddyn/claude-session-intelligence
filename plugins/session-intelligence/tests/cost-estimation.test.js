@@ -131,3 +131,55 @@ test('totalsFromTranscript accumulates cost + saved incrementally', () => {
 
   fs.unlinkSync(path_);
 });
+
+test('knownPriceForModel covers Claude 5 family and Opus reprice split', () => {
+  // Claude 5 family — Fable / Mythos at $10/$50.
+  assert.equal(costEst.knownPriceForModel('claude-fable-5').input, 10);
+  assert.equal(costEst.knownPriceForModel('claude-fable-5').output, 50);
+  assert.equal(costEst.knownPriceForModel('claude-mythos-5').input, 10);
+  // Opus 4.5+ repriced to $5/$25.
+  assert.equal(costEst.knownPriceForModel('claude-opus-4-8').input, 5);
+  assert.equal(costEst.knownPriceForModel('claude-opus-4-8').output, 25);
+  assert.equal(costEst.knownPriceForModel('claude-opus-4-5-20251101').input, 5);
+  // Opus 4.1 and the dated Opus 4 base id stay on legacy $15/$75.
+  assert.equal(costEst.knownPriceForModel('claude-opus-4-1-20250805').input, 15);
+  assert.equal(costEst.knownPriceForModel('claude-opus-4-20250514').input, 15);
+  // Haiku unchanged.
+  assert.equal(costEst.knownPriceForModel('claude-haiku-4-5-20251001').input, 1);
+  // Unknown family → null; priceForModel falls back to DEFAULT_PRICES.
+  assert.equal(costEst.knownPriceForModel('some-other-model'), null);
+  assert.equal(costEst.priceForModel('some-other-model'), costEst.DEFAULT_PRICES);
+  assert.equal(costEst.knownPriceForModel(null), null);
+});
+
+test('sonnet-5 introductory pricing flips to standard on 2026-09-01', () => {
+  const during = Date.parse('2026-07-17T00:00:00Z');
+  const after  = Date.parse('2026-09-02T00:00:00Z');
+  assert.equal(costEst.knownPriceForModel('claude-sonnet-5', during).input, 2);
+  assert.equal(costEst.knownPriceForModel('claude-sonnet-5', during).output, 10);
+  assert.equal(costEst.knownPriceForModel('claude-sonnet-5', after).input, 3);
+  assert.equal(costEst.knownPriceForModel('claude-sonnet-5', after).output, 15);
+  // Non-5 sonnets are date-independent.
+  assert.equal(costEst.knownPriceForModel('claude-sonnet-4-6', during).input, 3);
+});
+
+test('totalsFromTranscript prices each turn by its own model', () => {
+  const now = '2026-07-17T10:00:00.000Z';
+  const path_ = writeTranscript([
+    // Haiku turn: 1M output at $5/MTok = $5.
+    { type: 'assistant', timestamp: now, message: { id: 'pm1', model: 'claude-haiku-4-5-20251001', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } },
+    // Fable turn: 1M output at $50/MTok = $50.
+    { type: 'assistant', timestamp: now, message: { id: 'pm2', model: 'claude-fable-5', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } },
+    // Unknown model → falls back to the flat price list arg (default $75/MTok).
+    { type: 'assistant', timestamp: now, message: { id: 'pm3', model: 'mystery-model', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } },
+  ]);
+  const out = costEst.totalsFromTranscript(path_, 'permodel-test-' + Date.now());
+  assert.ok(Math.abs(out.cost - 130) < 1e-6, `expected 5 + 50 + 75 = 130, got ${out.cost}`);
+  fs.unlinkSync(path_);
+});

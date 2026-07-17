@@ -205,6 +205,40 @@ function initSchema(db) {
       db.pragma('user_version = 1');
     }
   } catch { /* backfill is best-effort — the sid-join read path still works */ }
+
+  // One-time cost reprice (user_version 1 → 2). The pricing table shipped
+  // with only opus/sonnet/haiku family entries at legacy Opus 4.1-era rates;
+  // Opus 4.5+ actually bills at $5/$25 (rows were ~3x overstated) and the
+  // Claude 5 family (Fable/Mythos) fell through to the Opus default.
+  // Token counts on the rows are authoritative, so recompute cost_usd from
+  // the current per-model table. Rows without a model or tokens are skipped.
+  try {
+    const ver = db.pragma('user_version', { simple: true });
+    if (ver < 2) {
+      const { priceForModel, costFromUsage } = require('./cost-estimation');
+      const rows = db.prepare(`
+        SELECT id, model, t, input_tokens, output_tokens,
+               cache_creation_tokens, cache_read_tokens
+        FROM agent_invocations
+        WHERE model IS NOT NULL AND model != ''
+          AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+      `).all();
+      const upd = db.prepare('UPDATE agent_invocations SET cost_usd = ? WHERE id = ?');
+      const reprice = db.transaction((all) => {
+        for (const r of all) {
+          const cost = costFromUsage({
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cache_creation_input_tokens: r.cache_creation_tokens,
+            cache_read_input_tokens: r.cache_read_tokens,
+          }, priceForModel(r.model, r.t || Date.now()));
+          upd.run(cost, r.id);
+        }
+      });
+      reprice(rows);
+      db.pragma('user_version = 2');
+    }
+  } catch { /* best-effort — unpriced rows are still better than a crash */ }
 }
 
 // ─── Writers ────────────────────────────────────────────────────────────────
@@ -392,6 +426,94 @@ function reconcileWorkflowAgents({ cwd, projectsRoot } = {}) {
     }
   } catch { /* best-effort — partial backfill is fine, next session retries */ }
   return inserted;
+}
+
+/**
+ * Backfill usage columns on agent_invocations rows the live tracker recorded
+ * blind. Agent/Task calls run in the background by default now, so when
+ * PostToolUse fires the subagent transcript usually hasn't flushed any usage
+ * yet — si-agent-tracker records the row with NULL model/tokens/cost. By the
+ * next SessionStart the transcripts are complete; re-read them and fill the
+ * gaps by matching transcript.parentToolUseId to the row's tool_use_id.
+ *
+ * Bounded on both sides: only rows from the last `maxAgeDays` are candidates,
+ * and only transcripts modified in that window are parsed. Idempotent — a
+ * filled row leaves the candidate set, and rows whose transcript never
+ * surfaces (evicted, launched from a subdir cwd) age out of the window.
+ * Returns the number of rows updated.
+ */
+function reconcileSubagentUsage({ cwd, projectsRoot, maxAgeDays = 45 } = {}) {
+  const db = openDb();
+  if (!db || !cwd) return 0;
+  let agentUsage;
+  try { agentUsage = require('./agent-usage'); } catch { return 0; }
+
+  const sinceMs = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT id, tool_use_id FROM agent_invocations
+      WHERE (model IS NULL OR model = '')
+        AND tool_use_id IS NOT NULL
+        AND t > ?
+    `).all(sinceMs);
+  } catch { return 0; }
+  if (!rows.length) return 0;
+  const wanted = new Map(rows.map((r) => [r.tool_use_id, r.id]));
+
+  let transcripts;
+  try { transcripts = agentUsage.listPlainSubagentTranscripts({ cwd, projectsRoot, sinceMs }); }
+  catch { return 0; }
+  if (!transcripts || !transcripts.length) return 0;
+
+  let updated = 0;
+  try {
+    const upd = db.prepare(`
+      UPDATE agent_invocations
+      SET model = ?, input_tokens = ?, output_tokens = ?,
+          cache_creation_tokens = ?, cache_read_tokens = ?, cost_usd = ?,
+          duration_ms = COALESCE(?, duration_ms)
+      WHERE id = ?
+    `);
+    // agentId → tool_use_id pair maps, built lazily one per parent sid.
+    // Newer Claude Code builds dropped parentToolUseId from subagent
+    // transcripts, so the pairing comes from the parent transcript instead.
+    const pairMaps = new Map();
+    for (const tr of transcripts) {
+      if (!wanted.size) break;
+      let parsed;
+      try { parsed = agentUsage.readSubagentTranscript(tr.path); } catch { continue; }
+      if (!parsed || !parsed.model) continue;
+      let toolUseId = parsed.parentToolUseId || null;
+      if (!toolUseId && parsed.agentId) {
+        let pm = pairMaps.get(tr.sid);
+        if (pm === undefined) {
+          try {
+            pm = agentUsage.mapAgentToolUseIds(
+              agentUsage.parentTranscriptPathFor(cwd, tr.sid, projectsRoot),
+            );
+          } catch { pm = new Map(); }
+          pairMaps.set(tr.sid, pm);
+        }
+        toolUseId = pm.get(parsed.agentId) || null;
+      }
+      if (!toolUseId) continue;
+      const rowId = wanted.get(toolUseId);
+      if (rowId === undefined) continue;
+      const u = parsed.usage || {};
+      const num = (n) => (Number.isFinite(n) ? n : null);
+      upd.run(
+        parsed.model,
+        num(u.input_tokens), num(u.output_tokens),
+        num(u.cache_creation_input_tokens), num(u.cache_read_input_tokens),
+        num(parsed.costUsd), num(parsed.durationMs),
+        rowId,
+      );
+      wanted.delete(toolUseId);
+      updated += 1;
+    }
+  } catch { /* best-effort — partial backfill is fine, next session retries */ }
+  return updated;
 }
 
 function markArchiveRecalled(toolUseId) {
@@ -697,6 +819,7 @@ module.exports = {
   deleteToolArchives,
   recordAgentInvocation,
   reconcileWorkflowAgents,
+  reconcileSubagentUsage,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,
