@@ -569,17 +569,22 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
  * Claude's effective context cap for the active model.
  *
  *   1. Explicit `statusline.contextCap` in config wins (escape hatch).
- *   2. Legacy `[1m]` / `-1m` marker in the model id → 1M.
- *   3. Any Opus 4.x / 5.x, Sonnet 4.x / 5.x, or the Claude 5 family
+ *   2. `context_window.context_window_size` from the statusline stdin
+ *      JSON — Claude Code ≥2.1.90 reports the session's real window, which
+ *      beats any name-based guess.
+ *   3. Legacy `[1m]` / `-1m` marker in the model id → 1M.
+ *   4. Any Opus 4.x / 5.x, Sonnet 4.x / 5.x, or the Claude 5 family
  *      (Fable / Mythos) — 1M. Newer Claude Code builds dropped the `[1m]`
  *      marker once 1M became the default for these models, so key off the
  *      family name instead.
- *   4. Fallback 200k (Haiku-class models).
+ *   5. Fallback 200k (Haiku-class models).
  */
 function contextCap(input, cfg) {
   if (cfg && Number.isFinite(cfg.contextCap) && cfg.contextCap > 0) {
     return cfg.contextCap;
   }
+  const cw = input && input.context_window && input.context_window.context_window_size;
+  if (Number.isFinite(cw) && cw > 0) return cw;
   const id = String(
     (input && input.model && (input.model.id || input.model.display_name)) || ''
   ).toLowerCase();
@@ -1399,21 +1404,34 @@ function buildRenderers(C) {
       return `${col}ctx:${pct}%${C.reset}`;
     },
 
-    /** Claude Code 5-hour block usage + time until reset. Data from the
-     *  cached usage API (180 s TTL, refreshed by a detached worker). Shown
-     *  as `b:47% · 3hr 12m` — percent then "resets in" duration. While the
-     *  API errors (rate-limited), the cache carries the last good values
-     *  and the cell renders them with a `~` marker instead of vanishing.
-     *  Empty only when no successful fetch has ever populated the cache. */
-    blockUsage: (_input, _ctx) => {
+    /** Claude Code 5-hour block usage + time until reset, as `b:47% · r:3hr12m`.
+     *
+     *  Source order:
+     *   1. `rate_limits.five_hour` from the statusline stdin JSON — Claude
+     *      Code ≥2.1.90 hands us the quota directly, fresh every redraw,
+     *      zero API requests.
+     *   2. Fallback for older builds: the cached /api/oauth/usage poller.
+     *      That endpoint aggressively 429s pollers (anthropic/claude-code
+     *      #31637, closed not-planned), so it's strictly a fallback; while
+     *      it errors the cache carries the last good values and the cell
+     *      renders them with a `~` marker instead of vanishing. */
+    blockUsage: (input, _ctx) => {
+      const fh = input && input.rate_limits && input.rate_limits.five_hour;
+      if (fh && typeof fh.used_percentage === 'number') {
+        return _renderUsageCellImpl('b', fh.used_percentage, fh.resets_at, C, 'dim', false);
+      }
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
       return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!u.error);
     },
 
-    /** Weekly (7-day) usage + time until reset. Same shape as blockUsage
-     *  with a `w` prefix. Format: `w:31% · r:4d 12hr`. */
-    weekUsage: (_input, _ctx) => {
+    /** Weekly (7-day) usage + time until reset. Same shape and source
+     *  order as blockUsage with a `w` prefix. Format: `w:31% · r:4d12hr`. */
+    weekUsage: (input, _ctx) => {
+      const sd = input && input.rate_limits && input.rate_limits.seven_day;
+      if (sd && typeof sd.used_percentage === 'number') {
+        return _renderUsageCellImpl('w', sd.used_percentage, sd.resets_at, C, 'zone', false);
+      }
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
       return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
