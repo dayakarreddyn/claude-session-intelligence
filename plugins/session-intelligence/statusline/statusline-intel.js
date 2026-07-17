@@ -473,7 +473,7 @@ function readSessionContextTask(projectDir) {
     }
     const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
     if (isPlaceholder(firstLine)) return null;
-    const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+    const cleaned = firstLine.replace(/^[-*#\s]+/, '').replace(/\*\*/g, '').trim();
     return cleaned ? { text: cleaned, mtimeMs } : null;
   }
 
@@ -509,14 +509,35 @@ function readSessionContextTask(projectDir) {
 
   const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
   if (isPlaceholder(firstLine)) return null;
-  const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+  const cleaned = firstLine.replace(/^[-*#\s]+/, '').replace(/\*\*/g, '').trim();
   return cleaned ? { text: cleaned, mtimeMs } : null;
+}
+
+// Nearest ancestor of cwd (inclusive) holding a session-context.md — some
+// projects maintain the file at the repo root by hand instead of (or as
+// well as) the ~/.claude/projects/<encoded>/ copy SI seeds. Bounded walk so
+// a deep cwd can't turn the statusline hot path into a filesystem crawl.
+function findCwdContextDir(cwd) {
+  if (!cwd) return null;
+  const home = os.homedir();
+  let dir = cwd;
+  for (let i = 0; i < 8; i++) {
+    try { if (fs.existsSync(path.join(dir, 'session-context.md'))) return dir; } catch { /* ignore */ }
+    const parent = path.dirname(dir);
+    if (!dir || dir === home || parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 // The `task` field answers the question "what am I working on?" in order
 // of freshness:
-//   1. session-context.md, if real content AND recent (mtime < staleHours).
-//   2. session-context.md flagged as (stale) when older than that.
+//   1. session-context.md — the FRESHER of the ~/.claude/projects/<encoded>/
+//      copy and a repo-root copy under cwd, if real content AND recent
+//      (mtime < staleHours). Projects that hand-maintain the repo-root file
+//      (long-lived orchestrator sessions) otherwise pin the cell to
+//      whatever the projects-dir copy last said — observed 3 months stale.
+//   2. Same, flagged as (stale) when older than that.
 //   3. Last git commit subject — auto-refreshes every commit so the bar
 //      keeps reflecting actual work even when the file is never updated.
 //   4. empty.
@@ -526,7 +547,11 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
   // no room for the single-char ellipsis either. Treat bad input as "use
   // default" rather than producing garbage output.
   const safeMax = Number.isFinite(maxLen) && maxLen > 3 ? Math.floor(maxLen) : 40;
-  const fromFile = readSessionContextTask(projectDir);
+  const fromProj = readSessionContextTask(projectDir);
+  const cwdDir = findCwdContextDir(cwd);
+  const fromRepo = cwdDir ? readSessionContextTask(cwdDir) : null;
+  let fromFile = fromProj;
+  if (fromRepo && (!fromProj || fromRepo.mtimeMs > fromProj.mtimeMs)) fromFile = fromRepo;
   if (fromFile && fromFile.text) {
     const ageMs = Date.now() - fromFile.mtimeMs;
     const stale = ageMs > staleHours * 60 * 60 * 1000;
