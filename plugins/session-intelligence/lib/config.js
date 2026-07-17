@@ -39,9 +39,11 @@ const STATUSLINE_PRESETS = {
   //   Line 2: session activity + token economics — live "what's happening
   //           right now" row at eye level, just below the warning bar.
   //   Line 3: quota + cwd — Claude Code 5h / 7d usage plus working dir.
-  //           Data comes from the cached usage API (180 s TTL, refreshed
-  //           by a detached worker so the hot path never blocks on HTTPS).
+  //           Sourced from the statusline stdin rate_limits (CC ≥2.1.90);
+  //           the cached usage API remains as fallback for older builds.
   //   Line 4: identity / repo / task — dim reference context at the bottom.
+  //   Line 5: per-model spend split — which models this session's dollars
+  //           went to (share of transcript cost, top 4 models).
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
@@ -50,8 +52,10 @@ const STATUSLINE_PRESETS = {
     'branch', 'diffstat', 'cwd', 'activeRoot',
     'newline',
     'model', 'weekUsage', 'outputStyle', 'thinking', 'task',
+    'newline',
+    'modelSplit',
   ],
-  // Token-economics focus — same 4-line skeleton, adds cacheTokens.
+  // Token-economics focus — same skeleton, adds cacheTokens + modelSplit.
   'verbose-cache':  [
     'tokens', 'compactAge', 'compactCost',
     'newline',
@@ -60,6 +64,8 @@ const STATUSLINE_PRESETS = {
     'weekUsage', 'blockUsage', 'cwd',
     'newline',
     'model', 'project', 'task',
+    'newline',
+    'modelSplit',
   ],
 };
 

@@ -183,3 +183,26 @@ test('totalsFromTranscript prices each turn by its own model', () => {
   assert.ok(Math.abs(out.cost - 130) < 1e-6, `expected 5 + 50 + 75 = 130, got ${out.cost}`);
   fs.unlinkSync(path_);
 });
+
+test('totalsFromTranscript accumulates per-model cost buckets', () => {
+  const now = '2026-07-17T10:00:00.000Z';
+  const path_ = writeTranscript([
+    { type: 'assistant', timestamp: now, message: { id: 'bm1', model: 'claude-fable-5', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } }, // $50
+    { type: 'assistant', timestamp: now, message: { id: 'bm2', model: 'claude-haiku-4-5-20251001', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } }, // $5
+    { type: 'assistant', timestamp: now, message: { id: 'bm3', model: 'claude-fable-5', usage: {
+      input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 1_000_000,
+    } } }, // $50 more fable
+  ]);
+  const sid = 'bymodel-test-' + Date.now();
+  const out = costEst.totalsFromTranscript(path_, sid);
+  assert.ok(Math.abs(out.byModel['claude-fable-5'] - 100) < 1e-6, `fable=${out.byModel['claude-fable-5']}`);
+  assert.ok(Math.abs(out.byModel['claude-haiku-4-5-20251001'] - 5) < 1e-6);
+  // Cached second read returns the same buckets (round-trips through the v4 cache).
+  const out2 = costEst.totalsFromTranscript(path_, sid);
+  assert.deepEqual(out2.byModel, out.byModel);
+  fs.unlinkSync(path_);
+});

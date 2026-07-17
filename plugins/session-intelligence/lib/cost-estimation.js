@@ -130,19 +130,19 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
  * read picks up from the offset, so only tail-bytes get re-counted for saved).
  */
 function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0 };
+  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {} };
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
   let stat;
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v3: costs are accumulated with per-turn model pricing (each line's
-  // `message.model` looked up via knownPriceForModel; the `prices` arg is
-  // only the unknown-model fallback). v2 accumulated everything at one flat
-  // price list, so mixing the two in one cache would blend pricing modes.
-  // Old v1/v2 cache files are abandoned (TMPDIR cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v3`);
+  // v4: adds per-model cost buckets (`byModel`) for the modelSplit field.
+  // v3 introduced per-turn model pricing (each line's `message.model`
+  // looked up via knownPriceForModel; the `prices` arg is only the
+  // unknown-model fallback). Older cache files are abandoned (TMPDIR
+  // cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -152,6 +152,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedCacheRead = 0;
   let cachedCreation = 0;
   let cachedSeenIds = [];
+  let cachedByModel = {};
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -164,6 +165,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
       cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
+      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
   const seen = new Set(cachedSeenIds);
@@ -172,6 +174,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   if (stat.size < cachedOffset) {
     cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
     cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+    cachedByModel = {};
     seen.clear();
   }
   if (stat.size === cachedOffset) {
@@ -179,6 +182,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -189,6 +193,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let newCacheRead = cachedCacheRead;
   let newCreation = cachedCreation;
   let newOffset = cachedOffset;
+  const byModel = { ...cachedByModel };
   try {
     const fd = fs.openSync(transcriptPath, 'r');
     try {
@@ -217,8 +222,11 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
               // Opus turns inside a Sonnet session, model switches). Fall
               // back to the caller's price list only when the turn's model
               // is absent or unrecognized.
-              const linePrices = knownPriceForModel(d.message && d.message.model) || prices;
-              newCost += costFromUsage(u, linePrices);
+              const lineModel = (d.message && d.message.model) || 'other';
+              const linePrices = knownPriceForModel(lineModel) || prices;
+              const lineCost = costFromUsage(u, linePrices);
+              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
+              newCost += lineCost;
               newSaved += savedFromUsage(u, linePrices);
               newInput += u.input_tokens || 0;
               newOutput += u.output_tokens || 0;
@@ -235,6 +243,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -244,6 +253,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
       seenIds: Array.from(seen),
+      byModel,
     }), 'utf8');
   } catch { /* best effort */ }
 
@@ -251,6 +261,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
     cost: newCost, saved: newSaved,
     input: newInput, output: newOutput,
     cached: newCacheRead, creation: newCreation,
+    byModel,
   };
 }
 

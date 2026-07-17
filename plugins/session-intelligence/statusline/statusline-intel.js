@@ -1437,6 +1437,27 @@ function buildRenderers(C) {
       return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
     },
 
+    /** Per-model share of this session's transcript spend, e.g.
+     *  `fable-5:72% opus-4-8:21% haiku-4-5:7%`. Answers "which models are
+     *  burning the budget" at a glance. Cost share (not token share) so a
+     *  cheap-but-chatty Haiku doesn't dwarf an expensive Fable turn. There
+     *  is no per-model QUOTA — stdin rate_limits only carries the two
+     *  account-wide windows — so share-of-session-spend is the honest
+     *  per-model percentage. Top 4 models; empty until usage exists. */
+    modelSplit: (_input, ctx) => {
+      const bm = ctx.tokenTotals && ctx.tokenTotals.byModel;
+      if (!bm) return '';
+      const entries = Object.entries(bm).filter(([, c]) => c > 0);
+      const total = entries.reduce((sum, [, c]) => sum + c, 0);
+      if (!entries.length || total <= 0) return '';
+      entries.sort((a, b) => b[1] - a[1]);
+      const parts = entries.slice(0, 4).map(([m, c]) => {
+        const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
+        return `${name}:${Math.round((c / total) * 100)}%`;
+      });
+      return `${C.dim}${parts.join(' ')}${C.reset}`;
+    },
+
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
      *  and middle-truncates when longer than 60 chars (keeps the leaf dir,
      *  which carries most of the signal). Dim — reference context only. */
@@ -1619,10 +1640,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v3: per-turn model pricing — see note in costsSinceCompact(). Shares
-  // the cache name with lib/cost-estimation.js so both renderers see the
-  // same offsets; the version MUST bump in both files together.
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v3`);
+  // v4: adds per-model cost buckets (byModel) for the modelSplit field.
+  // Shares the cache name with lib/cost-estimation.js so both renderers see
+  // the same offsets; the version MUST bump in both files together.
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -1632,6 +1653,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedCacheRead = 0;
   let cachedCreation = 0;
   let cachedSeenIds = [];
+  let cachedByModel = {};
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -1644,6 +1666,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
       cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
+      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
   const seen = new Set(cachedSeenIds);
@@ -1652,6 +1675,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   if (stat.size < cachedOffset) {
     cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
     cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+    cachedByModel = {};
   }
 
   // No new bytes — short-circuit the I/O entirely.
@@ -1660,6 +1684,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -1670,6 +1695,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let newCacheRead = cachedCacheRead;
   let newCreation = cachedCreation;
   let newOffset = cachedOffset;
+  const byModel = { ...cachedByModel };
   try {
     const fd = fs.openSync(transcriptPath, 'r');
     try {
@@ -1691,8 +1717,11 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
                 if (seen.has(mid)) continue;
                 seen.add(mid);
               }
-              const linePrices = knownPriceForModelSafe(d.message && d.message.model) || prices;
-              newCost += costFromUsage(u, linePrices);
+              const lineModel = (d.message && d.message.model) || 'other';
+              const linePrices = knownPriceForModelSafe(lineModel) || prices;
+              const lineCost = costFromUsage(u, linePrices);
+              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
+              newCost += lineCost;
               newSaved += savedFromUsage(u, linePrices);
               newInput += u.input_tokens || 0;
               newOutput += u.output_tokens || 0;
@@ -1709,6 +1738,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -1718,6 +1748,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
       seenIds: Array.from(seen),
+      byModel,
     }), 'utf8');
   } catch { /* best effort */ }
 
@@ -1725,6 +1756,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
     cost: newCost, saved: newSaved,
     input: newInput, output: newOutput,
     cached: newCacheRead, creation: newCreation,
+    byModel,
   };
 }
 
