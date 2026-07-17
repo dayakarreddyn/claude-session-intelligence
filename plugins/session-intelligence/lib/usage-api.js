@@ -64,6 +64,7 @@ function readUsageCache() {
     extraUsageLimit: typeof data.extraUsageLimit === 'number' ? data.extraUsageLimit : null,
     extraUsageUsed: typeof data.extraUsageUsed === 'number' ? data.extraUsageUsed : null,
     extraUsageUtilization: typeof data.extraUsageUtilization === 'number' ? data.extraUsageUtilization : null,
+    modelQuotas: (data.modelQuotas && typeof data.modelQuotas === 'object') ? data.modelQuotas : null,
     error: typeof data.error === 'string' ? data.error : null,
     fetchedAt: typeof data.fetchedAt === 'number' ? data.fetchedAt : null,
     // When these numbers were last actually true — error caches carry the

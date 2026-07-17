@@ -151,9 +151,11 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', st
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
+  // `used/available%` — how much is gone AND how much is left, at a glance.
   // `~` marks a value carried over from the last successful fetch while the
   // usage API is erroring (rate-limited etc.) — stale but better than blank.
-  const pctStr = `${stale ? '~' : ''}${pct}%`;
+  const avail = Math.max(0, 100 - pct);
+  const pctStr = `${stale ? '~' : ''}${pct}/${avail}%`;
   let head;
   if (colourMode === 'dim') {
     head = `${C.dim}${label}:${pctStr}${C.reset}`;
@@ -1453,9 +1455,43 @@ function buildRenderers(C) {
       entries.sort((a, b) => b[1] - a[1]);
       const parts = entries.slice(0, 4).map(([m, c]) => {
         const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
-        return `${name}:${Math.round((c / total) * 100)}%`;
+        const usd = fmtUsd(c);
+        return `${name}:${usd ? usd + '\u00b7' : ''}${Math.round((c / total) * 100)}%`;
       });
       return `${C.dim}${parts.join(' ')}${C.reset}`;
+    },
+
+    /** Per-model QUOTA used/available — dormant until real data exists.
+     *  Neither stdin rate_limits (only five_hour/seven_day account windows)
+     *  nor this account's oauth payload carries per-model limits today: the
+     *  schema HAS seven_day_opus/_sonnet/_cowork buckets but they're null
+     *  on plans without per-model limits (verified 2026-07-17 via a raw
+     *  200). Sources, both future-proof: (1) any extra rate_limits key on
+     *  stdin with a used_percentage, (2) modelQuotas captured by the usage
+     *  worker from non-null seven_day_<model> buckets. Renders e.g.
+     *  `opus:12/88% sonnet:4/96%` the day either source lights up. */
+    modelQuota: (input, _ctx) => {
+      const parts = [];
+      const rl = (input && input.rate_limits) || {};
+      for (const [k, v] of Object.entries(rl)) {
+        if (k === 'five_hour' || k === 'seven_day') continue;
+        if (v && typeof v.used_percentage === 'number') {
+          const name = k.replace(/^(five_hour|seven_day)_/, '');
+          const used = Math.round(v.used_percentage);
+          parts.push(`${name}:${used}/${Math.max(0, 100 - used)}%`);
+        }
+      }
+      if (!parts.length) {
+        const u = loadUsage();
+        if (u && u.modelQuotas) {
+          for (const [name, q] of Object.entries(u.modelQuotas)) {
+            if (!q || typeof q.utilization !== 'number') continue;
+            const used = Math.round(q.utilization);
+            parts.push(`${name}:${u.error ? '~' : ''}${used}/${Math.max(0, 100 - used)}%`);
+          }
+        }
+      }
+      return parts.length ? `${C.dim}${parts.join(' ')}${C.reset}` : '';
     },
 
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`

@@ -179,3 +179,14 @@ test('triggerRefresh applies the default backoff to errors without Retry-After',
     assert.equal(api.triggerRefresh(), false);
   });
 });
+
+test('readUsageCache passes through modelQuotas', () => {
+  withTempCache(({ api }) => {
+    fs.writeFileSync(api.cacheFilePath(), JSON.stringify({
+      sessionUsage: 7, weeklyUsage: 38, fetchedAt: Date.now(),
+      modelQuotas: { opus: { utilization: 12, resetsAt: null } },
+    }));
+    const got = api.readUsageCache();
+    assert.equal(got.modelQuotas.opus.utilization, 12);
+  });
+});

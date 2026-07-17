@@ -115,6 +115,11 @@ function fetchUsage(token) {
             sessionResetAt: parsed && parsed.five_hour && parsed.five_hour.resets_at || null,
             weeklyUsage: numOrNull(parsed && parsed.seven_day && parsed.seven_day.utilization),
             weeklyResetAt: parsed && parsed.seven_day && parsed.seven_day.resets_at || null,
+            // Per-model weekly buckets (seven_day_opus, seven_day_sonnet,
+            // seven_day_cowork, ...). Present in the schema but null unless
+            // the plan has per-model limits — captured so modelQuota lights
+            // up the moment Anthropic populates them.
+            modelQuotas: extractModelQuotas(parsed),
             extraUsageEnabled: !!(parsed && parsed.extra_usage && parsed.extra_usage.is_enabled),
             extraUsageLimit: numOrNull(parsed && parsed.extra_usage && parsed.extra_usage.monthly_limit),
             extraUsageUsed: numOrNull(parsed && parsed.extra_usage && parsed.extra_usage.used_credits),
@@ -133,6 +138,25 @@ function numOrNull(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+/**
+ * Collect non-null per-model weekly buckets from the raw payload:
+ * `seven_day_<model>` keys with a numeric utilization. Returns e.g.
+ * `{ opus: { utilization: 12, resetsAt: '...' } }`, or null when the plan
+ * has no per-model limits (the common case — buckets exist but are null).
+ */
+function extractModelQuotas(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    const m = /^seven_day_([a-z0-9_]+)$/.exec(k);
+    if (!m || !v || typeof v !== 'object') continue;
+    const util = numOrNull(v.utilization);
+    if (util === null) continue;
+    out[m[1]] = { utilization: util, resetsAt: v.resets_at || null };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /** `Retry-After` is either delta-seconds or an HTTP-date. Null when absent/garbage. */
 function parseRetryAfterMs(header) {
   if (header === undefined || header === null || header === '') return null;
@@ -148,6 +172,7 @@ function parseRetryAfterMs(header) {
 const CARRY_FIELDS = [
   'sessionUsage', 'sessionResetAt', 'weeklyUsage', 'weeklyResetAt',
   'extraUsageEnabled', 'extraUsageLimit', 'extraUsageUsed', 'extraUsageUtilization',
+  'modelQuotas',
 ];
 
 /**
@@ -194,4 +219,4 @@ if (require.main === module) {
   main().catch(() => clearLock());
 }
 
-module.exports = { readToken, fetchUsage, parseRetryAfterMs, buildCachePayload };
+module.exports = { readToken, fetchUsage, parseRetryAfterMs, buildCachePayload, extractModelQuotas };

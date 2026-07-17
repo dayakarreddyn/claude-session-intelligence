@@ -53,7 +53,7 @@ const STATUSLINE_PRESETS = {
     'newline',
     'model', 'weekUsage', 'outputStyle', 'thinking', 'task',
     'newline',
-    'modelSplit',
+    'modelSplit', 'modelQuota',
   ],
   // Token-economics focus — same skeleton, adds cacheTokens + modelSplit.
   'verbose-cache':  [
@@ -65,7 +65,7 @@ const STATUSLINE_PRESETS = {
     'newline',
     'model', 'project', 'task',
     'newline',
-    'modelSplit',
+    'modelSplit', 'modelQuota',
   ],
 };
 

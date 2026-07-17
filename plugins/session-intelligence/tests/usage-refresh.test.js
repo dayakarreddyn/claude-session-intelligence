@@ -63,3 +63,25 @@ test('buildCachePayload with no previous cache is just the error', () => {
   assert.equal(out.error, 'no-credentials');
   assert.equal(out.sessionUsage, undefined);
 });
+
+test('extractModelQuotas returns null when all per-model buckets are null', () => {
+  const { extractModelQuotas } = require('../lib/usage-refresh');
+  assert.equal(extractModelQuotas({
+    five_hour: { utilization: 7 }, seven_day: { utilization: 38 },
+    seven_day_opus: null, seven_day_sonnet: null, seven_day_cowork: null,
+  }), null);
+  assert.equal(extractModelQuotas(null), null);
+});
+
+test('extractModelQuotas captures populated seven_day_<model> buckets', () => {
+  const { extractModelQuotas } = require('../lib/usage-refresh');
+  const out = extractModelQuotas({
+    seven_day: { utilization: 38 },
+    seven_day_opus: { utilization: 12.4, resets_at: '2026-07-20T05:00:00Z' },
+    seven_day_sonnet: { utilization: 3 },
+    seven_day_cowork: null,
+  });
+  assert.deepEqual(Object.keys(out).sort(), ['opus', 'sonnet']);
+  assert.equal(out.opus.utilization, 12.4);
+  assert.equal(out.opus.resetsAt, '2026-07-20T05:00:00Z');
+});
