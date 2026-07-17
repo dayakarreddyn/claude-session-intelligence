@@ -185,12 +185,8 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', st
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
-  // Used + explicit `free:` remainder — the earlier `15/85%` slash form
-  // kept being read as a fraction ("15 of 85?"), so the availability half
-  // now carries its own label. `~` marks a value carried over from the
-  // last successful fetch while the usage API is erroring (rate-limited
-  // etc.) — stale but better than blank.
-  const avail = Math.max(0, 100 - pct);
+  // `~` marks a value carried over from the last successful fetch while
+  // the usage API is erroring (rate-limited etc.) — stale, better than blank.
   const pctStr = `${stale ? '~' : ''}${pct}%`;
   let head;
   if (colourMode === 'dim') {
@@ -202,7 +198,6 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', st
     else if (pct >= 60) col = C.yellow;
     head = `${col}${label}:${pctStr}${C.reset}`;
   }
-  head += ` ${C.dim}free:${avail}%${C.reset}`;
   // `r:` prefix on the reset duration keeps the cell self-explanatory.
   // Plain-space separator inside the cell — the outer `·` between fields
   // is the field boundary, so we skip it within a single usage cell.
@@ -1462,11 +1457,29 @@ function buildRenderers(C) {
     blockUsage: (input, _ctx) => {
       const fh = input && input.rate_limits && input.rate_limits.five_hour;
       if (fh && typeof fh.used_percentage === 'number') {
-        return _renderUsageCellImpl('b', fh.used_percentage, fh.resets_at, C, 'dim', false);
+        return _renderUsageCellImpl('b', fh.used_percentage, null, C, 'dim', false);
       }
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
-      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!u.error);
+      return _renderUsageCellImpl('b', u.sessionUsage, null, C, 'dim', !!u.error);
+    },
+
+    /** Countdown until the current 5-hour block resets, `blk:2h29m`.
+     *  Line-2 sibling of the line-5 `b:` usage cell — the timer is a
+     *  "when do I get budget back" signal that belongs next to session
+     *  duration, per user feedback. Same stdin-first sourcing. */
+    blockTimer: (input, _ctx) => {
+      let resetAt = null;
+      const fh = input && input.rate_limits && input.rate_limits.five_hour;
+      if (fh && fh.resets_at) resetAt = fh.resets_at;
+      if (!resetAt) {
+        const u = loadUsage();
+        if (u && u.sessionResetAt) resetAt = u.sessionResetAt;
+      }
+      if (!resetAt) return '';
+      const ms = resetAtMs(resetAt) - Date.now();
+      if (!Number.isFinite(ms) || ms <= 0) return '';
+      return `${C.dim}blk:${fmtDurationTight(ms)}${C.reset}`;
     },
 
     /** Weekly (7-day) usage + time until reset. Same shape and source
