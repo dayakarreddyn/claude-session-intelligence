@@ -185,11 +185,13 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', st
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
-  // `used/available%` — how much is gone AND how much is left, at a glance.
-  // `~` marks a value carried over from the last successful fetch while the
-  // usage API is erroring (rate-limited etc.) — stale but better than blank.
+  // Used + explicit `free:` remainder — the earlier `15/85%` slash form
+  // kept being read as a fraction ("15 of 85?"), so the availability half
+  // now carries its own label. `~` marks a value carried over from the
+  // last successful fetch while the usage API is erroring (rate-limited
+  // etc.) — stale but better than blank.
   const avail = Math.max(0, 100 - pct);
-  const pctStr = `${stale ? '~' : ''}${pct}/${avail}%`;
+  const pctStr = `${stale ? '~' : ''}${pct}%`;
   let head;
   if (colourMode === 'dim') {
     head = `${C.dim}${label}:${pctStr}${C.reset}`;
@@ -200,6 +202,7 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', st
     else if (pct >= 60) col = C.yellow;
     head = `${col}${label}:${pctStr}${C.reset}`;
   }
+  head += ` ${C.dim}free:${avail}%${C.reset}`;
   // `r:` prefix on the reset duration keeps the cell self-explanatory.
   // Plain-space separator inside the cell — the outer `·` between fields
   // is the field boundary, so we skip it within a single usage cell.
