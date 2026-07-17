@@ -201,3 +201,27 @@ test('AUTOFILL_SENTINEL_RE matches a range of SHA lengths', () => {
   assert.doesNotMatch('<!-- si:autofill sha=xyz1234 -->', AUTOFILL_SENTINEL_RE); // non-hex
   assert.doesNotMatch('<!-- autofill sha=abcd1234 -->', AUTOFILL_SENTINEL_RE);   // missing prefix
 });
+
+test('readSessionContext matches annotated Current Task headings', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-ctx-annot-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'session-context.md'), [
+      '# Session Context',
+      '',
+      '## Current Task — #1695 Phase 2 (import-duration) — scope on start',
+      '**NEXT: #1695 P2 import-dur** — plan doc first.',
+      '',
+      '## Current Taskforce notes',
+      'must NOT be picked up — different word, not an annotation',
+      '',
+      '## Key Files (auto)',
+      '- products/mm/app/import.py',
+    ].join('\n'));
+    const r = readSessionContext(dir);
+    assert.match(r.currentTask, /NEXT: #1695 P2 import-dur/);
+    assert.doesNotMatch(r.currentTask, /Taskforce/);
+    assert.match(r.keyFiles, /import\.py/);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});

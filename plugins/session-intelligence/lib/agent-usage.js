@@ -184,6 +184,95 @@ function listWorkflowAgentTranscripts({ cwd, projectsRoot: projectsRootOverride 
 }
 
 /**
+ * List every plain (non-workflow) subagent transcript for a project:
+ *   ~/.claude/projects/<encoded-cwd>/<parent-sid>/subagents/agent-<id>.jsonl
+ *
+ * Companion to listWorkflowAgentTranscripts, which only walks the
+ * `subagents/workflows/` layer below this one. Needed because Agent/Task
+ * calls now run in the background by default: at PostToolUse time the
+ * transcript usually hasn't flushed any usage yet, so si-agent-tracker
+ * records the row with NULL model/tokens/cost. A SessionStart reconcile
+ * re-reads these completed transcripts to fill the gaps.
+ *
+ * `sinceMs` (ms epoch) skips files whose mtime is older — the reconcile
+ * only targets recent unfilled rows, so there's no reason to re-parse
+ * months of transcript history every session. Returns `[{ path, sid,
+ * mtimeMs }]`, newest first. Same cwd-encoding caveat as the other walkers.
+ */
+function listPlainSubagentTranscripts({ cwd, projectsRoot: projectsRootOverride, sinceMs = 0 } = {}) {
+  const enc = encodeProjectPath(cwd);
+  if (!enc) return [];
+  const projDir = path.join(projectsRoot(projectsRootOverride), enc);
+  let sidEntries;
+  try { sidEntries = fs.readdirSync(projDir, { withFileTypes: true }); } catch { return []; }
+
+  const out = [];
+  for (const sidEnt of sidEntries) {
+    if (!sidEnt.isDirectory()) continue;
+    const dir = path.join(projDir, sidEnt.name, 'subagents');
+    for (const c of listCandidates(dir)) {
+      if (c.mtimeMs < sinceMs) continue;
+      out.push({ path: c.path, sid: sidEnt.name, mtimeMs: c.mtimeMs });
+    }
+  }
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return out;
+}
+
+/** Path of the PARENT session's transcript for a sid under this project. */
+function parentTranscriptPathFor(cwd, sid, projectsRootOverride) {
+  const enc = encodeProjectPath(cwd);
+  if (!enc || !sid) return null;
+  return path.join(projectsRoot(projectsRootOverride), enc, `${sid}.jsonl`);
+}
+
+function _blockText(block) {
+  if (typeof block.content === 'string') return block.content;
+  if (Array.isArray(block.content)) {
+    return block.content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
+  }
+  return '';
+}
+
+/**
+ * Map subagent agentId → launching Agent-tool tool_use_id by scanning the
+ * PARENT session transcript. Newer Claude Code builds (2.1.x) stopped
+ * writing `parentToolUseId` into subagent transcript lines, so the pairing
+ * has to come from the parent side, where it appears twice per agent:
+ *   - the launch ack — a tool_result block for the tool_use_id whose text
+ *     carries "agentId: <id>"
+ *   - the completion notification — "<task-id><id></task-id>" and
+ *     "<tool-use-id><toolu_...></tool-use-id>" inside one message
+ * A cheap substring prefilter keeps this fast on multi-MB transcripts.
+ */
+function mapAgentToolUseIds(parentTranscriptPath) {
+  const map = new Map();
+  if (!parentTranscriptPath) return map;
+  let raw;
+  try { raw = fs.readFileSync(parentTranscriptPath, 'utf8'); } catch { return map; }
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    if (!line.includes('agentId') && !line.includes('task-id')) continue;
+    let d;
+    try { d = JSON.parse(line); } catch { continue; }
+    const content = d && d.message && d.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block) continue;
+      if (block.type === 'tool_result' && block.tool_use_id) {
+        const m = /\bagentId:\s*([A-Za-z0-9_-]+)/.exec(_blockText(block));
+        if (m) map.set(m[1], block.tool_use_id);
+      } else if (block.type === 'text' && typeof block.text === 'string') {
+        const tid = /<task-id>([A-Za-z0-9_-]+)<\/task-id>/.exec(block.text);
+        const tuid = /<tool-use-id>(toolu_[A-Za-z0-9_-]+)<\/tool-use-id>/.exec(block.text);
+        if (tid && tuid) map.set(tid[1], tuid[1]);
+      }
+    }
+  }
+  return map;
+}
+
+/**
  * Find the subagent transcript most likely to belong to the Task call we
  * just observed. `windowMs` is how far back to look; the default is wide
  * enough to cover slow subagents but tight enough that an unrelated older
@@ -219,4 +308,7 @@ module.exports = {
   readSubagentTranscript,
   findUsageForTask,
   listWorkflowAgentTranscripts,
+  listPlainSubagentTranscripts,
+  parentTranscriptPathFor,
+  mapAgentToolUseIds,
 };

@@ -80,6 +80,25 @@ function parseSessionContext(content) {
 }
 
 /**
+ * Fetch a section body by title, tolerating annotated headings. Hand-
+ * maintained files often extend the heading in place — e.g.
+ * `## Current Task — #1695 Phase 2 (import-duration)` — which an exact-key
+ * lookup misses entirely (observed: a fresh repo-root file parsed as
+ * empty, pinning the statusline task cell to a 3-month-old value).
+ * Exact title wins; otherwise the first section whose title starts with
+ * `title` followed by a non-word boundary is used.
+ */
+function sectionByTitle(sections, title) {
+  if (sections[title] !== undefined) return sections[title] || '';
+  for (const k of Object.keys(sections)) {
+    if (k.startsWith(title) && !/\w/.test(k.charAt(title.length))) {
+      return sections[k] || '';
+    }
+  }
+  return '';
+}
+
+/**
  * Read + parse `session-context.md` from a project directory.
  *
  * Returns an object with:
@@ -119,8 +138,8 @@ function readSessionContext(projectDir, opts) {
   }
 
   const sections = parseSessionContext(content);
-  const rawTask = sections['Current Task'] || '';
-  const rawKeyFiles = sections['Key Files'] || '';
+  const rawTask = sectionByTitle(sections, 'Current Task');
+  const rawKeyFiles = sectionByTitle(sections, 'Key Files');
   const isAutofill = AUTOFILL_SENTINEL_RE.test(rawTask);
 
   return {

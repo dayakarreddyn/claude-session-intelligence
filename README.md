@@ -257,7 +257,7 @@ Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — status
 
 ### Quota & reset timers (line 3)
 
-`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns, fed from the same `api.anthropic.com/api/oauth/usage` endpoint ccstatusline uses. A detached background worker (`lib/usage-refresh.js`) refreshes a disk cache every 180 s — the statusline hot path only reads the cache, so redraws stay sub-100 ms. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any failure (no creds, network down, API error) silently renders an empty cell — never blocks.
+`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns. On Claude Code ≥2.1.90 the data comes straight from the statusline stdin JSON (`rate_limits.five_hour` / `.seven_day`) — fresh every redraw, zero API requests. Older builds fall back to the `api.anthropic.com/api/oauth/usage` poller: a detached background worker (`lib/usage-refresh.js`) refreshes a disk cache (180 s TTL, honoring 429 `Retry-After` with a 5-minute error backoff), and while the endpoint errors the cache carries the last good values, rendered with a `~` stale marker. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any hard failure silently renders an empty cell — never blocks.
 
 ### Real token count
 
@@ -291,8 +291,11 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `cacheSaved` | `saved:$2.83` | **Cumulative** USD saved across the session by cache hits vs. paying the uncached input rate for the same tokens. Hidden when savings are under $0.10 (not worth the field) (dim) |
 | `compactAge` | `compact:2hr 13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
 | `compactCost` | `c$12.34 / s$68.20` | Cost + cache-savings accrued **since last /compact**. Incrementally cached at `/tmp/claude-cost-sincecompact-<sid>`, auto-invalidated when compact mtime advances. Shows `c$` only when ≥$0.01, `s$` only when ≥$0.10; hidden when both trivial (dim) |
-| `blockUsage` | `b:47% r:1hr 12m` | Claude's 5-hour block quota utilisation + time until reset. Data from cached `/api/oauth/usage` response (180s TTL, refreshed in background). % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95%. Empty cell when the cache is absent or errored |
-| `weekUsage` | `w:31% r:4d 12hr` | Weekly (7-day) quota utilisation + time until reset. Same colour escalation as `blockUsage` |
+| `blockUsage` | `b:47% r:1hr 12m` | Claude's 5-hour block quota used + reset countdown; leads line 2 next to session duration + time until reset. Sourced from statusline stdin `rate_limits` (CC ≥2.1.90); cached `/api/oauth/usage` fallback for older builds, rendering last-good values with a `~` marker during API outages |
+| `weekUsage` | `w:31% r:4d 12hr` | Weekly (7-day) quota used + time until reset. Same sourcing as `blockUsage`; % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95% |
+| `modelSplit` | `fable-5:sc$80·sp99%·wr:~85%` | Per model: session cost (`sc$`), share of session spend (`sp%`), and estimated weekly window remaining (`wr:~%`). `wr` attributes the account weekly used% across models by their share of this week's tracked spend — an SI estimate (hence `~`), since Anthropic exposes no per-model weekly quota. Parent-session splits are recorded to `session_model_costs` on each redraw, so the weekly attribution gets richer as sessions run |
+| `tokenSpeed` | `tps:238` | Output-token generation speed (tokens/sec) — median of the last few streamed turns, measured from per-message chunk-timestamp spans (pure generation time). Falls back to session average (total output / total API time) when the tail has no streamed turn |
+| `modelQuota` | `opus:12/88%` | Per-model QUOTA used/available — dormant until Anthropic populates per-model limits (stdin extra `rate_limits` keys or `seven_day_<model>` buckets in the usage payload; both are null on plans without per-model limits) |
 | `cwd` | `~/DWS/claude-session-intelligence` | Full working directory, ccstatusline-style. `$HOME` collapses to `~`; middle-ellipsis when longer than 60 chars (keeps the leaf) (dim) |
 | `activeRoot` | `→plugins/session-intelligence` | "Where Claude is touching files now" — latest non-blank `root` from the per-session shape log, complements `cwd`. Hidden when the latest root collapses to `.` (Claude is parked at cwd root) or matches `basename(cwd)` — those add no signal beyond `cwd`. To force a `→.` "still alive" indicator on flat-layout repos where everything is at the root, set `statusline.perProject["<abs cwd>"].activeRootShowAtRoot: true` (dim) |
 | `siHealth` | `⚠ si-off (run /si doctor)` | **Self-diagnosis tag.** Empty when SI is healthy on this project (silence = success), red warning when the project's `enabledPlugins` whitelist is suppressing SI. Without this the dark state is invisible — the bar still renders (statusline is wired separately) but every SI-fed field stays blank forever and there's no way to distinguish "nothing happened yet" from "hooks are off." The tag points users at `/si doctor` for the verbose remediation block |
@@ -312,7 +315,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 4 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `session`, `blockUsage`, `sessionId`, `costSaved`, `tools`, `tokenFlow` — live activity · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `weekUsage`, `outputStyle`, `thinking`, `task` — dim reference context |
+| `verbose` (default) | 5 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `blockUsage`, `session`, `sessionId`, `costSaved`, `tools`, `tokenFlow`, `tokenSpeed` — live activity · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `outputStyle`, `thinking`, `task` — dim reference context · L5: `weekUsage`, `modelQuota`, `modelSplit` — weekly quota, per-model quota (dormant until plans have per-model limits), per-model spend |
 | `verbose-cache` | 4 lines, token-economics-focused. Same shape as `verbose` with `cacheTokens` appended to L2; L4 trimmed to model/project/task |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
@@ -856,7 +859,7 @@ Large tool responses (Read on a big file, Bash log dump, Grep with many hits) si
 `si-tool-archive.js` is a **PostToolUse** hook that snapshots tool responses larger than `toolArchive.thresholdChars` (default 4096) to:
 
 ```
-${TMPDIR}/claude-tool-archive-<sid>/<tool_use_id>.json
+~/.claude/state/claude-tool-archive-<sid>/<tool_use_id>.json
 ```
 
 After `/compact` wipes the body from context, replay it with:

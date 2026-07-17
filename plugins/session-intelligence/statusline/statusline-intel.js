@@ -107,6 +107,67 @@ function loadUsageApiLib() {
   return null;
 }
 
+function loadTokenSpeedLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'token-speed.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
+// Per-session subagent spend by model, from the events DB. Lazy + cached
+// per process; returns [] when the lib or DB is unavailable so the
+// statusline never blocks on sqlite. Subagents bill in their own
+// transcripts — without this the modelSplit line only ever showed the
+// parent conversation's model.
+let _eventsLibCached = undefined;
+function loadEventsLib() {
+  if (_eventsLibCached !== undefined) return _eventsLibCached;
+  _eventsLibCached = null;
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  try {
+    const p = path.join(dir, 'events.js');
+    if (fs.existsSync(p)) _eventsLibCached = require(p);
+  } catch { _eventsLibCached = null; }
+  return _eventsLibCached;
+}
+
+let _agentCostsCached = undefined;
+function agentModelCostsSafe(sid) {
+  if (_agentCostsCached !== undefined) return _agentCostsCached;
+  _agentCostsCached = [];
+  if (!sid) return _agentCostsCached;
+  const events = loadEventsLib();
+  try {
+    if (events && typeof events.agentModelCosts === 'function') {
+      _agentCostsCached = events.agentModelCosts(sid) || [];
+    }
+  } catch { _agentCostsCached = []; }
+  return _agentCostsCached;
+}
+
+// Per-model price lookup from lib/cost-estimation.js — keeps the pricing
+// table in ONE place. Optional like every lib load here: when absent, the
+// accumulators fall back to the flat `prices` argument for every turn.
+let _costLibCached = undefined;
+function knownPriceForModelSafe(modelId) {
+  if (_costLibCached === undefined) {
+    const dir = resolveLibDir();
+    _costLibCached = null;
+    if (dir) {
+      const p = path.join(dir, 'cost-estimation.js');
+      try { if (fs.existsSync(p)) _costLibCached = require(p); }
+      catch { _costLibCached = null; }
+    }
+  }
+  if (!_costLibCached || typeof _costLibCached.knownPriceForModel !== 'function') return null;
+  try { return _costLibCached.knownPriceForModel(modelId); }
+  catch { return null; }
+}
+
 // Cached per-process so blockUsage + weekUsage share one disk read + one
 // "should we kick off a background refresh" decision per render.
 let _usageCached = undefined;
@@ -124,7 +185,7 @@ function loadUsage() {
 // soon-to-exhaust quota reads at a glance (weekly, where the signal is
 // load-bearing). 'dim' keeps the cell muted to match the rest of the row
 // (5h block, where the percent matters less than the countdown).
-function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
+function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone', stale = false) {
   if (typeof pctRaw !== 'number' || !Number.isFinite(pctRaw)) return '';
   const pct = Math.round(pctRaw);
   let resetStr = '';
@@ -132,15 +193,18 @@ function _renderUsageCellImpl(label, pctRaw, resetAt, C, colourMode = 'zone') {
     const ms = resetAtMs(resetAt) - Date.now();
     if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
   }
+  // `~` marks a value carried over from the last successful fetch while
+  // the usage API is erroring (rate-limited etc.) — stale, better than blank.
+  const pctStr = `${stale ? '~' : ''}${pct}%`;
   let head;
   if (colourMode === 'dim') {
-    head = `${C.dim}${label}:${pct}%${C.reset}`;
+    head = `${C.dim}${label}:${pctStr}${C.reset}`;
   } else {
     let col = C.green;
     if (pct >= 95) col = C.red;
     else if (pct >= 85) col = C.orange;
     else if (pct >= 60) col = C.yellow;
-    head = `${col}${label}:${pct}%${C.reset}`;
+    head = `${col}${label}:${pctStr}${C.reset}`;
   }
   // `r:` prefix on the reset duration keeps the cell self-explanatory.
   // Plain-space separator inside the cell — the outer `·` between fields
@@ -451,7 +515,7 @@ function readSessionContextTask(projectDir) {
     }
     const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
     if (isPlaceholder(firstLine)) return null;
-    const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+    const cleaned = firstLine.replace(/^[-*#\s]+/, '').replace(/\*\*/g, '').trim();
     return cleaned ? { text: cleaned, mtimeMs } : null;
   }
 
@@ -487,14 +551,35 @@ function readSessionContextTask(projectDir) {
 
   const firstLine = body.split('\n').find((l) => l.trim().length > 0) || '';
   if (isPlaceholder(firstLine)) return null;
-  const cleaned = firstLine.replace(/^[-*#\s]+/, '').trim();
+  const cleaned = firstLine.replace(/^[-*#\s]+/, '').replace(/\*\*/g, '').trim();
   return cleaned ? { text: cleaned, mtimeMs } : null;
+}
+
+// Nearest ancestor of cwd (inclusive) holding a session-context.md — some
+// projects maintain the file at the repo root by hand instead of (or as
+// well as) the ~/.claude/projects/<encoded>/ copy SI seeds. Bounded walk so
+// a deep cwd can't turn the statusline hot path into a filesystem crawl.
+function findCwdContextDir(cwd) {
+  if (!cwd) return null;
+  const home = os.homedir();
+  let dir = cwd;
+  for (let i = 0; i < 8; i++) {
+    try { if (fs.existsSync(path.join(dir, 'session-context.md'))) return dir; } catch { /* ignore */ }
+    const parent = path.dirname(dir);
+    if (!dir || dir === home || parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 // The `task` field answers the question "what am I working on?" in order
 // of freshness:
-//   1. session-context.md, if real content AND recent (mtime < staleHours).
-//   2. session-context.md flagged as (stale) when older than that.
+//   1. session-context.md — the FRESHER of the ~/.claude/projects/<encoded>/
+//      copy and a repo-root copy under cwd, if real content AND recent
+//      (mtime < staleHours). Projects that hand-maintain the repo-root file
+//      (long-lived orchestrator sessions) otherwise pin the cell to
+//      whatever the projects-dir copy last said — observed 3 months stale.
+//   2. Same, flagged as (stale) when older than that.
 //   3. Last git commit subject — auto-refreshes every commit so the bar
 //      keeps reflecting actual work even when the file is never updated.
 //   4. empty.
@@ -504,7 +589,11 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
   // no room for the single-char ellipsis either. Treat bad input as "use
   // default" rather than producing garbage output.
   const safeMax = Number.isFinite(maxLen) && maxLen > 3 ? Math.floor(maxLen) : 40;
-  const fromFile = readSessionContextTask(projectDir);
+  const fromProj = readSessionContextTask(projectDir);
+  const cwdDir = findCwdContextDir(cwd);
+  const fromRepo = cwdDir ? readSessionContextTask(cwdDir) : null;
+  let fromFile = fromProj;
+  if (fromRepo && (!fromProj || fromRepo.mtimeMs > fromProj.mtimeMs)) fromFile = fromRepo;
   if (fromFile && fromFile.text) {
     const ageMs = Date.now() - fromFile.mtimeMs;
     const stale = ageMs > staleHours * 60 * 60 * 1000;
@@ -522,21 +611,27 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
  * Claude's effective context cap for the active model.
  *
  *   1. Explicit `statusline.contextCap` in config wins (escape hatch).
- *   2. Legacy `[1m]` / `-1m` marker in the model id → 1M.
- *   3. Any Opus 4.x / 5.x or Sonnet 4.x — 1M. Newer Claude Code builds
- *      dropped the `[1m]` marker once 1M became the default for these
- *      models, so key off the family name instead.
- *   4. Fallback 200k.
+ *   2. `context_window.context_window_size` from the statusline stdin
+ *      JSON — Claude Code ≥2.1.90 reports the session's real window, which
+ *      beats any name-based guess.
+ *   3. Legacy `[1m]` / `-1m` marker in the model id → 1M.
+ *   4. Any Opus 4.x / 5.x, Sonnet 4.x / 5.x, or the Claude 5 family
+ *      (Fable / Mythos) — 1M. Newer Claude Code builds dropped the `[1m]`
+ *      marker once 1M became the default for these models, so key off the
+ *      family name instead.
+ *   5. Fallback 200k (Haiku-class models).
  */
 function contextCap(input, cfg) {
   if (cfg && Number.isFinite(cfg.contextCap) && cfg.contextCap > 0) {
     return cfg.contextCap;
   }
+  const cw = input && input.context_window && input.context_window.context_window_size;
+  if (Number.isFinite(cw) && cw > 0) return cw;
   const id = String(
     (input && input.model && (input.model.id || input.model.display_name)) || ''
   ).toLowerCase();
   if (/\[1m\]|-1m|\b1m\b|1000k|1000000/.test(id)) return 1000000;
-  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]/.test(id)) return 1000000;
+  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]|fable|mythos/.test(id)) return 1000000;
   return 200000;
 }
 
@@ -587,6 +682,7 @@ function zoneFor(tokens, zones) {
 }
 
 function fmtTokens(n) {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`; // 2.42B
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;  // 1.25M
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;      // 425.3k
   return String(n);
@@ -594,8 +690,12 @@ function fmtTokens(n) {
 
 // Tight token formatter for cells that need every column (bar numerics,
 // tokenFlow). Drops decimals when the value is large enough that they read
-// as noise — `124k` instead of `124.2k`, `26M` instead of `26.08M`.
+// as noise — `124k` instead of `124.2k`, `26M` instead of `26.08M`, and
+// rolls to B past a billion — `2.4B` instead of `2422M` (10-day sessions
+// really do get there).
 function fmtTokensTight(n) {
+  if (n >= 10_000_000_000) return `${Math.round(n / 1_000_000_000)}B`;
+  if (n >= 1_000_000_000)  return `${(n / 1_000_000_000).toFixed(1)}B`;
   if (n >= 10_000_000) return `${Math.round(n / 1_000_000)}M`;
   if (n >= 1_000_000)  return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 10_000)     return `${Math.round(n / 1_000)}k`;
@@ -760,11 +860,11 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v2: includes seenIds for streaming-snapshot dedupe. Same assistant
-  // message.id appears N times in the transcript (one row per stream chunk
-  // update), and the prior schema double-counted every snapshot. Old v1
-  // cache files are abandoned (TMPDIR cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v2`);
+  // v3: per-turn model pricing (each line's message.model is looked up;
+  // the flat `prices` arg only covers unknown models). v2 accumulated at
+  // one flat price list — mixing modes in one cache would blend pricing.
+  // Old v1/v2 cache files are abandoned (TMPDIR cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v3`);
 
   let cache = null;
   try {
@@ -805,8 +905,9 @@ function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
               if (seen.has(mid)) continue;
               seen.add(mid);
             }
-            cache.cost += costFromUsage(u, prices);
-            cache.saved += savedFromUsage(u, prices);
+            const linePrices = knownPriceForModelSafe(d.message && d.message.model) || prices;
+            cache.cost += costFromUsage(u, linePrices);
+            cache.saved += savedFromUsage(u, linePrices);
           } catch { /* skip bad line */ }
         }
         cache.offset += lastNl + 1;
@@ -1333,10 +1434,14 @@ function buildRenderers(C) {
 
     /** Percentage of the context window consumed. Replaces ccstatusline's
      *  `93.0%` signal so we can retire the 1.5 s `npx` spend. Uses zones.red
-     *  as the 100% reference — matches the token-bar cap. Zone-colored:
-     *    <60% green · 60-85% yellow · 85-95% orange · >=95% red */
-    contextPct: (_input, ctx) => {
-      const max = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
+     *  as the 100% reference (the compact-advisory ceiling from context-rot
+     *  research), clamped to 90% of the model's real window so a 200k-cap
+     *  model can actually reach 100% — with a 400k red line it never would.
+     *  Zone-colored: <60% green · 60-85% yellow · 85-95% orange · >=95% red */
+    contextPct: (input, ctx) => {
+      const zoneRed = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
+      const cap = contextCap(input, ctx.cfg);
+      const max = Math.min(zoneRed, Math.round(cap * 0.9));
       if (!ctx.tokens || ctx.tokens <= 0) return '';
       const pct = Math.round((ctx.tokens / max) * 100);
       let col = C.green;
@@ -1346,22 +1451,161 @@ function buildRenderers(C) {
       return `${col}ctx:${pct}%${C.reset}`;
     },
 
-    /** Claude Code 5-hour block usage + time until reset. Data from the
-     *  cached usage API (180 s TTL, refreshed by a detached worker). Shown
-     *  as `5h:47% · 3hr 12m` — percent then "resets in" duration. Empty
-     *  when the cache is absent or has an error marker. */
-    blockUsage: (_input, _ctx) => {
+    /** Claude Code 5-hour block usage + time until reset, as `b:47% · r:3hr12m`.
+     *
+     *  Source order:
+     *   1. `rate_limits.five_hour` from the statusline stdin JSON — Claude
+     *      Code ≥2.1.90 hands us the quota directly, fresh every redraw,
+     *      zero API requests.
+     *   2. Fallback for older builds: the cached /api/oauth/usage poller.
+     *      That endpoint aggressively 429s pollers (anthropic/claude-code
+     *      #31637, closed not-planned), so it's strictly a fallback; while
+     *      it errors the cache carries the last good values and the cell
+     *      renders them with a `~` marker instead of vanishing. */
+    blockUsage: (input, _ctx) => {
+      const fh = input && input.rate_limits && input.rate_limits.five_hour;
+      if (fh && typeof fh.used_percentage === 'number') {
+        return _renderUsageCellImpl('b', fh.used_percentage, fh.resets_at, C, 'dim', false);
+      }
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
-      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim');
+      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!u.error);
     },
 
-    /** Weekly (7-day) usage + time until reset. Same shape as blockUsage
-     *  with a `w` prefix. Format: `w:31% · r:4d 12hr`. */
-    weekUsage: (_input, _ctx) => {
+    /** Weekly (7-day) usage + time until reset. Same shape and source
+     *  order as blockUsage with a `w` prefix. Format: `w:31% · r:4d12hr`. */
+    weekUsage: (input, _ctx) => {
+      const sd = input && input.rate_limits && input.rate_limits.seven_day;
+      if (sd && typeof sd.used_percentage === 'number') {
+        return _renderUsageCellImpl('w', sd.used_percentage, sd.resets_at, C, 'zone', false);
+      }
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
-      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone');
+      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
+    },
+
+    /** Per-model share of this session's transcript spend, e.g.
+     *  `fable-5:72% opus-4-8:21% haiku-4-5:7%`. Answers "which models are
+     *  burning the budget" at a glance. Cost share (not token share) so a
+     *  cheap-but-chatty Haiku doesn't dwarf an expensive Fable turn. There
+     *  is no per-model QUOTA — stdin rate_limits only carries the two
+     *  account-wide windows — so share-of-session-spend is the honest
+     *  per-model percentage. Top 4 models; empty until usage exists. */
+    /** Output-token generation speed, `tps:235` (tokens/sec). Median of
+     *  the last few streamed turns — per-message chunk-timestamp spans are
+     *  pure generation time, so this tracks the model's real throughput
+     *  (fast mode, load, long-output turns all show up). Falls back to the
+     *  whole-session average (total output / total API time from stdin)
+     *  when no streamed turn in the tail is usable. */
+    tokenSpeed: (input, ctx) => {
+      let tps = null;
+      const lib = loadTokenSpeedLib();
+      if (lib && typeof lib.estimateTokenSpeed === 'function') {
+        try {
+          const est = lib.estimateTokenSpeed(input.transcript_path || input.transcriptPath);
+          if (est && Number.isFinite(est.tps) && est.tps > 0) tps = est.tps;
+        } catch { /* degrade to fallback */ }
+      }
+      if (tps === null) {
+        const apiMs = input && input.cost && input.cost.total_api_duration_ms;
+        const outTok = (ctx.tokenTotals && ctx.tokenTotals.output)
+          || (input && input.context_window && input.context_window.total_output_tokens);
+        if (Number.isFinite(apiMs) && apiMs > 0 && Number.isFinite(outTok) && outTok > 0) {
+          tps = outTok / (apiMs / 1000);
+        }
+      }
+      if (tps === null || !(tps > 0)) return '';
+      const v = tps >= 10 ? String(Math.round(tps)) : tps.toFixed(1);
+      return `${C.dim}tps:${v}${C.reset}`;
+    },
+
+    modelSplit: (input, ctx) => {
+      // Parent-conversation turns from the transcript accumulator...
+      const byModel = (ctx.tokenTotals && ctx.tokenTotals.byModel) || {};
+      const merged = { ...byModel };
+      // ...plus subagent runs from the events DB (their usage lives in
+      // separate transcripts and never appears in the parent transcript).
+      for (const row of agentModelCostsSafe(ctx.sessionId)) {
+        if (!row || !row.model || !(row.cost_usd > 0)) continue;
+        merged[row.model] = (merged[row.model] || 0) + row.cost_usd;
+      }
+      const entries = Object.entries(merged).filter(([, c]) => c > 0);
+      const total = entries.reduce((sum, [, c]) => sum + c, 0);
+      if (!entries.length || total <= 0) return '';
+      entries.sort((a, b) => b[1] - a[1]);
+
+      const events = loadEventsLib();
+      // Persist this session's per-model split so weeklyModelSpend can see
+      // parent-session spend across sessions (agents are already in the DB).
+      try {
+        if (events && typeof events.upsertSessionModelCosts === 'function' && ctx.sessionId) {
+          events.upsertSessionModelCosts(ctx.sessionId, byModel);
+        }
+      } catch { /* telemetry is best-effort */ }
+
+      // Per-model weekly-remaining ESTIMATE (`wr:~61%`): Anthropic exposes
+      // no per-model weekly quota (seven_day_<model> buckets are null on
+      // plans without per-model limits — verified 2026-07-17), so attribute
+      // the account weekly used% across models by their share of this
+      // week's tracked spend: wr(model) = 100 − weeklyUsed × spendShare.
+      // `~` marks it as SI's estimate, not an Anthropic number.
+      let weeklyUsed = null;
+      const sd = input && input.rate_limits && input.rate_limits.seven_day;
+      if (sd && typeof sd.used_percentage === 'number') weeklyUsed = sd.used_percentage;
+      let weekSpend = null;
+      if (weeklyUsed !== null && events && typeof events.weeklyModelSpend === 'function') {
+        try { weekSpend = events.weeklyModelSpend(); } catch { weekSpend = null; }
+      }
+      const weekTotal = weekSpend ? weekSpend.reduce((sum, r) => sum + (r.cost_usd || 0), 0) : 0;
+      const weekByModel = weekSpend
+        ? Object.fromEntries(weekSpend.map((r) => [r.model, r.cost_usd || 0]))
+        : {};
+
+      const parts = entries.slice(0, 4).map(([m, c]) => {
+        const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
+        const usd = fmtUsd(c);
+        let cell = `${name}:sc${usd || '$0'}\u00b7sp${Math.round((c / total) * 100)}%`;
+        if (weeklyUsed !== null && weekTotal > 0) {
+          const share = (weekByModel[m] || 0) / weekTotal;
+          const wr = Math.max(0, Math.min(100, Math.round(100 - weeklyUsed * share)));
+          cell += `\u00b7wr:~${wr}%`;
+        }
+        return cell;
+      });
+      return `${C.dim}${parts.join(' ')}${C.reset}`;
+    },
+
+    /** Per-model QUOTA used/available — dormant until real data exists.
+     *  Neither stdin rate_limits (only five_hour/seven_day account windows)
+     *  nor this account's oauth payload carries per-model limits today: the
+     *  schema HAS seven_day_opus/_sonnet/_cowork buckets but they're null
+     *  on plans without per-model limits (verified 2026-07-17 via a raw
+     *  200). Sources, both future-proof: (1) any extra rate_limits key on
+     *  stdin with a used_percentage, (2) modelQuotas captured by the usage
+     *  worker from non-null seven_day_<model> buckets. Renders e.g.
+     *  `opus:12/88% sonnet:4/96%` the day either source lights up. */
+    modelQuota: (input, _ctx) => {
+      const parts = [];
+      const rl = (input && input.rate_limits) || {};
+      for (const [k, v] of Object.entries(rl)) {
+        if (k === 'five_hour' || k === 'seven_day') continue;
+        if (v && typeof v.used_percentage === 'number') {
+          const name = k.replace(/^(five_hour|seven_day)_/, '');
+          const used = Math.round(v.used_percentage);
+          parts.push(`${name}:${used}/${Math.max(0, 100 - used)}%`);
+        }
+      }
+      if (!parts.length) {
+        const u = loadUsage();
+        if (u && u.modelQuotas) {
+          for (const [name, q] of Object.entries(u.modelQuotas)) {
+            if (!q || typeof q.utilization !== 'number') continue;
+            const used = Math.round(q.utilization);
+            parts.push(`${name}:${u.error ? '~' : ''}${used}/${Math.max(0, 100 - used)}%`);
+          }
+        }
+      }
+      return parts.length ? `${C.dim}${parts.join(' ')}${C.reset}` : '';
     },
 
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
@@ -1546,9 +1790,10 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v2: includes seenIds for streaming-snapshot dedupe. See note in
-  // costsSinceCompact() — old v1 cache files are abandoned.
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v2`);
+  // v4: adds per-model cost buckets (byModel) for the modelSplit field.
+  // Shares the cache name with lib/cost-estimation.js so both renderers see
+  // the same offsets; the version MUST bump in both files together.
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -1558,6 +1803,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedCacheRead = 0;
   let cachedCreation = 0;
   let cachedSeenIds = [];
+  let cachedByModel = {};
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -1570,6 +1816,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
       cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
+      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
   const seen = new Set(cachedSeenIds);
@@ -1578,6 +1825,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   if (stat.size < cachedOffset) {
     cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
     cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+    cachedByModel = {};
   }
 
   // No new bytes — short-circuit the I/O entirely.
@@ -1586,6 +1834,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -1596,6 +1845,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let newCacheRead = cachedCacheRead;
   let newCreation = cachedCreation;
   let newOffset = cachedOffset;
+  const byModel = { ...cachedByModel };
   try {
     const fd = fs.openSync(transcriptPath, 'r');
     try {
@@ -1617,8 +1867,12 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
                 if (seen.has(mid)) continue;
                 seen.add(mid);
               }
-              newCost += costFromUsage(u, prices);
-              newSaved += savedFromUsage(u, prices);
+              const lineModel = (d.message && d.message.model) || 'other';
+              const linePrices = knownPriceForModelSafe(lineModel) || prices;
+              const lineCost = costFromUsage(u, linePrices);
+              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
+              newCost += lineCost;
+              newSaved += savedFromUsage(u, linePrices);
               newInput += u.input_tokens || 0;
               newOutput += u.output_tokens || 0;
               newCacheRead += u.cache_read_input_tokens || 0;
@@ -1634,6 +1888,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -1643,6 +1898,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
       seenIds: Array.from(seen),
+      byModel,
     }), 'utf8');
   } catch { /* best effort */ }
 
@@ -1650,6 +1906,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
     cost: newCost, saved: newSaved,
     input: newInput, output: newOutput,
     cached: newCacheRead, creation: newCreation,
+    byModel,
   };
 }
 

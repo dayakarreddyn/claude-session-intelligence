@@ -38,28 +38,34 @@ const STATUSLINE_PRESETS = {
   //           `93.0%` signal so we can retire the 1.5s npx spend.
   //   Line 2: session activity + token economics — live "what's happening
   //           right now" row at eye level, just below the warning bar.
-  //   Line 3: quota + cwd — Claude Code 5h / 7d usage plus working dir.
-  //           Data comes from the cached usage API (180 s TTL, refreshed
-  //           by a detached worker so the hot path never blocks on HTTPS).
-  //   Line 4: identity / repo / task — dim reference context at the bottom.
+  //   Line 3: git + working dir delta.
+  //   Line 4: identity / repo / task — dim reference context.
+  //   Line 5: usage & models row — 5h/7d quota as used/available, per-model
+  //           quota (dormant until plans have per-model limits), and the
+  //           per-model spend split. All the "how much have I used / what
+  //           did it go to" signals in one bottom line.
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
-    'session', 'blockUsage', 'sessionId', 'costSaved', 'tools', 'tokenFlow',
+    'blockUsage', 'session', 'sessionId', 'costSaved', 'tools', 'tokenFlow', 'tokenSpeed',
     'newline',
     'branch', 'diffstat', 'cwd', 'activeRoot',
     'newline',
-    'model', 'weekUsage', 'outputStyle', 'thinking', 'task',
+    'model', 'outputStyle', 'thinking', 'task',
+    'newline',
+    'weekUsage', 'modelQuota', 'modelSplit',
   ],
-  // Token-economics focus — same 4-line skeleton, adds cacheTokens.
+  // Token-economics focus — same skeleton, adds cacheTokens.
   'verbose-cache':  [
     'tokens', 'compactAge', 'compactCost',
     'newline',
-    'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens',
+    'blockUsage', 'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens', 'tokenSpeed',
     'newline',
-    'weekUsage', 'blockUsage', 'cwd',
+    'cwd',
     'newline',
     'model', 'project', 'task',
+    'newline',
+    'weekUsage', 'modelQuota', 'modelSplit',
   ],
 };
 

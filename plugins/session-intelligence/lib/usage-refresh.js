@@ -98,7 +98,15 @@ function fetchUsage(token) {
       res.setEncoding('utf8');
       res.on('data', (chunk) => { body += chunk; });
       res.on('end', () => {
-        if (res.statusCode === 429) return resolve({ error: 'rate-limited' });
+        if (res.statusCode === 429) {
+          // Honor the server's backoff hint — usage-api.js suppresses
+          // refresh attempts until fetchedAt + retryAfterMs. Without this
+          // we re-hit the endpoint every ~30s for the whole outage.
+          return resolve({
+            error: 'rate-limited',
+            retryAfterMs: parseRetryAfterMs(res.headers['retry-after']),
+          });
+        }
         if (res.statusCode !== 200) return resolve({ error: 'api-error' });
         try {
           const parsed = JSON.parse(body);
@@ -107,6 +115,11 @@ function fetchUsage(token) {
             sessionResetAt: parsed && parsed.five_hour && parsed.five_hour.resets_at || null,
             weeklyUsage: numOrNull(parsed && parsed.seven_day && parsed.seven_day.utilization),
             weeklyResetAt: parsed && parsed.seven_day && parsed.seven_day.resets_at || null,
+            // Per-model weekly buckets (seven_day_opus, seven_day_sonnet,
+            // seven_day_cowork, ...). Present in the schema but null unless
+            // the plan has per-model limits — captured so modelQuota lights
+            // up the moment Anthropic populates them.
+            modelQuotas: extractModelQuotas(parsed),
             extraUsageEnabled: !!(parsed && parsed.extra_usage && parsed.extra_usage.is_enabled),
             extraUsageLimit: numOrNull(parsed && parsed.extra_usage && parsed.extra_usage.monthly_limit),
             extraUsageUsed: numOrNull(parsed && parsed.extra_usage && parsed.extra_usage.used_credits),
@@ -125,16 +138,78 @@ function numOrNull(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+/**
+ * Collect non-null per-model weekly buckets from the raw payload:
+ * `seven_day_<model>` keys with a numeric utilization. Returns e.g.
+ * `{ opus: { utilization: 12, resetsAt: '...' } }`, or null when the plan
+ * has no per-model limits (the common case — buckets exist but are null).
+ */
+function extractModelQuotas(parsed) {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    const m = /^seven_day_([a-z0-9_]+)$/.exec(k);
+    if (!m || !v || typeof v !== 'object') continue;
+    const util = numOrNull(v.utilization);
+    if (util === null) continue;
+    out[m[1]] = { utilization: util, resetsAt: v.resets_at || null };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** `Retry-After` is either delta-seconds or an HTTP-date. Null when absent/garbage. */
+function parseRetryAfterMs(header) {
+  if (header === undefined || header === null || header === '') return null;
+  const secs = Number(header);
+  if (Number.isFinite(secs) && secs >= 0) return Math.round(secs * 1000);
+  const date = Date.parse(String(header));
+  if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  return null;
+}
+
+// Fields worth surviving an API outage — the statusline renders these (with
+// a stale marker) instead of blanking the usage cells for the whole outage.
+const CARRY_FIELDS = [
+  'sessionUsage', 'sessionResetAt', 'weeklyUsage', 'weeklyResetAt',
+  'extraUsageEnabled', 'extraUsageLimit', 'extraUsageUsed', 'extraUsageUtilization',
+  'modelQuotas',
+];
+
+/**
+ * Build the cache payload for a fetch result. Success stamps `goodAt` (when
+ * these numbers were actually true). Errors carry the previous cache's good
+ * values forward — `goodAt` survives from the last success (older caches
+ * that predate the field fall back to the previous `fetchedAt`).
+ * Pure; exported for tests.
+ */
+function buildCachePayload(result, prev, now = Date.now()) {
+  if (!result || !result.error) return { ...result, goodAt: now };
+  const carried = {};
+  if (prev && typeof prev === 'object') {
+    for (const k of CARRY_FIELDS) {
+      if (prev[k] !== undefined && prev[k] !== null) carried[k] = prev[k];
+    }
+    const prevGoodAt = numOrNull(prev.goodAt) ?? (prev.error ? null : numOrNull(prev.fetchedAt));
+    if (prevGoodAt !== null) carried.goodAt = prevGoodAt;
+  }
+  return { ...carried, ...result };
+}
+
+function readPrevCache() {
+  try { return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); }
+  catch { return null; }
+}
+
 async function main() {
   if (isLockActive()) return;
   writeLock();
 
   try {
     const token = readToken();
-    if (!token) { writeCache({ error: 'no-credentials' }); return; }
+    if (!token) { writeCache(buildCachePayload({ error: 'no-credentials' }, readPrevCache())); return; }
 
     const result = await fetchUsage(token);
-    writeCache(result);
+    writeCache(buildCachePayload(result, readPrevCache()));
   } finally {
     clearLock();
   }
@@ -144,4 +219,4 @@ if (require.main === module) {
   main().catch(() => clearLock());
 }
 
-module.exports = { readToken, fetchUsage };
+module.exports = { readToken, fetchUsage, parseRetryAfterMs, buildCachePayload, extractModelQuotas };

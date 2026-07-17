@@ -17,9 +17,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Per-million-token prices (USD). Loose defaults; the caller can override
-// via a config-loaded price list so pricing can be updated without a code
-// change.
+// Per-million-token prices (USD). Loose conservative default (legacy Opus
+// rates — an upper bound for any model we don't recognize); the caller can
+// override via a config-loaded price list so pricing can be updated without
+// a code change.
 const DEFAULT_PRICES = {
   input: 15,
   cache_creation: 18.75,
@@ -27,24 +28,53 @@ const DEFAULT_PRICES = {
   output: 75,
 };
 
-// Per-model price tables. Lookup is by family prefix (the date suffix on
-// model IDs like `claude-haiku-4-5-20251001` varies). Subagents commonly
-// run on a different model than the parent (Haiku for Explore-class agents,
-// Sonnet for reviewers), so a per-model lookup is needed for honest cost.
+// Per-model price tables (platform.claude.com/docs/en/about-claude/pricing).
+// Lookup is by family prefix (the date suffix on model IDs like
+// `claude-haiku-4-5-20251001` varies), longest prefix first. Subagents
+// commonly run on a different model than the parent (Haiku for Explore-class
+// agents, Sonnet for reviewers), so a per-model lookup is needed for honest
+// cost. cache_creation is the 5-minute write rate (1.25x input) — what
+// Claude Code sessions use.
 const PRICING_BY_MODEL = {
-  'claude-opus':   { input: 15,   cache_creation: 18.75, cache_read: 1.50,  output: 75 },
-  'claude-sonnet': { input: 3,    cache_creation: 3.75,  cache_read: 0.30,  output: 15 },
-  'claude-haiku':  { input: 1,    cache_creation: 1.25,  cache_read: 0.10,  output: 5  },
+  // Claude 5 family — Fable 5 / Mythos 5 share pricing.
+  'claude-fable':  { input: 10, cache_creation: 12.50, cache_read: 1.00, output: 50 },
+  'claude-mythos': { input: 10, cache_creation: 12.50, cache_read: 1.00, output: 50 },
+  // Opus 4.5+ repriced to $5/$25 (Nov 2025). Opus 4.1 and the dated Opus 4
+  // base id (claude-opus-4-20250514) stay on legacy $15/$75 — pinned with
+  // longer prefixes so they win over the family entry below.
+  'claude-opus-4-1':    { input: 15, cache_creation: 18.75, cache_read: 1.50, output: 75 },
+  'claude-opus-4-2025': { input: 15, cache_creation: 18.75, cache_read: 1.50, output: 75 },
+  'claude-opus':   { input: 5,  cache_creation: 6.25,  cache_read: 0.50, output: 25 },
+  // Sonnet 5 introductory pricing runs through 2026-08-31; priceForModel
+  // swaps to the standard sonnet family entry from 2026-09-01.
+  'claude-sonnet-5': { input: 2, cache_creation: 2.50, cache_read: 0.20, output: 10 },
+  'claude-sonnet': { input: 3,  cache_creation: 3.75,  cache_read: 0.30, output: 15 },
+  'claude-haiku':  { input: 1,  cache_creation: 1.25,  cache_read: 0.10, output: 5  },
 };
 
-function priceForModel(modelId) {
-  if (!modelId || typeof modelId !== 'string') return DEFAULT_PRICES;
+const SONNET5_INTRO_END_MS = Date.parse('2026-09-01T00:00:00Z');
+
+/**
+ * Price table for a recognized model family, or null when the model id
+ * matches no known family. `at` (ms epoch) selects date-dependent pricing —
+ * pass a row's own timestamp when repricing historical usage.
+ */
+function knownPriceForModel(modelId, at = Date.now()) {
+  if (!modelId || typeof modelId !== 'string') return null;
   // Match longest family prefix first.
   const keys = Object.keys(PRICING_BY_MODEL).sort((a, b) => b.length - a.length);
   for (const k of keys) {
-    if (modelId.startsWith(k)) return PRICING_BY_MODEL[k];
+    if (!modelId.startsWith(k)) continue;
+    if (k === 'claude-sonnet-5' && at >= SONNET5_INTRO_END_MS) {
+      return PRICING_BY_MODEL['claude-sonnet'];
+    }
+    return PRICING_BY_MODEL[k];
   }
-  return DEFAULT_PRICES;
+  return null;
+}
+
+function priceForModel(modelId, at = Date.now()) {
+  return knownPriceForModel(modelId, at) || DEFAULT_PRICES;
 }
 
 /** Cost of one usage block in USD. */
@@ -100,18 +130,19 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
  * read picks up from the offset, so only tail-bytes get re-counted for saved).
  */
 function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0 };
+  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {} };
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
 
   let stat;
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
   const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v2: includes seenIds for streaming-snapshot dedupe. The transcript
-  // emits one row per stream chunk update with the same `message.id`, and
-  // the prior schema double-counted every snapshot (typically 4-7×).
-  // Old v1 cache files are abandoned (TMPDIR cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v2`);
+  // v4: adds per-model cost buckets (`byModel`) for the modelSplit field.
+  // v3 introduced per-turn model pricing (each line's `message.model`
+  // looked up via knownPriceForModel; the `prices` arg is only the
+  // unknown-model fallback). Older cache files are abandoned (TMPDIR
+  // cleanup handles eviction).
+  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
 
   let cachedOffset = 0;
   let cachedCost = 0;
@@ -121,6 +152,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let cachedCacheRead = 0;
   let cachedCreation = 0;
   let cachedSeenIds = [];
+  let cachedByModel = {};
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
@@ -133,6 +165,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
       cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
       cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
+      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
     }
   } catch { /* cache miss or corrupt — read from 0 */ }
   const seen = new Set(cachedSeenIds);
@@ -141,6 +174,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   if (stat.size < cachedOffset) {
     cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
     cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
+    cachedByModel = {};
     seen.clear();
   }
   if (stat.size === cachedOffset) {
@@ -148,6 +182,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -158,6 +193,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
   let newCacheRead = cachedCacheRead;
   let newCreation = cachedCreation;
   let newOffset = cachedOffset;
+  const byModel = { ...cachedByModel };
   try {
     const fd = fs.openSync(transcriptPath, 'r');
     try {
@@ -182,8 +218,16 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
                 if (seen.has(mid)) continue;
                 seen.add(mid);
               }
-              newCost += costFromUsage(u, prices);
-              newSaved += savedFromUsage(u, prices);
+              // Per-turn model pricing: a session can mix models (plan-mode
+              // Opus turns inside a Sonnet session, model switches). Fall
+              // back to the caller's price list only when the turn's model
+              // is absent or unrecognized.
+              const lineModel = (d.message && d.message.model) || 'other';
+              const linePrices = knownPriceForModel(lineModel) || prices;
+              const lineCost = costFromUsage(u, linePrices);
+              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
+              newCost += lineCost;
+              newSaved += savedFromUsage(u, linePrices);
               newInput += u.input_tokens || 0;
               newOutput += u.output_tokens || 0;
               newCacheRead += u.cache_read_input_tokens || 0;
@@ -199,6 +243,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       cost: cachedCost, saved: cachedSaved,
       input: cachedInput, output: cachedOutput,
       cached: cachedCacheRead, creation: cachedCreation,
+      byModel: cachedByModel,
     };
   }
 
@@ -208,6 +253,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
       input: newInput, output: newOutput,
       cached: newCacheRead, creation: newCreation,
       seenIds: Array.from(seen),
+      byModel,
     }), 'utf8');
   } catch { /* best effort */ }
 
@@ -215,6 +261,7 @@ function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES
     cost: newCost, saved: newSaved,
     input: newInput, output: newOutput,
     cached: newCacheRead, creation: newCreation,
+    byModel,
   };
 }
 
@@ -298,6 +345,7 @@ function formatUsd(n) {
 module.exports = {
   DEFAULT_PRICES,
   PRICING_BY_MODEL,
+  knownPriceForModel,
   priceForModel,
   costFromUsage,
   savedFromUsage,
