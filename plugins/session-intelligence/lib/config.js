@@ -47,25 +47,25 @@ const STATUSLINE_PRESETS = {
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
-    'blockTimer', 'session', 'sessionId', 'costSaved', 'tools', 'tokenFlow', 'tokenSpeed',
+    'blockUsage', 'session', 'sessionId', 'costSaved', 'tools', 'tokenFlow', 'tokenSpeed',
     'newline',
     'branch', 'diffstat', 'cwd', 'activeRoot',
     'newline',
     'model', 'outputStyle', 'thinking', 'task',
     'newline',
-    'blockUsage', 'weekUsage', 'modelQuota', 'modelSplit',
+    'weekUsage', 'modelQuota', 'modelSplit',
   ],
   // Token-economics focus — same skeleton, adds cacheTokens.
   'verbose-cache':  [
     'tokens', 'compactAge', 'compactCost',
     'newline',
-    'blockTimer', 'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens', 'tokenSpeed',
+    'blockUsage', 'session', 'sessionId', 'tools', 'costSaved', 'tokenFlow', 'cacheHit', 'cacheTokens', 'tokenSpeed',
     'newline',
     'cwd',
     'newline',
     'model', 'project', 'task',
     'newline',
-    'blockUsage', 'weekUsage', 'modelQuota', 'modelSplit',
+    'weekUsage', 'modelQuota', 'modelSplit',
   ],
 };
 

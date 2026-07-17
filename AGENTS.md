@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus MCP
 
-This project is indexed by GitNexus as **claude-session-intelligence** (699 symbols, 2165 relationships, 57 execution flows).
+This project is indexed by GitNexus as **claude-session-intelligence** (699 symbols, 2166 relationships, 57 execution flows).
 
 ## Always Start Here
 
