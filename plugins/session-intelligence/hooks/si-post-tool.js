@@ -39,6 +39,7 @@ function main() {
   let dispatchExit = 0;
   let pruneJson = null;
   let callout = '';
+  let nudgeExit = 0;
 
   for (const name of CHILDREN) {
     const script = path.join(__dirname, name);
@@ -55,21 +56,20 @@ function main() {
         timeout: 10_000,
       });
       if (isPrune && r && r.status === 0) pruneJson = parsePruneOutput(r.stdout);
-      if (isNudge && r) callout = typeof r.stderr === 'string' ? r.stderr : '';
+      if (isNudge && r) {
+        callout = typeof r.stderr === 'string' ? r.stderr : '';
+        nudgeExit = r.status;
+      }
       if (r && r.status === 2) dispatchExit = 2;
     } catch {
       // Best-effort — never fail the dispatcher.
     }
   }
 
-  if (pruneJson && dispatchExit === 2) {
+  if (pruneJson && nudgeExit === 2) {
     // exit 2 would discard the JSON, so fold the callout into it and exit 0.
-    const merged = {
-      hookSpecificOutput: {
-        ...pruneJson,
-        additionalContext: callout.replace(ANSI_RE, '').trim().slice(0, MAX_CONTEXT_CHARS),
-      },
-    };
+    const context = callout.replace(ANSI_RE, '').trim().slice(0, MAX_CONTEXT_CHARS);
+    const merged = { hookSpecificOutput: context ? { ...pruneJson, additionalContext: context } : pruneJson };
     process.stdout.write(JSON.stringify(merged));
     process.exit(0);
   }

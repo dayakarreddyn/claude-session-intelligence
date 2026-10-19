@@ -58,15 +58,18 @@ function handlePre(payload, cfg) {
   emit({ hookEventName: 'PreToolUse', updatedInput: { ...input, command } });
 }
 
-function ensureArchived(sid, id, toolName, toolInput, body) {
+function ensureArchived(sid, id, toolName, toolInput, body, archiveCfg) {
   const toolArchive = require(path.join(SI_LIB, 'tool-archive'));
-  if (toolArchive.readArchive(sid, id)) return true;
-  // The prune floor can sit above the archive threshold; archive with the
-  // threshold lowered to 0 so the full body is always on disk before pruning.
-  const written = toolArchive.writeArchive(sid, id,
-    { tool_name: toolName, tool_input: toolInput }, body,
-    { ...loadArchiveConfig(), enabled: true, thresholdChars: 1 });
-  return Boolean(written);
+  if (!toolArchive.readArchive(sid, id)) {
+    // The prune floor can sit above the archive threshold; lower the threshold
+    // to 1 so the full body is on disk before pruning. The user's enabled /
+    // maxPerSession / ttlDays settings are left as configured.
+    toolArchive.writeArchive(sid, id, { tool_name: toolName, tool_input: toolInput }, body,
+      { ...archiveCfg, thresholdChars: 1 });
+  }
+  // Confirm the entry survived write + eviction/TTL sweep: an excerpt whose
+  // `/si expand` id is dead is worse than no pruning.
+  return Boolean(toolArchive.readArchive(sid, id));
 }
 
 function handlePost(payload, cfg) {
@@ -75,12 +78,17 @@ function handlePost(payload, cfg) {
   const { id, toolName, toolInput } = toolArchive.extractFromPayload(payload);
   // Raw response (not stringified) so structured MCP results are rejected.
   const raw = payload.tool_response !== undefined ? payload.tool_response : payload.tool_output;
+  const archiveCfg = loadArchiveConfig();
+  if (archiveCfg.enabled === false) {
+    intelLog('prune', 'debug', 'prune skipped: archive disabled', { id, tool: toolName });
+    return;
+  }
   const decision = decidePrune({ toolName, toolUseId: id, body: raw, cfg });
   if (!decision.pruned) return;
 
   const sid = payload.session_id || payload.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
-  if (!ensureArchived(sid, id, toolName, toolInput, raw)) {
-    intelLog('prune', 'warn', 'skipped — archive write failed', { id, tool: toolName });
+  if (!ensureArchived(sid, id, toolName, toolInput, raw, archiveCfg)) {
+    intelLog('prune', 'debug', 'prune skipped: archive not on disk after write', { id, tool: toolName });
     return;
   }
   try { require(path.join(SI_LIB, 'events')).markArchivePruned(id); } catch { /* best-effort */ }

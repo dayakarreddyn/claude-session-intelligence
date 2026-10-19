@@ -138,3 +138,48 @@ test('dispatcher still propagates exit 2 with stderr when nothing was pruned', (
   assert.match(r.stderr, /\[StrategicCompact\]/);
   assert.equal(r.stdout, '');
 }));
+
+function writeCfg(home, cfg) {
+  fs.writeFileSync(path.join(home, '.claude', 'session-intelligence.json'), JSON.stringify(cfg));
+}
+const archiveFile = (home, id) => path.join(home, '.claude', 'state', `claude-tool-archive-${sid}`, `${id}.json`);
+
+test('toolArchive.enabled=false: no prune, no archive file, no pruned row (R9)', () => withHome((home) => {
+  writeCfg(home, { toolArchive: { enabled: false } });
+  const r = runHook('si-prune-output.js', readPayload('toolu_20', 60000), home);
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  assert.equal(fs.existsSync(archiveFile(home, 'toolu_20')), false);
+  const row = archiveRow(home, 'toolu_20');
+  assert.ok(!row || !row.pruned);
+}));
+
+test('ttlDays so small the archive is swept at once: no prune, no stdout (maxPerSession/ttlDays <= 0 mean no limit)', () => withHome((home) => {
+  writeCfg(home, { toolArchive: { ttlDays: 1e-9 } });
+  const r = runHook('si-prune-output.js', readPayload('toolu_21', 60000), home);
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  const row = archiveRow(home, 'toolu_21');
+  assert.ok(!row || !row.pruned);
+}));
+
+test('archive write failure (read-only state dir): no prune, exit 0', { skip: process.getuid && process.getuid() === 0 }, () => withHome((home) => {
+  const state = path.join(home, '.claude', 'state');
+  fs.chmodSync(state, 0o500);
+  try {
+    const r = runHook('si-prune-output.js', readPayload('toolu_22', 60000), home);
+    assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  } finally { fs.chmodSync(state, 0o700); }
+}));
+
+test('Bash { stdout, stderr } object response is not stringified and not pruned', () => withHome((home) => {
+  const r = runHook('si-prune-output.js', {
+    hook_event_name: 'PostToolUse', session_id: sid, tool_name: 'Bash', tool_use_id: 'toolu_23',
+    tool_input: { command: 'ls' }, tool_response: { stdout: 'x'.repeat(60000), stderr: '' },
+  }, home);
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+}));
+
+test('dispatcher omits additionalContext when the merged callout is empty-free path (prune only)', () => withHome((home) => {
+  const r = runHook('si-post-tool.js', { ...readPayload('toolu_24', 60000), transcript_path: '' }, home);
+  assert.equal(r.status, 0);
+  assert.equal('additionalContext' in JSON.parse(r.stdout).hookSpecificOutput, false);
+}));
