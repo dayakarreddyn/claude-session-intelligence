@@ -76,6 +76,12 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
         ${project ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : ''}
     `).get(cutoff, ...projectArgs);
 
+    const reruns = db.prepare(`
+      SELECT COUNT(*) AS n, SUM(was_pruned) AS pruned
+      FROM tool_reruns WHERE t >= ?
+        ${project ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : ''}
+    `).get(cutoff, ...projectArgs);
+
     // Agent (Task tool / subagent) usage. Aggregate totals + top-N by type.
     const agentProjectClause = project
       ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : '';
@@ -233,7 +239,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     `).all(cutoff, ...projectArgs);
 
     return {
-      sessions, compacts, compactPercentiles, compactFill, zones, archives,
+      sessions, compacts, compactPercentiles, compactFill, zones, archives, reruns,
       agents, agentTypes,
       topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
       sinceDays, project,

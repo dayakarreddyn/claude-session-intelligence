@@ -420,13 +420,14 @@ function renderZones(stats) {
   return lines.join('\n');
 }
 
-function renderArchives(a) {
+function renderArchives(a, r = {}) {
   const lines = [header('TOOL-RESPONSE ARCHIVE', 'snapshots for post-compact recall'), ''];
   const recallPct = fmtPct(a.recalled, a.n);
   const rows = [
     ['Snapshots',  String(a.n || 0)],
     ['Recalled',   `${a.recalled || 0} (${recallPct})`],
     ['Pruned',     String(a.pruned || 0)],
+    ['Re-runs (same tool+input ≤20 calls)', String(r.n || 0)],
     ['Total size', fmtBytes(a.bytes)],
   ];
   const w = Math.max(...rows.map((r) => r[0].length));
@@ -568,7 +569,7 @@ function main() {
     renderWeeklyRollup(stats.weeklySeries),
     renderCompacts(stats),
     renderZones(stats),
-    renderArchives(stats.archives),
+    renderArchives(stats.archives, stats.reruns || {}),
     renderAgents(stats),
     renderProjects(stats.perProject),
     renderRecentCompacts(stats.recentCompacts),

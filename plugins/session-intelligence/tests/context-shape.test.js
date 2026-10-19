@@ -767,3 +767,16 @@ test('formatCompactInjection stablePrefix is byte-identical when shift names + s
   }), { stablePrefix: true });
   assert.equal(a, b);
 });
+
+test('analyzeShape surfaces duplicate reads; draft and injection mention them', () => {
+  const { formatCompactInjection, draftMessage } = require('../lib/context-shape');
+  const entries = [...Array(10)].map((_, i) => ({
+    t: i, tok: 1000 * (i + 1), tool: 'Read', root: 'src',
+    file: i < 3 ? 'src/a.js' : `src/f${i}.js`, event: null, chars: 30000, inputHash: `h${i}`,
+  }));
+  const a = analyzeShape(entries);
+  assert.equal(a.duplicates.reads[0].count, 3);
+  assert.equal(a.largeResults, 0);
+  assert.ok(draftMessage(a).includes('dup reads: src/a.js ×3'));
+  assert.ok(formatCompactInjection(a).includes('**Duplicate reads (drop all but the latest):**'));
+});

@@ -28,6 +28,7 @@ const GUARDED_ADD_COLUMNS = Object.freeze([
  *   compacts          — one row per /compact event (manual or auto)
  *   zone_transitions  — yellow/orange/red callouts from suggest-compact
  *   tool_archives     — large tool-response captures (post-compact recall)
+ *   tool_reruns       — same tool+input repeated within a short call window
  *   agent_invocations — Task tool calls (subagent runs) — type, sizes, duration
  */
 function createTables(db) {
@@ -89,6 +90,17 @@ function createTables(db) {
     );
     CREATE INDEX IF NOT EXISTS tool_archives_sid_idx ON tool_archives(sid);
     CREATE INDEX IF NOT EXISTS tool_archives_tuid_idx ON tool_archives(tool_use_id);
+
+    CREATE TABLE IF NOT EXISTS tool_reruns (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      sid          TEXT NOT NULL,
+      t            INTEGER NOT NULL,
+      tool         TEXT,
+      input_hash   TEXT,
+      gap_calls    INTEGER,
+      was_pruned   INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS tool_reruns_sid_idx ON tool_reruns(sid);
 
     CREATE TABLE IF NOT EXISTS agent_invocations (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,

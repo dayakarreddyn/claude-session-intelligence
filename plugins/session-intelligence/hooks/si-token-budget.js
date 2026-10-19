@@ -41,10 +41,36 @@ const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const {
   rootDirOf,
   appendShape,
+  readShape,
   resolveSessionCwd,
   writeSessionState,
   readSessionState,
 } = require(path.join(SI_LIB, 'context-shape'));
+const SHAPE_MIN_CHARS = 4096;
+
+function safeInputHash(toolName, toolInput) {
+  try { return require(path.join(SI_LIB, 'prune')).inputHash(toolName, toolInput); } catch { return null; }
+}
+
+// Record a same-input re-run (within RERUN_GAP_CALLS) of the call just appended.
+// wasPruned approximates "the earlier result was over the prune floor"; the
+// archive table is keyed by tool_use_id which the shape log does not carry.
+function recordRerunSignal(sessionId, cfg, chars) {
+  try {
+    const signals = require(path.join(SI_LIB, 'shape-signals'));
+    const entries = readShape(sessionId, signals.SIGNAL_WINDOW);
+    const rerun = signals.newestRerun(entries);
+    if (!rerun) return;
+    const floor = cfg && cfg.prune && cfg.prune.outputFloorChars;
+    require(path.join(SI_LIB, 'events')).recordRerun({
+      sid: sessionId, t: Date.now(), tool: rerun.tool, inputHash: rerun.inputHash,
+      gapCalls: rerun.gapCalls, wasPruned: Number.isFinite(floor) && chars >= floor,
+    });
+  } catch (err) {
+    intelLog('token-budget', 'debug', 'rerun signal failed', { err: String(err && err.message) });
+  }
+}
+
 // Phase-event detection is optional — fall back to the legacy inline regex
 // if the module is not on disk yet (mixed-version install, e.g. during a
 // plugin upgrade).
@@ -216,8 +242,10 @@ async function main() {
       else if (/^\s*gh\s+pr\s+(create|merge)\b/.test(cmd))       event = 'pr';
     }
     // Only append entries that carry a signal — a pure Bash echo with no file
-    // and no event adds noise without informing the analyzer.
-    if (root || event) {
+    // and no event adds noise unless its result is large enough to matter.
+    const outStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput || '');
+    const chars = outStr.length;
+    if (root || event || chars >= SHAPE_MIN_CHARS) {
       // clampMaxEntries enforces [50, 5000] so a perProject typo can't
       // either starve the analyzer or balloon the shape file.
       let maxEntries;
@@ -232,11 +260,14 @@ async function main() {
       appendShape(sessionId, {
         t: Date.now(),
         tok: cumulative,
-        tool: toolName || null,
+        tool: (toolName === 'Task' ? 'Agent' : toolName) || null,
         root: root || null,
         file: filePath ? String(filePath) : null,
         event,
+        chars,
+        inputHash: safeInputHash(toolName, toolInput),
       }, { maxEntries });
+      recordRerunSignal(sessionId, cfg, chars);
     }
 
     // Post-compact regret monitoring: if there's a live snapshot (written by

@@ -666,3 +666,15 @@ test('markArchivePruned flags the archive and aggregateStats reports archives.pr
     assert.equal(stats.archives.n, 2);
   } finally { cleanup(sb); }
 });
+
+test('recordRerun stores a re-run and aggregateStats reports reruns.n', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordRerun({ sid: 's1', t: Date.now(), tool: 'Bash', inputHash: 'x', gapCalls: 11, wasPruned: false }));
+    assert.ok(events.recordRerun({ sid: 's1', t: Date.now(), tool: 'Bash', inputHash: 'x', gapCalls: 3, wasPruned: true }));
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.equal(stats.reruns.n, 2);
+    assert.equal(stats.reruns.pruned, 1);
+    assert.equal(events.recordRerun({}), false);
+  } finally { cleanup(sb); }
+});

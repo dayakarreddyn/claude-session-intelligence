@@ -185,6 +185,21 @@ function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
   } catch { return false; }
 }
 
+function recordRerun({ sid, t, tool, inputHash, gapCalls, wasPruned }) {
+  const db = openDb();
+  if (!db || !sid || !inputHash) return false;
+  try {
+    db.prepare(`
+      INSERT INTO tool_reruns (sid, t, tool, input_hash, gap_calls, was_pruned)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, Number.isFinite(t) ? t : Date.now(), tool || null, String(inputHash),
+      Number.isFinite(gapCalls) ? gapCalls : null, wasPruned ? 1 : 0,
+    );
+    return true;
+  } catch { return false; }
+}
+
 function recordAgentInvocation({
   sid, toolUseId, subagentType, description,
   promptChars, responseChars, durationMs, t, isError,
@@ -517,6 +532,7 @@ module.exports = {
   recordCompact,
   recordZoneTransition,
   recordToolArchive,
+  recordRerun,
   markArchiveRecalled,
   markArchivePruned,
   allToolArchiveKeys,

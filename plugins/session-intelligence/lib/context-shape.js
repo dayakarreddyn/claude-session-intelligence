@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { detectDuplicates, countLargeResults, agentReturns, duplicateReadsPhrase, renderDuplicateReadsBlock } = require('./shape-signals');
 
 const DEFAULT_MAX_ENTRIES = 200;
 const MAX_ENTRIES_HARD_CEILING = 2000; // above this the byte cap kicks in first anyway
@@ -777,6 +778,9 @@ function analyzeShape(entries, opts) {
     totalSpan: span,
     totalCalls,
     events,
+    duplicates: detectDuplicates(entries),
+    largeResults: countLargeResults(entries),
+    agentReturns: agentReturns(entries),
   };
 }
 
@@ -803,6 +807,8 @@ function draftMessage(analysis) {
     const dirs = analysis.hot.slice(0, 3).map((h) => h.root).join(', ');
     parts.push(`hot: ${dirs}`);
   }
+  const dup = duplicateReadsPhrase(analysis.duplicates);
+  if (dup) parts.push(dup);
   return parts.join(' \u00b7 ');
 }
 
@@ -887,6 +893,7 @@ function formatCompactInjection(analysis, opts = {}) {
     }
   }
 
+  lines.push(...[renderDuplicateReadsBlock(analysis.duplicates, { stablePrefix: stable })].filter(Boolean));
   lines.push('');
   return lines.join('\n');
 }
