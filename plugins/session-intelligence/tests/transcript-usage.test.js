@@ -142,3 +142,51 @@ test('utils.readTranscriptTokens returns 0 for a missing file and contextTokens 
   const none = write([{ type: 'user' }]);
   assert.equal(readTranscriptTokens(none, { sessionId: 'tu-util2' }), 0);
 });
+
+test('cache written for transcript A is ignored for a same-size or larger transcript B', () => {
+  const a = write([assistant('msg_A1', 1, 1, 1), { type: 'user' }]);
+  readLatestUsage(a, { sessionId: 'tu-swap' });
+  const b = write([{ type: 'user', content: 'y'.repeat(fs.statSync(a).size + 50) }]);
+  const r = readLatestUsage(b, { sessionId: 'tu-swap' });
+  assert.equal(r, null);
+  const b2 = write([assistant('msg_B1', 40, 0, 0), { type: 'user', content: 'z'.repeat(200) }]);
+  const r2 = readLatestUsage(b2, { sessionId: 'tu-swap' });
+  assert.equal(r2.messageId, 'msg_B1');
+  assert.equal(r2.source, 'transcript');
+});
+
+test("sessionId 'default' or empty writes no cache file", () => {
+  const p = write([assistant('msg_def', 1, 2, 3)]);
+  assert.equal(readLatestUsage(p, { sessionId: 'default' }).contextTokens, 6);
+  assert.equal(fs.existsSync(usageCachePath('default')), false);
+  assert.equal(readLatestUsage(p, { sessionId: '' }).contextTokens, 6);
+});
+
+test('a corrupt cache file is ignored and treated as cold', () => {
+  const p = write([assistant('msg_cor', 1, 2, 3)]);
+  fs.writeFileSync(usageCachePath('tu-corrupt'), '{not json');
+  const u = readLatestUsage(p, { sessionId: 'tu-corrupt' });
+  assert.equal(u.contextTokens, 6);
+  assert.equal(u.source, 'transcript');
+});
+
+test('an unreadable transcript returns null, not stale cache', { skip: process.getuid && process.getuid() === 0 }, () => {
+  const p = write([assistant('msg_unr', 1, 2, 3)]);
+  readLatestUsage(p, { sessionId: 'tu-unr' });
+  fs.chmodSync(p, 0o000);
+  try {
+    assert.equal(readLatestUsage(p, { sessionId: 'tu-unr' }), null);
+  } finally { fs.chmodSync(p, 0o644); }
+});
+
+test('a usage line straddling a backward-scan chunk boundary is found', () => {
+  const { TAIL_CHUNK_BYTES } = require('../lib/transcript-usage');
+  const line = JSON.stringify(assistant('msg_str', 3, 4, 5)) + '\n';
+  const tailLen = TAIL_CHUNK_BYTES - Math.floor(line.length / 2);
+  const filler = JSON.stringify({ type: 'user', content: 'q'.repeat(tailLen - 40) }) + '\n';
+  const p = path.join(DIR, `t-${seq++}.jsonl`);
+  fs.writeFileSync(p, line + filler);
+  const total = fs.statSync(p).size;
+  assert.ok(total - TAIL_CHUNK_BYTES > 0 && total - TAIL_CHUNK_BYTES < line.length, 'boundary inside usage line');
+  assert.equal(readLatestUsage(p, { sessionId: 'tu-straddle' }).messageId, 'msg_str');
+});

@@ -117,8 +117,13 @@ function scanBackward(fd, size) {
   return { record: null, nextOffset: nextOffset === null ? size : nextOffset };
 }
 
+/** 'default' and empty ids are shared across sessions, so they never cache. */
+function isCacheable(sessionId) {
+  return Boolean(sessionId) && sessionId !== 'default';
+}
+
 function readCache(sessionId) {
-  if (!sessionId) return null;
+  if (!isCacheable(sessionId)) return null;
   try {
     const c = JSON.parse(fs.readFileSync(usageCachePath(sessionId), 'utf8'));
     if (c && typeof c === 'object' && c.usage) return c;
@@ -127,7 +132,7 @@ function readCache(sessionId) {
 }
 
 function writeCache(sessionId, entry) {
-  if (!sessionId) return;
+  if (!isCacheable(sessionId)) return;
   const file = usageCachePath(sessionId);
   const tmp = `${file}.${process.pid}.tmp`;
   try {
@@ -149,8 +154,20 @@ function fromCache(cache) {
   };
 }
 
-function cacheEntry(record, offset, previous) {
+function identityOf(transcriptPath, stat) {
+  return { transcriptPath, ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+}
+
+function sameFile(cache, identity) {
+  return Boolean(cache)
+    && cache.transcriptPath === identity.transcriptPath
+    && cache.ino === identity.ino
+    && cache.birthtimeMs === identity.birthtimeMs;
+}
+
+function cacheEntry(record, offset, previous, identity) {
   return {
+    ...identity,
     offset,
     contextTokens: record.contextTokens,
     usage: record.usage,
@@ -163,20 +180,23 @@ function cacheEntry(record, offset, previous) {
 }
 
 function readLatestUsage(transcriptPath, { sessionId } = {}) {
-  const cache = readCache(sessionId);
-  if (!transcriptPath) return cache ? fromCache(cache) : null;
+  if (!transcriptPath) return null;
+  const cached = readCache(sessionId);
   let fd = null;
   try {
-    const size = fs.statSync(transcriptPath).size;
+    const stat = fs.statSync(transcriptPath);
+    const size = stat.size;
+    const identity = identityOf(transcriptPath, stat);
+    // A cache from a different file (replaced, rotated, other session) is cold.
+    const cache = sameFile(cached, identity) ? cached : null;
     fd = fs.openSync(transcriptPath, 'r');
     const cachedOffset = cache && Number.isFinite(cache.offset) ? cache.offset : 0;
-    const offset = cachedOffset > size ? 0 : cachedOffset;
     const stale = cachedOffset > size;
-    const warm = cache && !stale && size - offset <= MAX_FORWARD_BYTES;
+    const warm = cache && !stale && size - cachedOffset <= MAX_FORWARD_BYTES;
 
-    const scan = warm ? scanForward(fd, offset, size) : scanBackward(fd, size);
+    const scan = warm ? scanForward(fd, cachedOffset, size) : scanBackward(fd, size);
     if (scan.record) {
-      writeCache(sessionId, cacheEntry(scan.record, scan.nextOffset, stale ? null : cache));
+      writeCache(sessionId, cacheEntry(scan.record, scan.nextOffset, stale ? null : cache, identity));
       return { ...scan.record, source: 'transcript' };
     }
     if (cache && !stale) {
@@ -184,8 +204,13 @@ function readLatestUsage(transcriptPath, { sessionId } = {}) {
       return fromCache(cache);
     }
     return null;
-  } catch {
-    return cache ? fromCache(cache) : null;
+  } catch (err) {
+    // Only a vanished transcript may be answered from the cache, and only
+    // when the cache was written for this very path.
+    if (err && err.code === 'ENOENT' && cached && cached.transcriptPath === transcriptPath) {
+      return fromCache(cached);
+    }
+    return null;
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
   }
@@ -200,6 +225,9 @@ function readPeak(sessionId) {
   }
 }
 
+// Read-modify-write is not atomic; acceptable because the value is a
+// monotonic max: a lost race can only under-write by one concurrent call and
+// the next call corrects it.
 function updatePeak(sessionId, contextTokens) {
   const current = readPeak(sessionId);
   const next = Math.max(current || 0, Number(contextTokens) || 0);
