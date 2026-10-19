@@ -67,7 +67,7 @@ test('buildExcerpt carries head, tail, omitted count and the /si expand hint', (
 });
 
 const WRAP = (cmd, pattern) =>
-  `( set -o pipefail; ( ${cmd}; rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | grep -E -A 5 '${pattern}|\\[exit=' | head -100 )`;
+  `( set -o pipefail; ( ${cmd}\n rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | grep -E -A 5 '${pattern}|\\[exit=' | head -100 )`;
 const TEST_PATTERN = '(FAIL|ERROR|error:|not ok|# fail|# pass|passed|failed|^ok\\b)';
 
 test('rewriteCommand wraps test runners with exit-preserving grep/head shape and names the rule', () => {
@@ -79,7 +79,7 @@ test('rewriteCommand wraps test runners with exit-preserving grep/head shape and
 });
 
 test('rewriteCommand leaves redirects, existing filters, multi-line and unrelated commands alone', () => {
-  for (const c of ['npm test > out.txt', 'npm test 2>&1 | tail -50', 'npm test | grep x', 'npm test\necho done', 'git status']) {
+  for (const c of ['npm test > out.txt', 'npm test 2>&1 | tail -50', 'npm test | grep x', 'npm test\necho done', 'git status', 'npm test &', 'npm test  & ', 'npm test # note']) {
     assert.deepEqual(rewriteCommand(c), { command: c, rule: null });
   }
 });
@@ -137,4 +137,34 @@ test('env CLAUDE_SI_PRUNE and CLAUDE_SI_PRUNE_FLOOR override config', () => {
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
   }
+});
+
+test('rewritten wrapper inserts the command verbatim, preserving $ and backticks', () => {
+  const cmd = 'echo \'cost $5\' "tick \\`x\\`"';
+  const r = spawnSync('bash', ['-c', WRAP(cmd, '(cost)')], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.ok(r.stdout.includes('cost $5 tick `x`'), r.stdout);
+});
+
+test('custom rule pattern with a single quote is escaped', () => {
+  const { command } = rewriteCommand("sh -c 'echo it'", [{ name: 'q', match: '^sh', pattern: "(it's)" }]);
+  const r = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(command, /\(it'\\''s\)/);
+});
+
+test('buildExcerpt never overlaps head and tail on a short body', () => {
+  const body = 'abcdefghij';
+  const out = buildExcerpt(body, { headChars: 8, tailChars: 8, archiveId: 'toolu_s', toolName: 'Read', originalChars: 10 });
+  assert.match(out, /…\[0 chars omitted\]…/);
+  assert.equal(out.split('\n').slice(1).join(''), 'abcdefgh…[0 chars omitted]…ij');
+});
+
+test('decidePrune prunes exactly 50000 chars and rejects an empty body as below-floor', () => {
+  assert.equal(decidePrune({ toolName: 'Read', toolUseId: 'toolu_f', body: 'a'.repeat(50000), cfg }).pruned, true);
+  assert.deepEqual(decidePrune({ toolName: 'Read', toolUseId: 'toolu_f', body: '', cfg }), { pruned: false, reason: 'below-floor' });
+});
+
+test('inputHash is stable across nested key order', () => {
+  assert.equal(inputHash('X', { a: { b: 1, c: 2 } }), inputHash('X', { a: { c: 2, b: 1 } }));
 });

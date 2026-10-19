@@ -11,6 +11,7 @@
 const crypto = require('crypto');
 
 const INPUT_HASH_LENGTH = 16;
+const HEADER_SETTLE_PASSES = 3; // header embeds its own length; a few passes converge
 const EXIT_MARKER_PATTERN = '\\[exit=';
 const FILTER_PIPE_RE = /\|\s*(grep|head|tail|wc|jq)\b/;
 
@@ -36,7 +37,8 @@ const fmt = (n) => n.toLocaleString('en-US');
 
 function buildExcerpt(body, { headChars, tailChars, archiveId, toolName, originalChars }) {
   const head = body.slice(0, headChars);
-  const tail = tailChars > 0 ? body.slice(-tailChars) : '';
+  const tailStart = Math.max(head.length, body.length - Math.max(0, tailChars));
+  const tail = body.slice(tailStart); // clamped so head and tail never overlap
   const omitted = Math.max(0, body.length - head.length - tail.length);
   const rest = `\n${head}\n…[${fmt(omitted)} chars omitted]…\n${tail}`;
   const header = (excerptChars) =>
@@ -44,7 +46,7 @@ function buildExcerpt(body, { headChars, tailChars, archiveId, toolName, origina
     `Full body archived; run \`/si expand ${archiveId}\` to replay it verbatim.]`;
   // The header states the excerpt's own length, so settle on a fixed point.
   let len = header(0).length + rest.length;
-  for (let i = 0; i < 3; i += 1) len = header(len).length + rest.length;
+  for (let i = 0; i < HEADER_SETTLE_PASSES; i += 1) len = header(len).length + rest.length;
   return header(len) + rest;
 }
 
@@ -66,8 +68,11 @@ function decidePrune({ toolName, toolUseId, body, cfg }) {
 
 function applyRule(command, rule) {
   if (rule.pattern) {
-    return `( set -o pipefail; ( ${command}; rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | ` +
-      `grep -E -A 5 '${rule.pattern}|${EXIT_MARKER_PATTERN}' | head -100 )`;
+    // Newline before the status capture: a trailing token in the command
+    // (comment, `&`) cannot swallow or break `rc=$?`.
+    const pattern = String(rule.pattern).replace(/'/g, "'\\''");
+    return `( set -o pipefail; ( ${command}\n rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | ` +
+      `grep -E -A 5 '${pattern}|${EXIT_MARKER_PATTERN}' | head -100 )`;
   }
   return `${command}${rule.suffix || ''}`;
 }
@@ -75,7 +80,8 @@ function applyRule(command, rule) {
 function rewriteCommand(command, rules = DEFAULT_INPUT_RULES) {
   const unchanged = { command, rule: null };
   if (typeof command !== 'string') return unchanged;
-  if (command.includes('>') || command.includes('\n') || FILTER_PIPE_RE.test(command)) return unchanged;
+  if (command.includes('>') || command.includes('\n') || command.includes('#')) return unchanged;
+  if (FILTER_PIPE_RE.test(command) || command.trimEnd().endsWith('&')) return unchanged;
   for (const rule of rules || []) {
     let re;
     try { re = new RegExp(rule.match); } catch { continue; }
