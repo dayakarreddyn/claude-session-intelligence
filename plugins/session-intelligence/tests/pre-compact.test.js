@@ -25,6 +25,8 @@ const {
 } = require('../hooks/si-pre-compact');
 
 const toolArchive = require('../lib/tool-archive');
+const { spawnSync } = require('node:child_process');
+const { openDatabase } = require('../lib/sqlite-driver');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = Date.UTC(2026, 3, 22); // 2026-04-22, anchor for deterministic age math
@@ -203,4 +205,41 @@ test('buildArchiveRecallBlock lists recallable ids largest-first with /si expand
   } finally {
     try { fs.rmSync(toolArchive.archiveDir(sid), { recursive: true, force: true }); } catch { /* ignore */ }
   }
+});
+
+test('si-pre-compact stamps contextTokens/cap/fill on the history entry and compacts row', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  try {
+    const sid = 'sid-pc-units';
+    const cwd = path.join(home, 'proj');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+    const transcript = path.join(home, 'transcript.jsonl');
+    fs.writeFileSync(transcript, JSON.stringify({
+      type: 'assistant', timestamp: '2026-10-19T00:00:00Z',
+      message: { id: 'msg_1', model: 'claude-opus-5-5', role: 'assistant', content: [],
+        usage: { input_tokens: 400000, cache_creation_input_tokens: 0, cache_read_input_tokens: 80000, output_tokens: 10 } },
+    }) + '\n');
+    const seed = spawnSync(process.execPath, ['-e',
+      `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:${JSON.stringify(sid)},project:'p',cwd:${JSON.stringify(cwd)},startedAt:1})`],
+    { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+    assert.equal(seed.status, 0, seed.stderr);
+    const env = { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid };
+    for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'auto', hook_event_name: 'PreCompact' }),
+      env, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = fs.readFileSync(path.join(home, '.claude', 'logs', 'compact-history.jsonl'), 'utf8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]);
+    assert.equal(entry.tokens, 480000); assert.equal(entry.contextTokens, 480000);
+    assert.equal(entry.contextCap, 1000000); assert.equal(entry.fillPct, 48);
+    assert.equal(entry.model, 'claude-opus-5-5'); assert.equal(entry.trigger, 'auto');
+    const { db } = openDatabase(path.join(home, '.claude', 'state', 'si-events.db'));
+    try {
+      const row = db.prepare('SELECT tokens, fill_pct, context_cap FROM compacts WHERE sid = ?').get(sid);
+      assert.equal(row.tokens, 480000); assert.equal(row.fill_pct, 48); assert.equal(row.context_cap, 1000000);
+    } finally { db.close(); }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

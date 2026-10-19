@@ -20,11 +20,14 @@ test('buildCompactRecord stamps contextTokens as `tokens`, plus cap/fill/model/t
   assert.deepEqual(snapshot.regretHits, []);
 });
 
-test('buildCompactRecord with no usage stamps tokens 0 and fillPct 0 (never the estimate)', () => {
-  const { historyEntry, dbRow } = buildCompactRecord({ ...base, latest: null, trigger: 'manual' });
-  assert.equal(historyEntry.tokens, 0); assert.equal(historyEntry.fillPct, 0);
+test('buildCompactRecord with no usage stamps tokens 0 and null fillPct/contextCap (never the estimate)', () => {
+  const { historyEntry, dbRow, snapshot } = buildCompactRecord({ ...base, latest: null, trigger: 'manual' });
+  assert.equal(historyEntry.tokens, 0); assert.equal(historyEntry.contextTokens, 0);
+  assert.equal(historyEntry.fillPct, null); assert.equal(historyEntry.contextCap, null);
   assert.equal(historyEntry.toolIoEstimate, 1580000);
-  assert.equal(dbRow.tokens, 0); assert.equal(historyEntry.model, null);
+  assert.equal(dbRow.tokens, 0); assert.equal(dbRow.fillPct, null); assert.equal(dbRow.contextCap, null);
+  assert.equal(historyEntry.model, null); assert.equal(dbRow.model, null);
+  assert.equal(snapshot.tokens, 0); assert.equal(snapshot.fillPct, null); assert.equal(snapshot.contextCap, null);
 });
 
 test('buildCompactRecord derives dirs from analysis, includes costAtCompactUsd only when set, returns fresh objects', () => {

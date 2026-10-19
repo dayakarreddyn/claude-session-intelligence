@@ -26,7 +26,11 @@ function lastEstimate(entries) {
  */
 function buildCompactRecord({ latest, cap, entries, trigger, cwd, sessionId, cost, costAtCompactUsd, analysis }) {
   const contextTokens = latest && latest.contextTokens > 0 ? latest.contextTokens : 0;
-  const fillPct = fillPctOf(contextTokens, cap);
+  // No usage evidence: cap/fill are unknown, not 0%. A null never trains the
+  // learner as a genuine 0%-fill compact (the DB writer stores non-finite as NULL).
+  const hasUsage = !!latest;
+  const fillPct = hasUsage ? fillPctOf(contextTokens, cap) : null;
+  const recordedCap = hasUsage ? cap : null;
   const model = (latest && latest.model) || null;
   const hotDirs = mapRoots(analysis && analysis.hot);
   const warmDirs = mapRoots(analysis && analysis.warm);
@@ -41,7 +45,7 @@ function buildCompactRecord({ latest, cap, entries, trigger, cwd, sessionId, cos
     cwd,
     tokens: contextTokens,
     contextTokens,
-    contextCap: cap,
+    contextCap: recordedCap,
     fillPct,
     model,
     trigger: trigger || null,
@@ -67,7 +71,7 @@ function buildCompactRecord({ latest, cap, entries, trigger, cwd, sessionId, cos
     droppedDirs: [...droppedDirs],
     hadShift: historyEntry.hadShift,
     trigger: historyEntry.trigger,
-    contextCap: cap,
+    contextCap: recordedCap,
     fillPct,
     model,
   };
@@ -75,7 +79,7 @@ function buildCompactRecord({ latest, cap, entries, trigger, cwd, sessionId, cos
   const snapshot = {
     t,
     tokens: contextTokens,
-    contextCap: cap,
+    contextCap: recordedCap,
     fillPct,
     cost: roundedCost,
     hotDirs: [...hotDirs],
