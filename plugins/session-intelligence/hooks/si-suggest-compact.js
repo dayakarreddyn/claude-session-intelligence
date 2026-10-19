@@ -53,10 +53,11 @@ const {
   getStateDir,
   writeFile,
   readStdinJson,
-  readTranscriptTokens,
   resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
+const { readLatestUsage, updatePeak } = require(path.join(SI_LIB, 'transcript-usage'));
+const { resolveContextCap, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
 const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
@@ -149,7 +150,6 @@ async function main() {
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(getStateDir(), `claude-tool-count-${sessionId}`);
-  const budgetFile = path.join(getStateDir(), `claude-token-budget-${sessionId}`);
   intelLog('suggest-compact', 'debug', 'hook fired',
     { sessionId, preserveGlobs: preserveGlobs.length });
   const threshold = Number.isFinite(cfg.threshold) && cfg.threshold > 0 && cfg.threshold <= 10000
@@ -165,28 +165,30 @@ async function main() {
     if (Number.isFinite(parsed) && parsed > 0) count = parsed;
   } catch { /* no count yet — tracker hasn't run */ }
 
-  // Token budget — prefer the authoritative count from the transcript's latest
-  // assistant-message usage block (same source the status line reads). Fall
-  // back to the tracker estimate when the transcript isn't available or the
-  // hook runs before any assistant reply. The tracker estimate only counts
-  // tool I/O and misses messages/prompts/thinking, so it can severely
-  // under-report on long sessions.
-  let tokenBudget = 0;
-  let tokenSource = 'none';
+  // Token budget — the transcript's latest assistant usage block is the only
+  // source for zone decisions. No usage line (fresh session, user-only tail)
+  // means tokenSource 'none' and the zone gate stays silent; the chars/4
+  // tool-I/O estimate is never a fallback.
   const transcriptPath = stdinInput && stdinInput.transcript_path;
-  const transcriptTokens = readTranscriptTokens(transcriptPath, { sessionId });
-  if (transcriptTokens > 0) {
-    tokenBudget = transcriptTokens;
-    tokenSource = 'transcript';
-  } else {
+  const latest = readLatestUsage(transcriptPath, { sessionId });
+  const tokenBudget = latest ? latest.contextTokens : 0;
+  const tokenSource = latest ? latest.source : 'none';
+  const model = (latest && latest.model) || null;
+  let cap = 0;
+  let fillPct = 0;
+  if (latest) {
     try {
-      const raw = fs.readFileSync(budgetFile, 'utf8').trim();
-      const parsed = parseInt(raw, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        tokenBudget = parsed;
-        tokenSource = 'estimate';
-      }
-    } catch { /* no budget file yet — tracker hasn't run */ }
+      cap = resolveContextCap({
+        model,
+        env: process.env,
+        settings: loadSettingsForCwd(stdinCwd),
+        configCap: fullCfg.statusline && fullCfg.statusline.contextCap,
+      }).cap;
+      fillPct = fillPctOf(tokenBudget, cap);
+    } catch { /* cap is best-effort telemetry */ }
+  }
+  if (tokenBudget > 0) {
+    try { updatePeak(sessionId, tokenBudget); } catch { /* best effort */ }
   }
   intelLog('suggest-compact', 'debug', 'token budget resolved',
     { tokenBudget, tokenSource });
@@ -429,6 +431,7 @@ async function main() {
         sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
         costTightened: !!zonesCfg.costTightened,
+        fillPct, cap, model,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
       });
       // Mirror to events DB for /si stats. Best-effort.
@@ -445,6 +448,10 @@ async function main() {
           tokens: tokenBudget,
           cost: Number.isFinite(sessionCost) ? sessionCost : null,
           reason: grewEnough ? 'refire' : 'crossing',
+          contextCap: cap,
+          fillPct,
+          model,
+          trigger: (stdinInput && stdinInput.tool_name) || null,
         });
       } catch { /* events lib optional */ }
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked
