@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { DEFAULT_INPUT_RULES } = require('./prune');
 
 // Preset shapes for `statusline.preset`. Using a preset is a shortcut that
 // sets `fields` without losing the ability to override individual fields —
@@ -295,6 +296,19 @@ const DEFAULTS = {
     // Lazy GC: sweep archives older than this many days on each hook fire.
     ttlDays: 7,
   },
+  prune: {
+    // Replace oversized string tool results with a head/tail excerpt (full
+    // body stays in the tool archive; `/si expand <id>` replays it). Floor
+    // sits above Claude Code's own caps so only the long tail is touched.
+    enabled: true,
+    outputFloorChars: 50000,
+    headChars: 2000,
+    tailChars: 1500,
+    tools: ['Read', 'Bash', 'Grep', 'Glob', 'WebFetch'],
+    // PreToolUse Bash rewrite (test runners, .log cats) via inputRules.
+    rewriteInput: true,
+    inputRules: DEFAULT_INPUT_RULES,
+  },
   learn: {
     // When true and adaptive zones (compact-history derived) materially
     // differ from the last time they were shown to the user, the next
@@ -428,6 +442,13 @@ function applyEnvOverrides(cfg) {
   if (env.CLAUDE_TOOL_ARCHIVE_THRESHOLD) {
     const n = parseInt(env.CLAUDE_TOOL_ARCHIVE_THRESHOLD, 10);
     if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.toolArchive.thresholdChars = n;
+  }
+
+  if (env.CLAUDE_SI_PRUNE === '0') cfg.prune.enabled = false;
+  if (env.CLAUDE_SI_PRUNE === '1') cfg.prune.enabled = true;
+  if (env.CLAUDE_SI_PRUNE_FLOOR) {
+    const n = parseInt(env.CLAUDE_SI_PRUNE_FLOOR, 10);
+    if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.prune.outputFloorChars = n;
   }
 
   if (env.CLAUDE_INTEL_DEBUG === '1') cfg.debug.enabled = true;
