@@ -23,16 +23,17 @@ const HOOKS = path.join(__dirname, '..', 'hooks');
 
 // Spawn a hook with an isolated HOME so getStateDir()/getEventsDbPath() resolve
 // under a sandbox. Returns the sandbox HOME for inspection.
-function runHook(hookFile, payload) {
+function runHook(hookFile, payload, seed) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
   fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+  if (seed) seed(path.join(home, '.claude', 'state'));
   const r = spawnSync(process.execPath, [path.join(HOOKS, hookFile)], {
     input: JSON.stringify(payload),
     env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: payload.session_id || '' },
     encoding: 'utf8',
     timeout: 10_000,
   });
-  return { home, status: r.status };
+  return { home, status: r.status, stderr: r.stderr };
 }
 
 function cleanup(home) {
@@ -113,5 +114,21 @@ test('si-token-budget estimates tool I/O at 3 chars/token (3,000 chars => ceil(3
     assert.equal(status, 0, 'hook exits 0');
     const file = path.join(home, '.claude', 'state', `claude-token-budget-${sid}`);
     assert.equal(parseInt(fs.readFileSync(file, 'utf8'), 10), 1100);
+  } finally { cleanup(home); }
+});
+
+test('si-token-budget emits no [TokenBudget] zone line even when the estimate crosses the old 200k yellow line', () => {
+  const sid = 'sid-budget-zone';
+  const { home, status, stderr } = runHook('si-token-budget.js', {
+    session_id: sid,
+    tool_name: 'Bash',
+    tool_output: 'x'.repeat(3000),
+    transcript_path: '',
+  }, (stateDir) => fs.writeFileSync(path.join(stateDir, `claude-token-budget-${sid}`), '199500'));
+  try {
+    assert.equal(status, 0);
+    assert.ok(!stderr.includes('[TokenBudget]'), `unexpected zone message: ${stderr}`);
+    const file = path.join(home, '.claude', 'state', `claude-token-budget-${sid}`);
+    assert.ok(parseInt(fs.readFileSync(file, 'utf8'), 10) > 200000, 'diagnostic file still written');
   } finally { cleanup(home); }
 });

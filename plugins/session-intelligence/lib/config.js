@@ -77,7 +77,13 @@ const DEFAULTS = {
     preset: 'verbose',
     fields: STATUSLINE_PRESETS.verbose.slice(),
     tokenSource: 'auto',
-    zones: { yellow: 200000, orange: 300000, red: 400000 },
+    // Zones are fractions of the effective context window (heuristic: no
+    // official degradation point exists for Claude 5). 'absolute' restores the
+    // fixed `zones` token thresholds below.
+    zoneMode: 'fraction',
+    zoneFractions: { yellow: 0.20, orange: 0.30, red: 0.40 },
+    zones: { yellow: 200000, orange: 300000, red: 400000 }, // honoured only when zoneMode === 'absolute'
+    contextCap: 0, // explicit window override; 0 = auto (resolveContextCap)
     maxTaskLength: 40,
     // Middle-truncate the `branch` field at this length so long names like
     // `feat/some-very-long-feature-slug` don't push the last status row past
@@ -363,6 +369,9 @@ function applyEnvOverrides(cfg) {
   if (env.NO_COLOR === '1' || env.CLAUDE_STATUSLINE_NO_COLOR === '1') {
     cfg.statusline.colors = false;
   }
+  if (env.CLAUDE_SI_ZONE_MODE === 'fraction' || env.CLAUDE_SI_ZONE_MODE === 'absolute') {
+    cfg.statusline.zoneMode = env.CLAUDE_SI_ZONE_MODE;
+  }
   if (env.CLAUDE_STATUSLINE_COMPACT === '1') {
     cfg.statusline.fields = cfg.statusline.fields.filter((f) => f !== 'task');
   }
@@ -550,21 +559,42 @@ function resolveStatuslineForCwd(cfg, cwd) {
   return merged;
 }
 
+const ONE_M_TOKENS = 1000000;
+const FRACTION_FALLBACK = { yellow: 0.20, orange: 0.30, red: 0.40 };
+const ABSOLUTE_FALLBACK = { yellow: 200000, orange: 300000, red: 400000 };
+
+function pickFinite(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 /**
  * Single source of truth for the {yellow, orange, red} token thresholds.
- * Reads `statusline.zones` (the user-facing knob) and falls back to the
- * built-in defaults. Suggest-compact and the statusline both call this so
- * the bar's colour and the hook's escalation gate stay aligned — without
- * it, customising one didn't move the other and you'd see orange in the
- * bar while the hook still sat at yellow.
+ * Default mode 'fraction': each threshold is a fraction of the effective
+ * window `cap` (omitted cap assumes 1M, which reproduces 200k/300k/400k; a
+ * 200K window gives 40k/60k/80k). Mode 'absolute' returns `statusline.zones`
+ * verbatim. Suggest-compact and the statusline both call this so the bar's
+ * colour and the hook's escalation gate stay aligned. Returns a new object.
  */
-function getZoneThresholds(cfg) {
-  const fallback = { yellow: 200000, orange: 300000, red: 400000 };
-  const z = (cfg && cfg.statusline && cfg.statusline.zones) || {};
+function getZoneThresholds(cfg, opts) {
+  const sl = (cfg && cfg.statusline) || {};
+  const cap = opts && Number.isFinite(opts.cap) && opts.cap > 0 ? opts.cap : ONE_M_TOKENS;
+  if (sl.zoneMode === 'absolute') {
+    const z = sl.zones || {};
+    return {
+      yellow: pickFinite(z.yellow, ABSOLUTE_FALLBACK.yellow),
+      orange: pickFinite(z.orange, ABSOLUTE_FALLBACK.orange),
+      red: pickFinite(z.red, ABSOLUTE_FALLBACK.red),
+      mode: 'absolute',
+      cap,
+    };
+  }
+  const f = sl.zoneFractions || {};
   return {
-    yellow: Number.isFinite(z.yellow) ? z.yellow : fallback.yellow,
-    orange: Number.isFinite(z.orange) ? z.orange : fallback.orange,
-    red:    Number.isFinite(z.red)    ? z.red    : fallback.red,
+    yellow: Math.round(pickFinite(f.yellow, FRACTION_FALLBACK.yellow) * cap),
+    orange: Math.round(pickFinite(f.orange, FRACTION_FALLBACK.orange) * cap),
+    red: Math.round(pickFinite(f.red, FRACTION_FALLBACK.red) * cap),
+    mode: 'fraction',
+    cap,
   };
 }
 

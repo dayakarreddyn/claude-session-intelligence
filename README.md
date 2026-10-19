@@ -51,12 +51,14 @@ Without session intelligence:
 
 ### Token Zones
 
-| Zone | Tokens (default) | Action |
-|------|--------|--------|
-| Green | <200k | Free zone — work normally |
-| Yellow | 200-300k | Caution — compact between tasks |
-| Orange | 300-400k | Context rot — compact now |
-| Red | >400k | Urgent — compact immediately |
+| Zone | Fraction of window | 1M window | 200K window | Action |
+|------|--------|--------|--------|--------|
+| Green | <20% | <200k | <40k | Free zone — work normally |
+| Yellow | 20-30% | 200-300k | 40-60k | Caution — compact between tasks |
+| Orange | 30-40% | 300-400k | 60-80k | Context rot — compact now |
+| Red | >40% | >400k | >80k | Urgent — compact immediately |
+
+No official degradation point exists for Claude 5; these fractions are calibrated to the Opus 4.6 evidence and Claude Code's own API defaults of 100K for clearing and 150K for compaction. Set `statusline.zoneMode: "absolute"` to keep fixed token thresholds (`statusline.zones`), or export `CLAUDE_SI_ZONE_MODE=absolute`.
 
 After **≥5 compacts** land in `~/.claude/logs/compact-history.jsonl`, the zones adapt to your own pattern: `orange` anchors to P50 of your historical compact-at-tokens, `red` to P90. Bounded ±30% from defaults so a noisy history can't silence the warnings. See [Learning Loop](#learning-loop) below.
 

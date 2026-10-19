@@ -1920,11 +1920,22 @@ function main() {
   // the static config zones so the bar color matches what si-suggest-compact
   // reports. Falls back to config zones when the history lib or file is
   // absent. Silent — failures never break rendering.
+  // Base zones are fractions of the resolved window (or absolute, per
+  // statusline.zoneMode) via the shared getZoneThresholds; the stand-alone
+  // fallback keeps its static `zones`.
+  const zoneCap = contextCap(input, cfg);
+  try {
+    const shared = loadSharedConfig();
+    if (shared && typeof shared.getZoneThresholds === 'function') {
+      const base = shared.getZoneThresholds({ statusline: cfg }, { cap: zoneCap });
+      cfg = { ...cfg, zones: { yellow: base.yellow, orange: base.orange, red: base.red } };
+    }
+  } catch { /* keep static zones on error */ }
   try {
     const compactHistory = loadCompactHistoryLib();
     if (compactHistory && typeof compactHistory.adaptiveZones === 'function') {
       const history = typeof compactHistory.readHistory === 'function' ? compactHistory.readHistory() : [];
-      const adaptive = compactHistory.adaptiveZones(history, cfg.zones, { cwd, cap: contextCap(input, cfg) });
+      const adaptive = compactHistory.adaptiveZones(history, cfg.zones, { cwd, cap: zoneCap });
       if (adaptive && adaptive.adaptive) {
         cfg.zones = { yellow: adaptive.yellow, orange: adaptive.orange, red: adaptive.red };
       }

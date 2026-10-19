@@ -35,8 +35,7 @@ function resolveSiLibDir() {
 const SI_LIB = resolveSiLibDir();
 
 const {
-  getStateDir,
-  log
+  getStateDir
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const {
@@ -149,10 +148,8 @@ async function main() {
   // touched, so suggest-compact and pre-compact can generate grounded
   // preserve/drop hints instead of generic "consider /compact". Observation
   // only — decisions happen elsewhere. Never fails the hook.
-  // Load config once — used both for shape tracking (rootDirDepth, maxEntries)
-  // and for zone-crossover messages below (statusline.zones). Loading outside
-  // the shape-tracking try so a shape error doesn't leave `cfg` unbound when
-  // getZone() runs.
+  // Load config once for shape tracking (rootDirDepth, maxEntries). Loaded
+  // outside the shape-tracking try so a shape error can't leave `cfg` unbound.
   const cfg = loadSiConfig();
   try {
     const toolName = (parsedInput && parsedInput.tool_name) || '';
@@ -306,56 +303,12 @@ async function main() {
     intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });
   }
 
-  // Log at zone boundaries (only when crossing, not every call). Zones come
-  // from statusline.zones so token-budget, statusline, and suggest-compact
-  // report the SAME zone for a given token count — mismatched thresholds
-  // produce incoherent "orange at 300k in log, 350k in statusline" UX.
-  const zones = resolveZones(cfg);
-  const prevZone = getZone(cumulative - callTokens, zones);
-  const newZone = getZone(cumulative, zones);
-
-  if (newZone !== prevZone && newZone !== 'green') {
-    const messages = {
-      yellow: `[TokenBudget] ~${formatTokens(cumulative)} tokens used — good time to /compact after current task`,
-      orange: `[TokenBudget] ~${formatTokens(cumulative)} tokens — context rot zone. Consider /compact now`,
-      red:    `[TokenBudget] ~${formatTokens(cumulative)} tokens — compact immediately to prevent degraded output`
-    };
-    log(messages[newZone] || '');
-    intelLog('token-budget', 'info', `zone transition ${prevZone} → ${newZone}`, { toolIoEstimate: cumulative, callTokens });
-  } else {
-    intelLog('token-budget', 'debug', `tick ${newZone}`, { toolIoEstimate: cumulative, callTokens });
-  }
+  // The cumulative chars/4 tool-I/O estimate is written for diagnostics only.
+  // Zone decisions and messages belong to si-suggest-compact, which reads the
+  // transcript's real usage against the resolved window.
+  intelLog('token-budget', 'debug', 'tick', { toolIoEstimate: cumulative, callTokens });
 
   process.exit(0);
-}
-
-function getZone(tokens, zones) {
-  const z = zones || DEFAULT_ZONES;
-  if (tokens >= z.red) return 'red';
-  if (tokens >= z.orange) return 'orange';
-  if (tokens >= z.yellow) return 'yellow';
-  return 'green';
-}
-
-// Same defaults as lib/config.js DEFAULTS.statusline.zones. Duplicated with
-// intent — if the config module is missing, we still want reasonable zones
-// rather than throwing.
-const DEFAULT_ZONES = { yellow: 200000, orange: 300000, red: 400000 };
-
-function resolveZones(cfg) {
-  const fromCfg = cfg && cfg.statusline && cfg.statusline.zones;
-  if (!fromCfg) return DEFAULT_ZONES;
-  return {
-    yellow: Number.isFinite(fromCfg.yellow) ? fromCfg.yellow : DEFAULT_ZONES.yellow,
-    orange: Number.isFinite(fromCfg.orange) ? fromCfg.orange : DEFAULT_ZONES.orange,
-    red:    Number.isFinite(fromCfg.red)    ? fromCfg.red    : DEFAULT_ZONES.red,
-  };
-}
-
-function formatTokens(n) {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${Math.round(n / 1000)}k`;
-  return String(n);
 }
 
 main().catch(err => {

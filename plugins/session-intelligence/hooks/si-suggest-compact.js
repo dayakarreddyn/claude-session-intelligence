@@ -22,11 +22,14 @@
  * - Compact after exploration, before execution
  * - Compact after completing a milestone, before starting next
  *
- * Token zones (from Thariq's research on 1M context):
- * - Green  (<200k): free zone, continue normally
- * - Yellow (200-300k): caution, good time to compact between tasks
- * - Orange (300-400k): context rot zone, compact soon
- * - Red    (>400k): urgent, compact immediately
+ * Token zones are fractions of the resolved context window (statusline.zoneMode
+ * 'fraction', the default; 20% / 30% / 40%), via lib/config getZoneThresholds.
+ * On a 1M window that is today's 200k / 300k / 400k; on 200K it is 40k / 60k / 80k.
+ * - Green  (<yellow): free zone, continue normally
+ * - Yellow: caution, good time to compact between tasks
+ * - Orange: context rot zone, compact soon
+ * - Red: urgent, compact immediately
+ * statusline.zoneMode 'absolute' keeps fixed token thresholds (statusline.zones).
  */
 
 const fs = require('fs');
@@ -214,13 +217,12 @@ async function main() {
   // new repos still benefit from global learning.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
   // Single source of truth — same thresholds the statusline paints with.
-  // Avoids the misalignment where `statusline.zones` was customised but the
-  // hook's hardcoded {200k,300k,400k} fell out of sync.
+  // Fractions of the resolved window (or absolute `statusline.zones`).
   let baseZones;
   try {
     const cfgMod = require(path.join(SI_LIB, 'config'));
     baseZones = cfgMod.getZoneThresholds
-      ? cfgMod.getZoneThresholds(fullCfg)
+      ? cfgMod.getZoneThresholds(fullCfg, { cap: cap > 0 ? cap : undefined })
       : { yellow: 200000, orange: 300000, red: 400000 };
   } catch {
     baseZones = { yellow: 200000, orange: 300000, red: 400000 };

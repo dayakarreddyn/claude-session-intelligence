@@ -36,9 +36,6 @@ node --test tests/session-context.test.js
 - **Hook entry points** (`hooks/si-*.js`) — those are CLI scripts. Tests
   would need to fork + pipe, which adds runtime + flakiness. Their
   business logic is already covered via the modules they import.
-- **Token budget zone resolution** — lives inside `si-token-budget.js` as
-  a local helper. Worth extracting to `lib/zones.js` next time it changes,
-  at which point it earns a test file.
 
 ## Node version matrix
 
