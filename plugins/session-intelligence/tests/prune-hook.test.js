@@ -170,12 +170,48 @@ test('archive write failure (read-only state dir): no prune, exit 0', { skip: pr
   } finally { fs.chmodSync(state, 0o700); }
 }));
 
-test('Bash { stdout, stderr } object response is not stringified and not pruned', () => withHome((home) => {
+const readShaped = (id, n) => ({
+  hook_event_name: 'PostToolUse', session_id: sid, tool_name: 'Read', tool_use_id: id, tool_input: { file_path: '/x/y.js' },
+  tool_response: { type: 'text', file: { filePath: '/x/y.js', content: 'r'.repeat(n), numLines: 1200, startLine: 1, totalLines: 1200 } },
+});
+
+test('Read-shaped response: file.content is pruned, shape and other file fields preserved, archive holds the text', () => withHome((home) => {
+  const r = runHook('si-prune-output.js', readShaped('toolu_30', 60000), home);
+  assert.equal(r.status, 0, r.stderr);
+  const o = JSON.parse(r.stdout).hookSpecificOutput.updatedToolOutput;
+  assert.equal(o.type, 'text');
+  assert.ok(o.file.content.startsWith('[SI pruned: Read result'));
+  assert.deepEqual([o.file.filePath, o.file.numLines, o.file.startLine, o.file.totalLines], ['/x/y.js', 1200, 1, 1200]);
+  const arch = JSON.parse(fs.readFileSync(archiveFile(home, 'toolu_30'), 'utf8'));
+  assert.equal(arch.body, 'r'.repeat(60000), 'archived body is the content text, not the JSON wrapper');
+  assert.equal(archiveRow(home, 'toolu_30').pruned, 1);
+}));
+
+test('Bash-shaped response: stdout pruned; stderr/interrupted/isImage preserved', () => withHome((home) => {
   const r = runHook('si-prune-output.js', {
     hook_event_name: 'PostToolUse', session_id: sid, tool_name: 'Bash', tool_use_id: 'toolu_23',
-    tool_input: { command: 'ls' }, tool_response: { stdout: 'x'.repeat(60000), stderr: '' },
+    tool_input: { command: 'ls' },
+    tool_response: { stdout: 'x'.repeat(60000), stderr: 'warn', interrupted: false, isImage: false },
   }, home);
-  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+  assert.equal(r.status, 0, r.stderr);
+  const o = JSON.parse(r.stdout).hookSpecificOutput.updatedToolOutput;
+  assert.ok(o.stdout.startsWith('[SI pruned: Bash result'));
+  assert.deepEqual([o.stderr, o.interrupted, o.isImage], ['warn', false, false]);
+}));
+
+test('Read-shaped response survives the dispatcher as an object', () => withHome((home) => {
+  const r = runHook('si-post-tool.js', { ...readShaped('toolu_31', 60000), transcript_path: '' }, home);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).hookSpecificOutput.updatedToolOutput.file.content.startsWith('[SI pruned'), true);
+}));
+
+test('dispatcher merge carries an object updatedToolOutput alongside additionalContext', () => withHome((home) => {
+  const t = transcript(home, 'claude-opus-5-5', 200000);
+  const r = runHook('si-post-tool.js', { ...readShaped('toolu_32', 60000), transcript_path: t, cwd: home }, home);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout).hookSpecificOutput;
+  assert.equal(out.updatedToolOutput.type, 'text');
+  assert.match(out.additionalContext, /\[StrategicCompact\]/);
 }));
 
 test('dispatcher omits additionalContext when the merged callout is empty-free path (prune only)', () => withHome((home) => {

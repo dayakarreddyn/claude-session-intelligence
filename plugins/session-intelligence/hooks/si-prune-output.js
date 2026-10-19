@@ -73,28 +73,31 @@ function ensureArchived(sid, id, toolName, toolInput, body, archiveCfg) {
 }
 
 function handlePost(payload, cfg) {
-  const { decidePrune } = require(path.join(SI_LIB, 'prune'));
+  const { decidePrune, extractPrunableText } = require(path.join(SI_LIB, 'prune'));
   const toolArchive = require(path.join(SI_LIB, 'tool-archive'));
   const { id, toolName, toolInput } = toolArchive.extractFromPayload(payload);
-  // Raw response (not stringified) so structured MCP results are rejected.
+  // Structured results are pruned only for known shapes (Read, Bash, string);
+  // the excerpt is rebuilt in the tool's own output shape. Others (MCP) are skipped.
   const raw = payload.tool_response !== undefined ? payload.tool_response : payload.tool_output;
+  const extracted = extractPrunableText({ toolName, toolResponse: raw });
+  if (!extracted) return;
   const archiveCfg = loadArchiveConfig();
   if (archiveCfg.enabled === false) {
     intelLog('prune', 'debug', 'prune skipped: archive disabled', { id, tool: toolName });
     return;
   }
-  const decision = decidePrune({ toolName, toolUseId: id, body: raw, cfg });
+  const decision = decidePrune({ toolName, toolUseId: id, body: extracted.text, cfg });
   if (!decision.pruned) return;
 
   const sid = payload.session_id || payload.sessionId || process.env.CLAUDE_SESSION_ID || 'default';
-  if (!ensureArchived(sid, id, toolName, toolInput, raw, archiveCfg)) {
+  if (!ensureArchived(sid, id, toolName, toolInput, extracted.text, archiveCfg)) {
     intelLog('prune', 'debug', 'prune skipped: archive not on disk after write', { id, tool: toolName });
     return;
   }
   try { require(path.join(SI_LIB, 'events')).markArchivePruned(id); } catch { /* best-effort */ }
   intelLog('prune', 'info', 'pruned tool output',
     { id, tool: toolName, originalChars: decision.originalChars, excerptChars: decision.excerptChars });
-  emit({ hookEventName: 'PostToolUse', updatedToolOutput: decision.output });
+  emit({ hookEventName: 'PostToolUse', updatedToolOutput: extracted.rebuild(decision.output) });
 }
 
 function main() {

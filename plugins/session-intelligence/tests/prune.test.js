@@ -168,3 +168,19 @@ test('decidePrune prunes exactly 50000 chars and rejects an empty body as below-
 test('inputHash is stable across nested key order', () => {
   assert.equal(inputHash('X', { a: { b: 1, c: 2 } }), inputHash('X', { a: { c: 2, b: 1 } }));
 });
+
+test('extractPrunableText: string, Bash, Read shapes rebuild in place; others return null', () => {
+  const { extractPrunableText } = require('../lib/prune');
+  assert.equal(extractPrunableText({ toolName: 'Read', toolResponse: 'abc' }).rebuild('X'), 'X');
+  const bash = { stdout: 'o', stderr: 'e', interrupted: false, isImage: false };
+  const b = extractPrunableText({ toolName: 'Bash', toolResponse: bash });
+  assert.equal(b.text, 'o');
+  assert.deepEqual(b.rebuild('X'), { stdout: 'X', stderr: 'e', interrupted: false, isImage: false });
+  assert.equal(bash.stdout, 'o', 'input not mutated');
+  const read = { type: 'text', file: { filePath: '/f', content: 'c', numLines: 1 } };
+  assert.deepEqual(extractPrunableText({ toolName: 'Read', toolResponse: read }).rebuild('X'),
+    { type: 'text', file: { filePath: '/f', content: 'X', numLines: 1 } });
+  for (const v of [null, undefined, 5, [], {}, { content: [{ type: 'text', text: 'z' }] }, { type: 'text', file: {} }]) {
+    assert.equal(extractPrunableText({ toolName: 'mcp__x', toolResponse: v }), null);
+  }
+});

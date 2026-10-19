@@ -95,7 +95,11 @@ function extractFromPayload(payload) {
             : payload.output        !== undefined ? payload.output
             : payload.result        !== undefined ? payload.result
             : '';
-  const body = typeof raw === 'string' ? raw : safeStringify(raw);
+  // Known shapes (Bash stdout, Read file content) archive the text itself so
+  // `/si expand` replays it verbatim and the pruner's excerpt matches the archive.
+  let text = null;
+  try { text = require('./prune').extractPrunableText({ toolName, toolResponse: raw }); } catch { /* optional */ }
+  const body = text ? text.text : (typeof raw === 'string' ? raw : safeStringify(raw));
 
   return { id, body, toolName, toolInput };
 }

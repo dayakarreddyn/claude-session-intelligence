@@ -83,7 +83,7 @@ function parsePruneOutput(stdout) {
   try {
     const parsed = JSON.parse(stdout);
     const h = parsed && parsed.hookSpecificOutput;
-    return h && typeof h.updatedToolOutput === 'string' ? h : null;
+    return h && h.updatedToolOutput !== undefined && h.updatedToolOutput !== null ? h : null;
   } catch { return null; }
 }
 

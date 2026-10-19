@@ -50,6 +50,28 @@ function buildExcerpt(body, { headChars, tailChars, archiveId, toolName, origina
   return header(len) + rest;
 }
 
+/**
+ * Pull the prunable text out of a tool response and return a `rebuild` that
+ * puts an excerpt back in the tool's own output shape (Claude Code ignores an
+ * `updatedToolOutput` that does not match the built-in tool's output schema).
+ * Supported: plain string, Bash `{ stdout, stderr, ... }`, Read
+ * `{ type: 'text', file: { content, ... } }`. Anything else (MCP content
+ * arrays, Agent results, unknown objects, null) returns null.
+ */
+function extractPrunableText({ toolName, toolResponse } = {}) {
+  void toolName;
+  const r = toolResponse;
+  if (typeof r === 'string') return { text: r, rebuild: (excerpt) => excerpt };
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  if (typeof r.stdout === 'string') {
+    return { text: r.stdout, rebuild: (excerpt) => ({ ...r, stdout: excerpt }) };
+  }
+  if (r.type === 'text' && r.file && typeof r.file.content === 'string') {
+    return { text: r.file.content, rebuild: (excerpt) => ({ ...r, file: { ...r.file, content: excerpt } }) };
+  }
+  return null;
+}
+
 function decidePrune({ toolName, toolUseId, body, cfg }) {
   if (!cfg || !cfg.enabled) return { pruned: false, reason: 'disabled' };
   if (typeof body !== 'string') return { pruned: false, reason: 'not-string' };
@@ -103,4 +125,4 @@ function inputHash(toolName, toolInput) {
   return crypto.createHash('sha1').update(`${toolName}\n${canonical}`).digest('hex').slice(0, INPUT_HASH_LENGTH);
 }
 
-module.exports = { decidePrune, buildExcerpt, rewriteCommand, inputHash, DEFAULT_INPUT_RULES };
+module.exports = { extractPrunableText, decidePrune, buildExcerpt, rewriteCommand, inputHash, DEFAULT_INPUT_RULES };
