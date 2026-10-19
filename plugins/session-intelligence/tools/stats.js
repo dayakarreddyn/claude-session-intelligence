@@ -524,7 +524,7 @@ function main() {
   const project = flags.project || null;
 
   if (!events.isAvailable()) {
-    console.error('[si stats] events DB unavailable (better-sqlite3 not installed?).');
+    console.error('[si stats] events DB unavailable (neither better-sqlite3 nor node:sqlite loaded; see ~/.claude/logs/session-intel-*.log).');
     console.error(`           expected at: ${events.getEventsDbPath()}`);
     process.exit(1);
   }

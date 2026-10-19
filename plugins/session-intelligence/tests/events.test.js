@@ -12,6 +12,7 @@ const path = require('path');
 const os = require('os');
 
 const events = require('../lib/events');
+const { openDatabase } = require('../lib/sqlite-driver');
 
 function mkSandboxDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-events-'));
@@ -93,7 +94,6 @@ test('recordZoneTransition stores from/to/tokens/reason', () => {
 test('user_version migration backfills compacts/zone project from sessions via sid', () => {
   const sb = mkSandboxDb();
   try {
-    const Sqlite = require('better-sqlite3');
     // First open creates the schema + sets user_version=1 (no rows to backfill).
     assert.equal(events.isAvailable(), true);
     events._resetForTest();
@@ -101,7 +101,7 @@ test('user_version migration backfills compacts/zone project from sessions via s
     // Hand-seed rows the way the OLD, disagreeing writers would have: the
     // session has the canonical basename, but compacts/zone have the encoded
     // slug and the cwd leaf respectively. Then force the migration to re-run.
-    const raw = new Sqlite(sb.dbPath);
+    const raw = openDatabase(sb.dbPath).db;
     const now = Date.now();
     raw.prepare('INSERT INTO sessions (sid, project, cwd, started_at) VALUES (?,?,?,?)')
       .run('s1', 'CSM', '/Users/x/DWS/CSM', now);
@@ -126,7 +126,7 @@ test('user_version migration backfills compacts/zone project from sessions via s
     assert.ok(red && red.n === 1, 'zone transition now filters under project=CSM');
 
     // Orphan (no session) row keeps its original key.
-    const verify = new Sqlite(sb.dbPath);
+    const verify = openDatabase(sb.dbPath).db;
     const orphan = verify.prepare("SELECT project FROM zone_transitions WHERE sid='agent-xyz'").get();
     verify.close();
     assert.equal(orphan.project, 'orphan', 'sid without a session is left untouched');
@@ -396,14 +396,13 @@ test('reconcileSubagentUsage backfills blind tracker rows by parentToolUseId', (
 test('user_version 2 migration reprices agent costs from the per-model table', () => {
   const sb = mkSandboxDb();
   try {
-    const Sqlite = require('better-sqlite3');
     // First open creates schema and lands on the current user_version.
     assert.equal(events.isAvailable(), true);
     events._resetForTest();
 
     // Seed a row costed at the old flat Opus table ($15/MTok input), then
     // rewind user_version so the reprice migration re-runs on next open.
-    const raw = new Sqlite(sb.dbPath);
+    const raw = openDatabase(sb.dbPath).db;
     raw.prepare(`
       INSERT INTO agent_invocations
         (sid, tool_use_id, subagent_type, t, model, input_tokens, output_tokens,
@@ -421,7 +420,7 @@ test('user_version 2 migration reprices agent costs from the per-model table', (
     events._setDbPathForTest(sb.dbPath);
     assert.equal(events.isAvailable(), true);
 
-    const verify = new Sqlite(sb.dbPath);
+    const verify = openDatabase(sb.dbPath).db;
     const repriced = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_1'").get();
     const untouched = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_2'").get();
     const ver = verify.pragma('user_version', { simple: true });
@@ -515,8 +514,7 @@ test('upsertSessionModelCosts + weeklyModelSpend aggregate parent and agent spen
     assert.ok(Math.abs(byModel['claude-opus-4-8'] - 2.5) < 1e-9, `opus=${byModel['claude-opus-4-8']}`);
     assert.equal(week[0].model, 'claude-fable-5', 'sorted by spend desc');
     // Old rows age out of the window.
-    const Sqlite = require('better-sqlite3');
-    const raw = new Sqlite(sb.dbPath);
+    const raw = openDatabase(sb.dbPath).db;
     raw.prepare('UPDATE session_model_costs SET t = ? WHERE model = ?')
       .run(now - 10 * 24 * 60 * 60 * 1000, 'claude-fable-5');
     raw.close();

@@ -39,3 +39,16 @@ node --test tests/session-context.test.js
 - **Token budget zone resolution** — lives inside `si-token-budget.js` as
   a local helper. Worth extracting to `lib/zones.js` next time it changes,
   at which point it earns a test file.
+
+## Node version matrix
+
+The events store falls back from `better-sqlite3` to `node:sqlite` when the
+native binary does not match the running Node ABI. The fallback path only runs
+under Node 22.13+, so run both before shipping anything that touches
+`lib/sqlite-driver.js` or `lib/events.js`:
+
+```bash
+npm test            # Node 20 (better-sqlite3 path; node:sqlite tests skip)
+npm run test:node22 # Node 22 via mise (automatic node:sqlite fallback)
+npm run test:matrix # both
+```

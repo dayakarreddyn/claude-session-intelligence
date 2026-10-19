@@ -541,6 +541,8 @@ One combined diff, one **YES** confirmation, one write. Complex fields (`statusl
 
 Run `/si stats` (or `node tools/stats.js`) for a multi-section rollup of everything the events DB at `~/.claude/state/si-events.db` has captured. Defaults to the last 30 days; pass `--days=N` to widen or narrow the window, `--project=<basename>` to filter, `--recent` for the simple last-20-compacts table, `--json` for machine output.
 
+The store opens through `lib/sqlite-driver.js`: `better-sqlite3` when its prebuilt native binary matches the running Node ABI, otherwise Node's built-in `node:sqlite` (Node 22.13+), so a project directory that pins a different Node via mise/nvm no longer silently disables telemetry. Force a driver with `SI_SQLITE_DRIVER=better-sqlite3` or `SI_SQLITE_DRIVER=node:sqlite`.
+
 Sections, in order:
 
 - **Headline** — total spend, sessions, avg/session, avg/day, tool calls, peak tokens. If `usageBudget.daily` or `usageBudget.weekly` is set, two extra rows show `today / cap` and `this week / cap` with color-coded `%` of budget.

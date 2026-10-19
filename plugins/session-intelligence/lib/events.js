@@ -46,24 +46,20 @@ function openDb() {
   if (_db) return _db;
   if (_dbDisabled || _dbAttempted) return _db;
   _dbAttempted = true;
-  let Sqlite;
-  try { Sqlite = require('better-sqlite3'); }
-  catch (err) {
-    // Native module missing or failed to load — disable for the process.
-    // Caller should already be in a try/catch but log for diagnosability.
-    try {
-      const { intelLog } = require('./intel-debug');
-      intelLog('events', 'debug', 'better-sqlite3 unavailable', { err: err && err.message });
-    } catch { /* optional */ }
-    _dbDisabled = true;
-    return null;
-  }
   try {
-    _db = new Sqlite(getEventsDbPath());
+    // better-sqlite3 when its native binary matches this Node ABI, otherwise
+    // the built-in node:sqlite (Node >= 22.13). See lib/sqlite-driver.js.
+    const { openDatabase } = require('./sqlite-driver');
+    const opened = openDatabase(getEventsDbPath());
+    _db = opened.db;
     _db.pragma('journal_mode = WAL');
     _db.pragma('synchronous = NORMAL');
     _db.pragma('foreign_keys = ON');
     initSchema(_db);
+    try {
+      const { intelLog } = require('./intel-debug');
+      intelLog('events', 'debug', 'sqlite driver', { driver: opened.driver });
+    } catch { /* optional */ }
     return _db;
   } catch (err) {
     try {

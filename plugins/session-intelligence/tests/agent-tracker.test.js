@@ -44,8 +44,7 @@ function agentRows(home, sid) {
   // treat that as zero recorded rows rather than a failure.
   const dbPath = path.join(home, '.claude', 'state', 'si-events.db');
   if (!fs.existsSync(dbPath)) return [];
-  const Sqlite = require('better-sqlite3');
-  const db = new Sqlite(dbPath, { readonly: true });
+  const { db } = require('../lib/sqlite-driver').openDatabase(dbPath);
   try {
     return db.prepare('SELECT subagent_type, prompt_chars, response_chars, is_error FROM agent_invocations WHERE sid = ?').all(sid);
   } finally { db.close(); }
