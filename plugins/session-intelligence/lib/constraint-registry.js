@@ -55,14 +55,15 @@ function extractCompactInstructions(claudeMdText) {
 
 /**
  * Constraint lines of one session-context section body: bullets, numbered
- * items, `Key: value` lines (value kept) and plain prose. Drop lines and
+ * items, `Key: value` lines (value kept) and plain prose. Drop lines, HTML
+ * comment lines (si:autofill sentinels) and
  * headings are skipped.
  */
 function linesOfSection(body) {
   const out = [];
   for (const raw of String(body || '').split('\n')) {
     const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
+    if (!line || line.startsWith('#') || line.startsWith('<!--')) continue;
     const listed = line.match(LIST_MARKER_RE);
     const content = listed ? listed[1] : line;
     const key = content.match(KEY_LINE_RE);

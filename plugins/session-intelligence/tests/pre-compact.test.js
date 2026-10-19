@@ -243,3 +243,69 @@ test('si-pre-compact stamps contextTokens/cap/fill on the history entry and comp
     } finally { db.close(); }
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+// --- Task 14: registry-first, capped PreCompact output ----------------------
+
+function runPreCompact({ sessionContext, sid, extraShapeLines = 0 }) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const cwd = path.join(home, 'proj');
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+  const transcript = path.join(home, 'transcript.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: 'assistant', timestamp: '2026-10-19T00:00:00Z',
+    message: { id: 'msg_1', model: 'claude-opus-5-5', role: 'assistant', content: [],
+      usage: { input_tokens: 400000, cache_creation_input_tokens: 0, cache_read_input_tokens: 80000, output_tokens: 10 } },
+  }) + '\n');
+  const projectDir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/\//g, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'session-context.md'), sessionContext);
+  const env = { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid };
+  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+    input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'manual', hook_event_name: 'PreCompact' }),
+    env, encoding: 'utf8', timeout: 15000,
+  });
+  const statePath = path.join(home, '.claude', 'state', `claude-constraints-${sid}.json`);
+  return { r, home, statePath, readState: () => JSON.parse(fs.readFileSync(statePath, 'utf8')) };
+}
+
+test('PreCompact prints the registry before every other section, exits 0, never blocks', () => {
+  const ctx = '# Session Context\n\n## Current Task\ntype: feat — thing\ndescription: do the thing\n\n'
+    + '## Key Decisions\n- Never rewrite earlier turns\n\n## On Compact\nPRESERVE: the auth contract\n';
+  const { r, home, readState } = runPreCompact({ sessionContext: ctx, sid: 'sid-pc-reg' });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /"decision"/);
+    const reg = r.stdout.indexOf('## CONSTRAINT REGISTRY');
+    assert.ok(reg >= 0, r.stdout);
+    assert.ok(reg < r.stdout.indexOf('## COMPACTION GUIDANCE'));
+    assert.ok(r.stdout.length < 10000);
+    const state = readState();
+    assert.ok(state.items.some((i) => i.text === 'Never rewrite earlier turns'));
+    assert.equal(state.fillPct, 48); assert.equal(state.contextTokens, 480000);
+    assert.equal(state.contextCap, 1000000); assert.equal(state.trigger, 'manual');
+    assert.equal(state.model, 'claude-opus-5-5');
+    for (const item of state.items) assert.ok(r.stdout.includes(item.text), `state item "${item.text}" must be in stdout`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('PreCompact over the cap keeps the registry intact, drops optional blocks from the end, and logs it', () => {
+  const ctx = '# Session Context\n\n## Key Decisions\n- Never rewrite earlier turns\n\n'
+    + '## On Compact\nPRESERVE: ' + 'x'.repeat(9000) + '\n\n## Current Task\ntype: feat — thing\ndescription: ' + 'y'.repeat(6000) + '\n';
+  const { r, home, readState } = runPreCompact({ sessionContext: ctx, sid: 'sid-pc-cap' });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.length < 10000, `stdout was ${r.stdout.length}`);
+    assert.doesNotMatch(r.stdout, /"decision"/);
+    const state = readState();
+    assert.ok(state.items.length >= 1);
+    for (const item of state.items) assert.ok(r.stdout.includes(item.text));
+    assert.match(r.stdout, /Never rewrite earlier turns/);
+    const logDir = path.join(home, '.claude', 'logs');
+    const log = fs.readdirSync(logDir).filter((f) => f.startsWith('session-intel-'))
+      .map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
+    assert.match(log, /block assembled/);
+    assert.match(log, /block assembled.*"dropped":\["[a-zA-Z]+"/);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

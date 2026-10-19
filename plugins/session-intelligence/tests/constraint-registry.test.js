@@ -139,3 +139,10 @@ test('retentionOf handles empty summaries and ignores stop words and partial-wor
   const eval_ = [{ type: 'Action', text: 'Never use eval with user input' }];
   assert.equal(retentionOf(eval_, 'with that this from into prose').retained, 0);
 });
+
+test('HTML sentinel comment lines never become constraints', () => {
+  const sections = parseSessionContext('## Key Decisions\n<!-- si:autofill sha=abc1234 -->\n- Never rewrite earlier turns\n\n## On Compact\n<!-- si:autofill sha=def5678 -->\nPRESERVE: the auth contract\n');
+  const reg = buildRegistry({ sections, claudeMdText: '' });
+  assert.ok(reg.items.length >= 2);
+  assert.ok(reg.items.every((i) => !i.text.includes('<!--')), JSON.stringify(reg.items));
+});
