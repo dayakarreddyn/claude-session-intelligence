@@ -653,3 +653,16 @@ test('recordZoneTransition stores contextCap/fillPct/model/trigger', () => {
     } finally { verify.close(); }
   } finally { cleanup(sb); }
 });
+
+test('markArchivePruned flags the archive and aggregateStats reports archives.pruned', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordToolArchive({ sid: 's1', toolUseId: 'toolu_p1', tool: 'Read', chars: 60000, t: Date.now() }));
+    assert.ok(events.recordToolArchive({ sid: 's1', toolUseId: 'toolu_p2', tool: 'Read', chars: 5000, t: Date.now() }));
+    assert.equal(events.aggregateStats({ sinceDays: 365 }).archives.pruned || 0, 0);
+    assert.ok(events.markArchivePruned('toolu_p1'));
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.equal(stats.archives.pruned, 1);
+    assert.equal(stats.archives.n, 2);
+  } finally { cleanup(sb); }
+});

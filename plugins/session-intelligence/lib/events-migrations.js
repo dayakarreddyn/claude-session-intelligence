@@ -15,6 +15,7 @@ const GUARDED_ADD_COLUMNS = Object.freeze([
   "ALTER TABLE agent_invocations ADD COLUMN cache_creation_tokens INTEGER",
   "ALTER TABLE agent_invocations ADD COLUMN cache_read_tokens INTEGER",
   "ALTER TABLE agent_invocations ADD COLUMN cost_usd REAL",
+  "ALTER TABLE tool_archives ADD COLUMN pruned INTEGER DEFAULT 0",
 ]);
 
 /**

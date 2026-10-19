@@ -17,9 +17,8 @@
  *   - LRU eviction when count > maxPerSession (drop oldest by index order)
  *   - Lazy TTL sweep on write — archives older than ttlDays are removed
  *
- * Observational only. We don't modify the tool pipeline or truncate what
- * the model sees on the initial call; the post-compact retrieval path is
- * the value prop.
+ * Archive first, prune second: `si-prune-output.js` only replaces results
+ * whose full body is already on disk here.
  */
 
 const fs = require('fs');

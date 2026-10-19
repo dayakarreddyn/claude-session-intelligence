@@ -31,3 +31,11 @@ test('every SI hook is a node command resolved through CLAUDE_PLUGIN_ROOT', () =
     }
   }
 });
+
+test('PreToolUse registers si-prune-output.js on Bash with a numeric timeout', () => {
+  const group = hooks.PreToolUse.find((g) => g.hooks.some((h) => h.command.includes('si-prune-output.js')));
+  assert.ok(group, 'si-prune-output.js must be registered on PreToolUse');
+  assert.equal(group.matcher, 'Bash');
+  const h = group.hooks.find((x) => x.command.includes('si-prune-output.js'));
+  assert.equal(typeof h.timeout, 'number');
+});

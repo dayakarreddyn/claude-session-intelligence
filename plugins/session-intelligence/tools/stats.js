@@ -426,6 +426,7 @@ function renderArchives(a) {
   const rows = [
     ['Snapshots',  String(a.n || 0)],
     ['Recalled',   `${a.recalled || 0} (${recallPct})`],
+    ['Pruned',     String(a.pruned || 0)],
     ['Total size', fmtBytes(a.bytes)],
   ];
   const w = Math.max(...rows.map((r) => r[0].length));

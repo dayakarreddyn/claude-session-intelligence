@@ -41,9 +41,11 @@ test('initSchema lands on SCHEMA_VERSION and runMigrations is idempotent', () =>
   } finally { cleanup(sb); }
 });
 
-test('GUARDED_ADD_COLUMNS lists the six agent_invocations ALTERs', () => {
-  assert.equal(GUARDED_ADD_COLUMNS.length, 6);
-  assert.ok(GUARDED_ADD_COLUMNS.every((s) => /^ALTER TABLE agent_invocations ADD COLUMN /.test(s)));
+test('GUARDED_ADD_COLUMNS lists the six agent_invocations ALTERs plus tool_archives.pruned', () => {
+  const agentAlters = GUARDED_ADD_COLUMNS.filter((s) => /^ALTER TABLE agent_invocations ADD COLUMN /.test(s));
+  assert.equal(agentAlters.length, 6);
+  assert.deepEqual(GUARDED_ADD_COLUMNS.filter((s) => !agentAlters.includes(s)),
+    ['ALTER TABLE tool_archives ADD COLUMN pruned INTEGER DEFAULT 0']);
 });
 
 test('repriceAgentInvocations reprices rows with model+tokens and skips token-less rows', () => {

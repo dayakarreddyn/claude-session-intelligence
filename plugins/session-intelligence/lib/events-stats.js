@@ -71,7 +71,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     `).all(cutoff, ...projectArgs);
 
     const archives = db.prepare(`
-      SELECT COUNT(*) AS n, SUM(recalled) AS recalled, SUM(chars) AS bytes
+      SELECT COUNT(*) AS n, SUM(recalled) AS recalled, SUM(chars) AS bytes, SUM(pruned) AS pruned
       FROM tool_archives WHERE t >= ?
         ${project ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : ''}
     `).get(cutoff, ...projectArgs);

@@ -431,6 +431,15 @@ function weeklyModelSpend({ days = 7 } = {}) {
   } catch { return []; }
 }
 
+function markArchivePruned(toolUseId) {
+  const db = openDb();
+  if (!db || !toolUseId) return false;
+  try {
+    db.prepare('UPDATE tool_archives SET pruned = 1 WHERE tool_use_id = ?').run(toolUseId);
+    return true;
+  } catch { return false; }
+}
+
 function markArchiveRecalled(toolUseId) {
   const db = openDb();
   if (!db || !toolUseId) return false;
@@ -509,6 +518,7 @@ module.exports = {
   recordZoneTransition,
   recordToolArchive,
   markArchiveRecalled,
+  markArchivePruned,
   allToolArchiveKeys,
   deleteToolArchives,
   recordAgentInvocation,
