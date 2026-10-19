@@ -311,38 +311,11 @@ function safeParse(raw) {
 
 // ─── Token sources ───────────────────────────────────────────────────────────
 
-/**
- * Parse the tail of a Claude Code transcript jsonl and return the most recent
- * assistant message's usage block. Usage is the authoritative context size.
- */
-function readTranscriptUsage(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return null;
-
-  try {
-    const stat = fs.statSync(transcriptPath);
-    const SCAN_BYTES = Math.min(stat.size, 512 * 1024); // 512 KB tail
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const buf = Buffer.alloc(SCAN_BYTES);
-      fs.readSync(fd, buf, 0, SCAN_BYTES, stat.size - SCAN_BYTES);
-      const text = buf.toString('utf8');
-      const lines = text.split('\n').filter(Boolean);
-
-      // Walk backwards for most recent assistant message with usage
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const d = JSON.parse(lines[i]);
-          const msg = d && d.message;
-          if (msg && typeof msg === 'object' && msg.usage) {
-            return msg.usage;
-          }
-        } catch { /* partial line on boundary */ }
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch { /* silent */ }
-  return null;
+function loadTranscriptUsageLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  try { return require(path.join(dir, 'transcript-usage.js')); }
+  catch { return null; }
 }
 
 /**
@@ -1964,7 +1937,9 @@ function main() {
   let usedTranscript = false;
   let usage = null;
   if (cfg.tokenSource !== 'estimate') {
-    usage = readTranscriptUsage(transcriptPath);
+    const usageLib = loadTranscriptUsageLib();
+    const latest = usageLib ? usageLib.readLatestUsage(transcriptPath, { sessionId }) : null;
+    usage = latest && latest.usage;
     const fromTranscript = totalTokensFromUsage(usage);
     if (fromTranscript > 0) {
       tokens = fromTranscript;

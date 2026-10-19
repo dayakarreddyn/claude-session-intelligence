@@ -316,7 +316,7 @@ function readTokenBudget(sessionId) {
 }
 
 function resolveTokenBudget(input, sessionId) {
-  const fromTranscript = readTranscriptTokens(input && input.transcript_path);
+  const fromTranscript = readTranscriptTokens(input && input.transcript_path, { sessionId });
   if (fromTranscript > 0) return fromTranscript;
   return readTokenBudget(sessionId);
 }

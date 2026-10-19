@@ -174,7 +174,7 @@ async function main() {
   let tokenBudget = 0;
   let tokenSource = 'none';
   const transcriptPath = stdinInput && stdinInput.transcript_path;
-  const transcriptTokens = readTranscriptTokens(transcriptPath);
+  const transcriptTokens = readTranscriptTokens(transcriptPath, { sessionId });
   if (transcriptTokens > 0) {
     tokenBudget = transcriptTokens;
     tokenSource = 'transcript';
