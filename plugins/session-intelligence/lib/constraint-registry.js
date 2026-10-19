@@ -34,9 +34,9 @@ function classifyConstraint(text) {
   return 'Information';
 }
 
-const BULLET_RE = /^\s*[-*]\s+(.+?)\s*$/;
-const KEY_LINE_RE = /^([A-Z][A-Z _-]*):\s*(.+?)\s*$/;
-const DROP_KEY_RE = /^(DROP|SAFE TO DROP)$/;
+const LIST_MARKER_RE = /^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/;
+const KEY_LINE_RE = /^([A-Za-z][A-Za-z _-]{0,30}):\s+(.+?)\s*$/;
+const DROP_KEY_RE = /^(safe to )?drop$/i;
 
 function extractCompactInstructions(claudeMdText) {
   const out = [];
@@ -47,20 +47,27 @@ function extractCompactInstructions(claudeMdText) {
       continue;
     }
     if (!inside) continue;
-    const m = line.match(BULLET_RE);
+    const m = line.match(/^\s*[-*]\s+(.+?)\s*$/);
     if (m) out.push(m[1]);
   }
   return out;
 }
 
-/** Bullets and `KEY: value` lines of one session-context section body. */
+/**
+ * Constraint lines of one session-context section body: bullets, numbered
+ * items, `Key: value` lines (value kept) and plain prose. Drop lines and
+ * headings are skipped.
+ */
 function linesOfSection(body) {
   const out = [];
-  for (const line of String(body || '').split('\n')) {
-    const bullet = line.match(BULLET_RE);
-    if (bullet) { out.push(bullet[1]); continue; }
-    const key = line.trim().match(KEY_LINE_RE);
-    if (key && !DROP_KEY_RE.test(key[1])) out.push(key[2]);
+  for (const raw of String(body || '').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const listed = line.match(LIST_MARKER_RE);
+    const content = listed ? listed[1] : line;
+    const key = content.match(KEY_LINE_RE);
+    if (key && DROP_KEY_RE.test(key[1].trim())) continue;
+    out.push(key && !listed ? key[2] : content);
   }
   return out;
 }
@@ -73,9 +80,10 @@ function clip(text) {
 function buildRegistry({ sections, claudeMdText } = {}) {
   const s = sections || {};
   const candidates = [
-    ...linesOfSection(sectionByTitle(s, 'Key Decisions')).map((text) => ({ text, source: 'key-decisions' })),
-    ...linesOfSection(sectionByTitle(s, 'On Compact')).map((text) => ({ text, source: 'on-compact' })),
+    // Priority order: the most authoritative rules survive the caps.
     ...extractCompactInstructions(claudeMdText).map((text) => ({ text, source: 'compact-instructions' })),
+    ...linesOfSection(sectionByTitle(s, 'On Compact')).map((text) => ({ text, source: 'on-compact' })),
+    ...linesOfSection(sectionByTitle(s, 'Key Decisions')).map((text) => ({ text, source: 'key-decisions' })),
   ];
   const seen = new Set();
   const unique = [];
@@ -94,16 +102,37 @@ function buildRegistry({ sections, claudeMdText } = {}) {
   };
 }
 
-function renderRegistryBlock(registry) {
+const BLOCK_HEAD = `\n${BLOCK_HEADING}\n`;
+
+function lineOf(item) {
+  return `- [${item.type}] ${item.text}\n`;
+}
+
+/**
+ * Keep the longest priority-ordered prefix of whole items whose rendered
+ * block fits `maxChars`. The result is the exact retention baseline for what
+ * the render emits; `truncated` is set when anything was dropped.
+ */
+function fitRegistryToCap(registry, maxChars = MAX_BLOCK_CHARS) {
   const items = (registry && registry.items) || [];
-  if (items.length === 0) return '';
-  let out = `\n${BLOCK_HEADING}\n`;
+  const kept = [];
+  let used = BLOCK_HEAD.length;
   for (const item of items) {
-    const line = `- [${item.type}] ${item.text}\n`;
-    if (out.length + line.length > MAX_BLOCK_CHARS) break;
-    out += line;
+    used += lineOf(item).length;
+    if (used > maxChars) break;
+    kept.push(item);
   }
-  return out;
+  return {
+    items: kept,
+    truncated: Boolean(registry && registry.truncated) || kept.length < items.length,
+    sources: [...new Set(kept.map((i) => i.source))],
+  };
+}
+
+function renderRegistryBlock(registry) {
+  const { items } = fitRegistryToCap(registry); // no-op on an already fitted registry
+  if (items.length === 0) return '';
+  return BLOCK_HEAD + items.map(lineOf).join('');
 }
 
 function isSafeSessionId(sessionId) {
@@ -144,20 +173,36 @@ function normalize(text) {
   return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function isRetained(itemText, normSummary) {
+// Generic words that appear in nearly any summary and prove nothing.
+// "never"/"always" are deliberately absent: they are load-bearing in rules.
+const STOP_WORDS = new Set([
+  'with', 'that', 'this', 'from', 'into', 'have', 'will', 'when', 'then', 'than',
+  'they', 'them', 'there', 'their', 'what', 'which', 'were', 'been', 'also', 'only',
+  'some', 'such', 'each', 'over', 'after', 'before', 'about', 'because', 'would',
+  'could', 'should', 'must',
+]);
+
+/** Lower-case word tokens with a light plural strip ("tests" ~ "test"). */
+function wordsOf(norm) {
+  return norm.split(/[^a-z0-9]+/).filter(Boolean)
+    .map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
+}
+
+function isRetained(itemText, normSummary, summaryTokens) {
   const norm = normalize(itemText);
   if (!norm) return false;
   if (normSummary.includes(norm)) return true;
-  const words = [...new Set(norm.split(/[^a-z0-9]+/).filter((w) => w.length >= MIN_WORD_CHARS))];
+  const words = [...new Set(wordsOf(norm).filter((w) => w.length >= MIN_WORD_CHARS && !STOP_WORDS.has(w)))];
   if (words.length === 0) return false;
-  const hits = words.filter((w) => normSummary.includes(w)).length;
+  const hits = words.filter((w) => summaryTokens.has(w)).length;
   return hits / words.length >= WORD_OVERLAP_RATIO;
 }
 
 function retentionOf(items, summary) {
   const list = Array.isArray(items) ? items : [];
   const normSummary = normalize(summary);
-  const missing = list.filter((i) => !isRetained(i.text, normSummary)).map((i) => i.text);
+  const summaryTokens = new Set(wordsOf(normSummary));
+  const missing = list.filter((i) => !isRetained(i.text, normSummary, summaryTokens)).map((i) => i.text);
   const total = list.length;
   const retained = total - missing.length;
   return { total, retained, ratio: total ? Math.round((retained / total) * 100) / 100 : 0, missing };
@@ -172,6 +217,7 @@ module.exports = {
   extractCompactInstructions,
   buildRegistry,
   renderRegistryBlock,
+  fitRegistryToCap,
   registryStatePath,
   writeRegistryState,
   readRegistryState,
