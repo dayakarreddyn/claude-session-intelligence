@@ -690,83 +690,47 @@ async function main() {
       const entries = ctxShape.readShape(sessionId);
       const analysis = ctxShape.analyzeShape(entries, analyzeOpts);
 
-      // tokens-at-compact = last observed cumulative budget, fallback to 0.
-      // cost-at-compact  = same, best-effort from transcript.
-      const tokens = entries.length ? (entries[entries.length - 1].tok || 0) : 0;
       const transcriptPath = stdinInput.transcript_path;
       const cost = costEst
         ? costEst.totalCostFromTranscript(transcriptPath, sessionId, costEst.DEFAULT_PRICES)
         : 0;
 
-      const droppedDirs = analysis ? analysis.cold.map((c) => c.root) : [];
-      const hotDirs     = analysis ? analysis.hot.map((h) => h.root) : [];
-      const warmDirs    = analysis ? analysis.warm.map((w) => w.root) : [];
-
-      // Authoritative cost-at-compact, captured by the statusline's per-render
-      // snapshot. When present, the statusline `compactCost` field uses
-      // `current_total - costAtCompactUsd` for a strict subset of session
-      // cost. Falls back to the transcript-priced estimate when missing
-      // (fresh session, no statusline run yet, or `total_cost_usd` absent
-      // from stdin in this environment).
+      // Authoritative cost-at-compact from the statusline's per-render
+      // snapshot; null falls back to the transcript-priced estimate.
       const costSnapshot = readCostSnapshot(sessionId);
       const costAtCompactUsd = costSnapshot && Number.isFinite(costSnapshot.total_cost_usd)
         ? Number(costSnapshot.total_cost_usd.toFixed(4))
         : null;
 
-      const historyEntry = {
-        t: Date.now(),
-        sid: sessionId,
-        cwd,
-        tokens,
-        cost: Number(cost.toFixed(4)),
-        hotDirs,
-        warmDirs,
-        droppedDirs,
-        hadShift: !!(analysis && analysis.shift),
-        regretCount: 0, // upgraded later when the snapshot window closes
-      };
-      if (costAtCompactUsd !== null) historyEntry.costAtCompactUsd = costAtCompactUsd;
+      // tokens = per-call contextTokens of the latest assistant usage (never
+      // the chars/token tool-I/O estimate, which stays as toolIoEstimate).
+      const latest = require(path.join(SI_LIB, 'transcript-usage'))
+        .readLatestUsage(transcriptPath, { sessionId });
+      const capLib = require(path.join(SI_LIB, 'context-cap'));
+      const { cap } = capLib.resolveContextCap({
+        model: latest && latest.model,
+        env: process.env,
+        settings: capLib.loadSettingsForCwd(cwd),
+        configCap: siCfg.statusline && siCfg.statusline.contextCap,
+      });
+      const { historyEntry, dbRow, snapshot } = require(path.join(SI_LIB, 'compact-record')).buildCompactRecord({
+        latest, cap, entries, trigger: stdinInput.trigger || null, cwd, sessionId, cost, costAtCompactUsd, analysis,
+      });
+      const { tokens, hotDirs, warmDirs, droppedDirs } = historyEntry;
       compactHistory.appendHistory(historyEntry);
 
-      // Mirror to durable events DB for /si stats + future dashboard. Optional —
-      // any failure (native module unavailable, write error) is swallowed by
-      // recordCompact and the JSONL above is authoritative.
+      // Mirror to the durable events DB; optional, JSONL above is authoritative.
+      // Canonical project key (repo-root basename), not the encoded projects slug.
       try {
-        const events = require(path.join(SI_LIB, 'events'));
-        // Canonical project key (repo-root basename) so this row joins/filters
-        // with sessions + zone_transitions. NOT basename(projectDir) — that's
-        // the encoded ~/.claude/projects slug (e.g. -Users-0xd-DWS-CSM).
-        events.recordCompact({
-          sid: sessionId,
+        require(path.join(SI_LIB, 'events')).recordCompact({
+          ...dbRow,
           project: ctxShape ? ctxShape.projectKeyOf(cwd) : null,
-          cwd,
-          t: historyEntry.t,
-          tokens,
-          cost: historyEntry.cost,
-          costAtCompactUsd,
-          hotDirs, warmDirs, droppedDirs,
-          hadShift: historyEntry.hadShift,
-          trigger: stdinInput.trigger || null,
         });
       } catch { /* events lib optional */ }
 
-      // Snapshot drives post-compact regret monitoring for up to 30 calls
-      // or 30 min — whichever first. si-token-budget.js consumes it.
-      // warmDirs enables soft-regret detection: users compacting early
-      // (median 60k) rarely age dirs to COLD, so hard regret never fires.
-      // WARM-not-HOT touches post-compact are the wider signal we can act on.
-      compactHistory.writeSnapshot(sessionId, {
-        t: historyEntry.t,
-        tokens,
-        cost: historyEntry.cost,
-        hotDirs,
-        warmDirs,
-        droppedDirs,
-        callsSince: 0,
-        regretHits: [],
-        softRegretHits: [],
-        positiveHits: [],
-      });
+      // Snapshot drives post-compact regret monitoring (30 calls / 30 min);
+      // si-token-budget.js consumes it.
+      compactHistory.writeSnapshot(sessionId, snapshot);
 
       intelLog('pre-compact', 'info', 'history + snapshot written', {
         tokens, cost: historyEntry.cost, dropped: droppedDirs.length, hot: hotDirs.length,

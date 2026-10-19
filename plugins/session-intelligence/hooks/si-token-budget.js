@@ -5,11 +5,12 @@
  * Cross-platform (Windows, macOS, Linux)
  *
  * Tracks approximate token usage per session by measuring tool output sizes.
- * Writes cumulative estimate to a temp file that si-suggest-compact.js reads
- * to provide token-aware compaction suggestions.
+ * Writes a cumulative TOOL-I/O ESTIMATE (a share diagnostic, NOT the context
+ * size: real context comes from the transcript's per-call usage) to the state
+ * file read by session-end peak stats and shape tracking.
  *
- * Token estimation (rough but directionally correct):
- *   - 1 token ≈ 4 characters of English text
+ * Token estimation (rough, code/JSON-heavy):
+ *   - 1 token ≈ 3 characters
  *   - Each tool call adds ~100 tokens overhead (schema, framing)
  *   - User/assistant messages add ~200-500 tokens each
  *
@@ -63,7 +64,7 @@ function loadSiConfig() {
   catch { return {}; }
 }
 
-const CHARS_PER_TOKEN = 4;
+const CHARS_PER_TOKEN = 3; // calibrated for code/JSON-heavy tool I/O
 const TOOL_OVERHEAD_TOKENS = 100;
 
 async function main() {
@@ -320,9 +321,9 @@ async function main() {
       red:    `[TokenBudget] ~${formatTokens(cumulative)} tokens — compact immediately to prevent degraded output`
     };
     log(messages[newZone] || '');
-    intelLog('token-budget', 'info', `zone transition ${prevZone} → ${newZone}`, { cumulative, callTokens });
+    intelLog('token-budget', 'info', `zone transition ${prevZone} → ${newZone}`, { toolIoEstimate: cumulative, callTokens });
   } else {
-    intelLog('token-budget', 'debug', `tick ${newZone}`, { cumulative, callTokens });
+    intelLog('token-budget', 'debug', `tick ${newZone}`, { toolIoEstimate: cumulative, callTokens });
   }
 
   process.exit(0);

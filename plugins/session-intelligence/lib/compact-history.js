@@ -33,6 +33,19 @@ const LOG_DIR = path.join(
 );
 const HISTORY_FILE = path.join(LOG_DIR, 'compact-history.jsonl');
 
+/**
+ * History entry shape (built by lib/compact-record.js). `tokens` and
+ * `contextTokens` are the per-call context size of the latest assistant usage
+ * (input + cache creation + cache read); `contextCap`/`fillPct`/`model`/`trigger`
+ * qualify it; `toolIoEstimate` is the cumulative chars/3 tool-I/O share
+ * diagnostic, never context size.
+ * @typedef {{ t: number, sid: string, cwd: string, tokens: number, contextTokens: number,
+ *   contextCap: number, fillPct: number, model: string|null, trigger: string|null,
+ *   toolIoEstimate: number, cost: number, hotDirs: string[], warmDirs: string[],
+ *   droppedDirs: string[], hadShift: boolean, regretCount: number,
+ *   costAtCompactUsd?: number }} CompactHistoryEntry
+ */
+
 const MAX_HISTORY_READ = 50;
 const MAX_HISTORY_KEEP = 200;
 const HISTORY_MAX_BYTES = 256 * 1024;

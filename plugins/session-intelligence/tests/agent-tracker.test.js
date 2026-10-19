@@ -100,3 +100,18 @@ test('si-token-budget writes counters to ~/.claude/state, not tmp', () => {
     );
   } finally { cleanup(home); }
 });
+
+test('si-token-budget estimates tool I/O at 3 chars/token (3,000 chars => ceil(3000/3)+100)', () => {
+  const sid = 'sid-budget-3';
+  const { home, status } = runHook('si-token-budget.js', {
+    session_id: sid,
+    tool_name: 'Bash',
+    tool_output: 'x'.repeat(3000),
+    transcript_path: '',
+  });
+  try {
+    assert.equal(status, 0, 'hook exits 0');
+    const file = path.join(home, '.claude', 'state', `claude-token-budget-${sid}`);
+    assert.equal(parseInt(fs.readFileSync(file, 'utf8'), 10), 1100);
+  } finally { cleanup(home); }
+});
