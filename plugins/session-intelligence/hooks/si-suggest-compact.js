@@ -193,10 +193,8 @@ async function main() {
   intelLog('suggest-compact', 'debug', 'token budget resolved',
     { tokenBudget, tokenSource });
 
-  // Session cost — surfaced in the escalation message and fed into
-  // adaptiveZones so expensive sessions compact earlier (Q2 cost-band
-  // tightening). Pulled from transcript usage; 0 when transcript isn't
-  // available.
+  // Session cost — surfaced in the escalation message. Pulled from
+  // transcript usage; 0 when transcript isn't available.
   let sessionCost = 0;
   try {
     if (costEst && transcriptPath) {
@@ -213,9 +211,6 @@ async function main() {
   // Per-cwd bucketing: when this repo has ≥5 of its own compacts, zones
   // derive from those alone; otherwise cross-project history is used so
   // new repos still benefit from global learning.
-  //
-  // Cost-band: when sessionCost exceeds the user's historical p75 cost,
-  // orange tightens by 12% — expensive sessions warrant earlier warnings.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
   // Single source of truth — same thresholds the statusline paints with.
   // Avoids the misalignment where `statusline.zones` was customised but the
@@ -235,7 +230,7 @@ async function main() {
       zonesCfg = compactHistory.adaptiveZones(
         compactHistory.readHistory(),
         baseZones,
-        { cwd: cwdForZones, currentCost: sessionCost });
+        { cwd: cwdForZones, cap: cap > 0 ? cap : null });
     }
   } catch { /* keep static */ }
 
@@ -398,11 +393,6 @@ async function main() {
           `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
         );
       }
-      if (!stablePrefix && zonesCfg.costTightened) {
-        body.push(
-          `(Orange tightened 12%: session cost ${costEst ? costEst.formatUsd(sessionCost) : `$${sessionCost.toFixed(2)}`} exceeds your historical p75 — expensive sessions warrant earlier warnings.)`
-        );
-      }
       if (learnCfg.announce === true && compactHistory && compactHistory.announceAdaptiveShift) {
         try {
           const shiftLine = compactHistory.announceAdaptiveShift(zonesCfg, cwdForZones);
@@ -430,7 +420,6 @@ async function main() {
         emitReason: grewEnough ? 'refire' : 'crossing',
         sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
-        costTightened: !!zonesCfg.costTightened,
         fillPct, cap, model,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
       });

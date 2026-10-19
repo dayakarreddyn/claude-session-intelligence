@@ -52,6 +52,8 @@ const HISTORY_MAX_BYTES = 256 * 1024;
 
 const MIN_SAMPLES_FOR_ADAPTIVE = 5;
 const ADAPTIVE_BOUND = 0.3; // ±30% from static defaults
+const YELLOW_GAP_FRACTION = 0.08; // yellow sits this fraction of the window below orange
+const RED_GAP_FRACTION = 0.06; // red sits at least this fraction above orange
 const REGRET_WINDOW_CALLS = 30;
 const REGRET_WINDOW_MS = 30 * 60 * 1000; // 30 min
 
@@ -177,23 +179,29 @@ function adaptiveZones(history, defaults, opts) {
     }
   }
 
+  const cap = opts && Number.isFinite(opts.cap) && opts.cap > 0 ? opts.cap : null;
+  if (cap === null) return { ...base, adaptive: false, bucket, reason: 'no-cap' };
+
   if (!workingHistory || workingHistory.length < MIN_SAMPLES_FOR_ADAPTIVE) {
-    return { ...base, adaptive: false, bucket };
+    return { ...base, adaptive: false, bucket, reason: 'insufficient-fill-samples' };
   }
 
-  const tokensAtCompact = workingHistory
-    .map((h) => h.tokens)
-    .filter((n) => Number.isFinite(n) && n > 0);
-  if (tokensAtCompact.length < MIN_SAMPLES_FOR_ADAPTIVE) {
-    return { ...base, adaptive: false, bucket };
+  // Only entries with real usage evidence teach the learner: legacy entries
+  // (cumulative chars/4 `tokens`, no contextTokens) and no-usage compacts
+  // (fillPct null) are ignored.
+  const fills = workingHistory
+    .filter((h) => h && Number.isFinite(h.fillPct) && h.fillPct > 0
+      && Number.isFinite(h.contextTokens) && h.contextTokens > 0)
+    .map((h) => h.fillPct);
+  if (fills.length < MIN_SAMPLES_FOR_ADAPTIVE) {
+    return { ...base, adaptive: false, bucket, reason: 'insufficient-fill-samples' };
   }
 
-  const p = percentiles(tokensAtCompact);
+  const p = percentiles(fills);
 
-  // Orange = P50 of user's compact points. This is "where they usually
-  // pull the trigger". Clamp to ±30% from the static default to avoid
-  // runaway drift from a single outlier session.
-  const orangeTarget = Math.round(p.p50 * 0.9);
+  // Orange = P50 of the user's compact fill, applied to the current window.
+  // Clamp to +/-30% from the static default to avoid runaway drift.
+  const orangeTarget = Math.round(p.p50 / 100 * cap * 0.9);
   const orangeMin = Math.round(base.orange * (1 - ADAPTIVE_BOUND));
   const orangeMax = Math.round(base.orange * (1 + ADAPTIVE_BOUND));
   let orange = Math.min(orangeMax, Math.max(orangeMin, orangeTarget));
@@ -220,36 +228,16 @@ function adaptiveZones(history, defaults, opts) {
     orange = Math.min(orangeMax, Math.round(orange * 1.1));
   }
 
-  // Cost-band tightening — expensive sessions cost more to re-do than to
-  // compact, so warn earlier when the running cost exceeds the user's own
-  // p75. 12% tightening is empirically ~20-30k tokens on a 200-250k orange,
-  // enough to nudge a /compact one "chunk of work" sooner without being
-  // disruptive. Opposite-direction of regret-rate; both can apply.
-  let costTightened = false;
-  const currentCost = opts && Number.isFinite(opts.currentCost) ? opts.currentCost : null;
-  if (currentCost !== null && currentCost > 0) {
-    const costs = workingHistory
-      .map((h) => h.cost)
-      .filter((c) => Number.isFinite(c) && c > 0);
-    if (costs.length >= MIN_SAMPLES_FOR_ADAPTIVE) {
-      const cp = percentiles(costs);
-      if (cp && currentCost > cp.p75) {
-        orange = Math.max(orangeMin, Math.round(orange * 0.88));
-        costTightened = true;
-      }
-    }
-  }
-
   // Yellow hugs orange; red gives headroom above P90.
   const yellow = Math.max(
     Math.round(base.yellow * (1 - ADAPTIVE_BOUND)),
-    orange - 80000,
+    orange - Math.round(YELLOW_GAP_FRACTION * cap),
   );
   const red = Math.max(
-    orange + 60000,
+    orange + Math.round(RED_GAP_FRACTION * cap),
     Math.min(
       Math.round(base.red * (1 + ADAPTIVE_BOUND)),
-      Math.round(p.p90 * 1.1),
+      Math.round(p.p90 / 100 * cap * 1.1),
     ),
   );
 
@@ -258,10 +246,9 @@ function adaptiveZones(history, defaults, opts) {
     adaptive: true,
     bucket,
     sampleCount: p.count,
-    p50: p.p50,
-    p90: p.p90,
+    p50Fill: p.p50,
+    p90Fill: p.p90,
     regretRate: Number(regretRate.toFixed(2)),
-    costTightened,
   };
 }
 
@@ -622,6 +609,8 @@ module.exports = {
   _thresholds: {
     MIN_SAMPLES_FOR_ADAPTIVE,
     ADAPTIVE_BOUND,
+    YELLOW_GAP_FRACTION,
+    RED_GAP_FRACTION,
     REGRET_WINDOW_CALLS,
     REGRET_WINDOW_MS,
     ANNOUNCE_MIN_DELTA,

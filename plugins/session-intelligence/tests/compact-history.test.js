@@ -40,52 +40,74 @@ function fakeEntry(overrides) {
   };
 }
 
-// ── Q2: cost-band tightening ─────────────────────────────────────────────
+// ── Learner reads fill % of the window ───────────────────────────────────
 
-test('adaptiveZones tightens orange when currentCost exceeds p75', () => {
+const DEFAULTS_1M = { yellow: 200000, orange: 300000, red: 400000 };
+
+function fillEntry(fillPct, cap, overrides) {
+  return fakeEntry({
+    fillPct, contextCap: cap, contextTokens: Math.round(fillPct / 100 * cap),
+    tokens: Math.round(fillPct / 100 * cap), ...overrides,
+  });
+}
+
+test('adaptiveZones learns from fillPct x cap and ignores legacy cumulative entries', () => {
   resetHistory();
-  // Five entries with costs [10, 20, 30, 40, 50] — p75 ≈ 40.
-  for (const cost of [10, 20, 30, 40, 50]) {
-    compactHistory.appendHistory(fakeEntry({ tokens: 250000, cost }));
-  }
-  const history = compactHistory.readHistory();
-  const defaults = { yellow: 200000, orange: 300000, red: 400000 };
-
-  const cheap = compactHistory.adaptiveZones(history, defaults, { currentCost: 20 });
-  const expensive = compactHistory.adaptiveZones(history, defaults, { currentCost: 500 });
-
-  assert.equal(cheap.costTightened, false, 'cheap session should not tighten');
-  assert.equal(expensive.costTightened, true, 'expensive session should tighten');
-  assert.ok(
-    expensive.orange < cheap.orange,
-    `expensive.orange (${expensive.orange}) < cheap.orange (${cheap.orange})`,
-  );
-  // 12% tightening, but clamped by ±30% bound from defaults.
-  assert.ok(expensive.orange >= defaults.orange * 0.7);
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 1000000));
+  for (let i = 0; i < 5; i++) compactHistory.appendHistory(fakeEntry({ tokens: 1580000 }));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 1000000 });
+  assert.equal(z.adaptive, true);
+  assert.equal(z.sampleCount, 5);
+  assert.equal(z.p50Fill, 30);
+  assert.equal(z.p90Fill, 40);
+  assert.equal(z.orange, 270000);
+  assert.equal(z.yellow, 190000);
+  assert.equal(z.red, 440000);
+  assert.equal('costTightened' in z, false);
 });
 
-test('adaptiveZones ignores cost opts when history has no cost data', () => {
+test('adaptiveZones ignores legacy and null-fill entries mixed with valid ones', () => {
   resetHistory();
-  for (let i = 0; i < 5; i++) {
-    compactHistory.appendHistory(fakeEntry({ tokens: 250000, cost: 0 }));
-  }
-  const history = compactHistory.readHistory();
-  const defaults = { yellow: 200000, orange: 300000, red: 400000 };
-  const zones = compactHistory.adaptiveZones(history, defaults, { currentCost: 500 });
-  assert.equal(zones.costTightened, false);
+  for (let i = 0; i < 3; i++) compactHistory.appendHistory(fakeEntry({ tokens: 1500000 }));
+  for (let i = 0; i < 3; i++) compactHistory.appendHistory(fakeEntry({ tokens: 0, fillPct: null, contextCap: null }));
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 1000000));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 1000000 });
+  assert.equal(z.adaptive, true);
+  assert.equal(z.sampleCount, 5);
+  assert.equal(z.orange, 270000);
+  assert.equal(z.red, 440000);
 });
 
-test('adaptiveZones no-ops when currentCost is missing', () => {
+test('adaptiveZones is not adaptive with fewer than 5 fillPct entries even when tokens are present', () => {
   resetHistory();
-  for (const cost of [10, 20, 30, 40, 50]) {
-    compactHistory.appendHistory(fakeEntry({ tokens: 250000, cost }));
-  }
-  const zones = compactHistory.adaptiveZones(
-    compactHistory.readHistory(),
-    { yellow: 200000, orange: 300000, red: 400000 },
-    {},
-  );
-  assert.equal(zones.costTightened, false);
+  for (let i = 0; i < 6; i++) compactHistory.appendHistory(fakeEntry({ tokens: 250000 }));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 1000000 });
+  assert.equal(z.adaptive, false);
+  assert.equal(z.reason, 'insufficient-fill-samples');
+});
+
+test('adaptiveZones returns the defaults with reason no-cap when cap is missing', () => {
+  resetHistory();
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 1000000));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, {});
+  assert.equal(z.adaptive, false);
+  assert.equal(z.reason, 'no-cap');
+  assert.equal(z.orange, 300000);
+});
+
+test('adaptiveZones scales the same fill history to a 200K cap', () => {
+  resetHistory();
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 200000));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(),
+    { yellow: 40000, orange: 60000, red: 80000 }, { cap: 200000 });
+  assert.equal(z.orange, 54000);
+  assert.equal(z.yellow, 38000);
+  assert.equal(z.red, 88000);
+});
+
+test('adaptiveZones exposes the fraction-of-cap gap thresholds', () => {
+  assert.equal(compactHistory._thresholds.YELLOW_GAP_FRACTION, 0.08);
+  assert.equal(compactHistory._thresholds.RED_GAP_FRACTION, 0.06);
 });
 
 // ── Q5: continuation quality ─────────────────────────────────────────────
@@ -450,13 +472,13 @@ test('adaptiveZones sums softRegretCount into regret rate', () => {
   // per compact. Without the wire-through, orange would NOT get pushed out.
   for (let i = 0; i < 5; i++) {
     compactHistory.appendHistory(fakeEntry({
-      tokens: 260000,
+      tokens: 260000, contextTokens: 260000, fillPct: 26, contextCap: 1000000,
       regretCount: 0,
       softRegretCount: 1.2, // dampened sum; 5 compacts × 1.2 = 6 / 5 compacts = 1.2 rate
     }));
   }
   const defaults = { yellow: 200000, orange: 300000, red: 400000 };
-  const zones = compactHistory.adaptiveZones(compactHistory.readHistory(), defaults, {});
+  const zones = compactHistory.adaptiveZones(compactHistory.readHistory(), defaults, { cap: 1000000 });
   assert.equal(zones.adaptive, true);
   // P50 of 260k → orangeTarget = floor(260000 * 0.9) = 234000.
   // Regret-rate ≥ 1 triggers 10% push-out: 234000 * 1.1 = 257400 (capped to
@@ -469,7 +491,7 @@ test('adaptiveZones does not push orange out when regret is zero', () => {
   resetHistory();
   for (let i = 0; i < 5; i++) {
     compactHistory.appendHistory(fakeEntry({
-      tokens: 260000,
+      tokens: 260000, contextTokens: 260000, fillPct: 26, contextCap: 1000000,
       regretCount: 0,
       softRegretCount: 0,
     }));
@@ -477,7 +499,7 @@ test('adaptiveZones does not push orange out when regret is zero', () => {
   const zones = compactHistory.adaptiveZones(
     compactHistory.readHistory(),
     { yellow: 200000, orange: 300000, red: 400000 },
-    {},
+    { cap: 1000000 },
   );
   // No regret push-out: orange stays at orangeTarget = 234000.
   assert.equal(zones.orange, 234000);

@@ -1924,7 +1924,7 @@ function main() {
     const compactHistory = loadCompactHistoryLib();
     if (compactHistory && typeof compactHistory.adaptiveZones === 'function') {
       const history = typeof compactHistory.readHistory === 'function' ? compactHistory.readHistory() : [];
-      const adaptive = compactHistory.adaptiveZones(history, cfg.zones, { bucket: 'cwd', cwd });
+      const adaptive = compactHistory.adaptiveZones(history, cfg.zones, { cwd, cap: contextCap(input, cfg) });
       if (adaptive && adaptive.adaptive) {
         cfg.zones = { yellow: adaptive.yellow, orange: adaptive.orange, red: adaptive.red };
       }
