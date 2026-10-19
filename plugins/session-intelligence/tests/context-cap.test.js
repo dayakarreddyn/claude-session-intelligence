@@ -6,6 +6,7 @@ const path = require('path');
 const {
   resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd,
   isNative1M, fillPctOf, bucketPct, windowLabel,
+  ONE_M, DEFAULT_CAP, AUTO_COMPACT_1M_DEFAULT, RECOMMENDED_AUTO_COMPACT,
 } = require('../lib/context-cap');
 
 test('resolveContextCap: config override beats everything', () =>
@@ -18,6 +19,23 @@ test('resolveContextCap: CLAUDE_CODE_MAX_CONTEXT_TOKENS applies to unrecognised 
   assert.deepEqual(resolveContextCap({ model: 'gateway-custom-7', env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000' } }), { cap: 400000, source: 'env-max-context' });
   assert.equal(resolveContextCap({ model: 'claude-opus-5-5', env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000' } }).cap, 1000000);
   assert.equal(resolveContextCap({ model: 'claude-opus-5-5', env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000', DISABLE_COMPACT: '1' } }).cap, 400000);
+});
+test('resolveContextCap: model-id branch reports source model-id', () =>
+  assert.deepEqual(resolveContextCap({ model: 'claude-opus-5-5', env: {} }), { cap: 1000000, source: 'model-id' }));
+test('resolveContextCap: DISABLE_1M applies to non-native models too', () =>
+  assert.deepEqual(resolveContextCap({ model: 'mystery', env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }), { cap: 200000, source: 'env-disable-1m' }));
+test('resolveContextCap: max-context beats disable-1m when DISABLE_COMPACT=1', () =>
+  assert.deepEqual(resolveContextCap({ model: 'claude-opus-5-5', env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000', DISABLE_COMPACT: '1' } }), { cap: 400000, source: 'env-max-context' }));
+test('constants match the locked interface', () => {
+  assert.equal(ONE_M, 1000000);
+  assert.equal(DEFAULT_CAP, 200000);
+  assert.equal(AUTO_COMPACT_1M_DEFAULT, 967000);
+  assert.deepEqual(RECOMMENDED_AUTO_COMPACT, { min: 400000, max: 500000 });
+});
+test('resolveAutoCompactPoint: pct override only lowers, keeps source', () => {
+  assert.deepEqual(resolveAutoCompactPoint({ cap: 1000000, model: 'x', env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '50' }, settings: { autoCompactWindow: 300000 } }), { point: 150000, source: 'settings' });
+  assert.equal(resolveAutoCompactPoint({ cap: 1000000, model: 'x', env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '100' }, settings: { autoCompactWindow: 300000 } }).point, 300000);
+  assert.equal(resolveAutoCompactPoint({ cap: 1000000, model: 'x', env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50000' } }).point, 100000, 'floor 100000');
 });
 test('isNative1M follows the documented list', () => {
   for (const id of ['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-4-7', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'Opus 5.5', 'claude-opus-4-6[1m]']) assert.equal(isNative1M(id), true, id);
@@ -44,6 +62,8 @@ test('fillPctOf / bucketPct / windowLabel', () => {
   assert.equal(bucketPct(50), 50);
   assert.equal(windowLabel(1000000), '1M');
   assert.equal(windowLabel(200000), '200k');
+  assert.equal(windowLabel(500000), '500k');
+  assert.equal(bucketPct(48.9, 10), 40);
 });
 test('loadSettingsForCwd merges user then project then local', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'si-cap-'));

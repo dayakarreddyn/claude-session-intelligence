@@ -609,6 +609,7 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
 
 // Context cap resolution lives in lib/context-cap.js (shared with hooks).
 function contextCap(input, cfg) {
+  input = input || {}; cfg = cfg || {};
   const dir = resolveLibDir(); let lib = null;
   try { lib = dir && require(path.join(dir, 'context-cap.js')); } catch { /* fall through */ }
   return lib ? lib.resolveContextCap({ model: input.model && (input.model.id || input.model.display_name), env: process.env, contextWindowSize: input.context_window && input.context_window.context_window_size, configCap: cfg.contextCap }).cap : 200000;
