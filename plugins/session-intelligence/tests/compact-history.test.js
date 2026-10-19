@@ -110,6 +110,43 @@ test('adaptiveZones exposes the fraction-of-cap gap thresholds', () => {
   assert.equal(compactHistory._thresholds.RED_GAP_FRACTION, 0.06);
 });
 
+test('adaptiveZones falls back to global when the cwd has only legacy entries', () => {
+  resetHistory();
+  for (let i = 0; i < 5; i++) compactHistory.appendHistory(fakeEntry({ cwd: '/tmp/a', tokens: 1500000 }));
+  for (const f of [20, 22, 25, 28, 30, 32, 35, 40]) compactHistory.appendHistory(fillEntry(f, 1000000, { cwd: '/tmp/b' }));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cwd: '/tmp/a', cap: 1000000 });
+  assert.equal(z.bucket, 'global');
+  assert.equal(z.adaptive, true);
+});
+
+test('adaptiveZones keeps zones inside a 200K window when given 1M defaults', () => {
+  resetHistory();
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 200000));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 200000 });
+  assert.ok(z.red <= 200000);
+  assert.ok(z.yellow >= 0 && z.yellow < z.orange && z.orange < z.red);
+  const d = compactHistory.adaptiveZones([], DEFAULTS_1M, { cap: 200000 });
+  assert.equal(d.adaptive, false);
+  assert.ok(d.red <= 200000 && d.yellow < d.orange && d.orange < d.red);
+});
+
+test('adaptiveZones computes regretRate over valid samples only', () => {
+  resetHistory();
+  for (let i = 0; i < 5; i++) compactHistory.appendHistory(fakeEntry({ tokens: 1500000, regretCount: 0 }));
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fillEntry(f, 1000000, { regretCount: 0.6 }));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 1000000 });
+  assert.equal(z.regretRate, 0.6);
+});
+
+test('adaptiveZones rejects entries with fillPct but no contextTokens', () => {
+  resetHistory();
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fakeEntry({ fillPct: f, contextCap: 1000000, tokens: 300000 }));
+  for (const f of [20, 25, 30, 35, 40]) compactHistory.appendHistory(fakeEntry({ fillPct: f, contextTokens: 0 }));
+  const z = compactHistory.adaptiveZones(compactHistory.readHistory(), DEFAULTS_1M, { cap: 1000000 });
+  assert.equal(z.adaptive, false);
+  assert.equal(z.reason, 'insufficient-fill-samples');
+});
+
 // ── Q5: continuation quality ─────────────────────────────────────────────
 
 test('checkPostCompactRegret records positive hits in hotDirs', () => {

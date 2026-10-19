@@ -204,11 +204,12 @@ async function main() {
   } catch { /* best effort */ }
 
   // Zones: prefer adaptive thresholds derived from the user's own compact
-  // history when ≥5 samples are available. Otherwise fall back to the
-  // static 200/300/400k defaults. adaptiveZones() is bounded ±30% from the
-  // defaults so a noisy history can't silence the warnings entirely.
+  // history when ≥5 fill-based samples (fillPct of the window, scaled by the
+  // resolved `cap`) are available; legacy and no-usage entries are ignored and
+  // without a cap the static defaults stand. adaptiveZones() is bounded ±30%
+  // from the defaults so a noisy history can't silence the warnings entirely.
   //
-  // Per-cwd bucketing: when this repo has ≥5 of its own compacts, zones
+  // Per-cwd bucketing: when this repo has ≥5 valid samples of its own, zones
   // derive from those alone; otherwise cross-project history is used so
   // new repos still benefit from global learning.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
