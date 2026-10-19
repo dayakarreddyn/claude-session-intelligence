@@ -383,6 +383,11 @@ function renderCompacts(stats) {
       `${fmtTokens(c0.min_tokens)} / ${fmtTokens(c0.max_tokens)}`],
     ['With domain shift', `${c0.shifts || 0} (${shiftPct})`],
   ];
+  const fill = stats.compactFill;
+  if (fill && (fill.auto.n || fill.manual.n)) {
+    const fmtFill = (f) => (f.n ? `${f.p50}%` : '-');
+    rows.push(['Fill at compact (auto p50 / manual p50)', `${fmtFill(fill.auto)} / ${fmtFill(fill.manual)}`]);
+  }
   const w = Math.max(...rows.map((r) => r[0].length));
   for (const [k, v] of rows) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
   return lines.join('\n');

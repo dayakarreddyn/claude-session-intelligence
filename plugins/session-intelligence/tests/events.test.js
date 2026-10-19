@@ -522,3 +522,134 @@ test('upsertSessionModelCosts + weeklyModelSpend aggregate parent and agent spen
     assert.ok(!week2.find((r) => r.model === 'claude-fable-5'), 'aged-out row excluded');
   } finally { cleanup(sb); }
 });
+
+// --- Schema v3: fill columns ------------------------------------------------
+
+const V3_COMPACT_COLS = ['context_cap', 'fill_pct', 'model'];
+const V3_ZONE_COLS = ['context_cap', 'fill_pct', 'model', 'trigger'];
+
+function tableCols(db, table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+// Rewind a freshly created DB to its pre-v3 shape (v3 columns dropped) so the
+// next open exercises the real ALTER TABLE path, with legacy rows seeded.
+function seedPreV3Db(sb, userVersion) {
+  assert.equal(events.isAvailable(), true);
+  events._resetForTest();
+  const raw = openDatabase(sb.dbPath).db;
+  for (const c of V3_COMPACT_COLS) raw.exec(`ALTER TABLE compacts DROP COLUMN ${c}`);
+  for (const c of V3_ZONE_COLS) raw.exec(`ALTER TABLE zone_transitions DROP COLUMN ${c}`);
+  const now = Date.now();
+  raw.prepare('INSERT INTO sessions (sid, project, cwd, started_at) VALUES (?,?,?,?)')
+    .run('s1', 'CSM', '/x/CSM', now);
+  raw.prepare('INSERT INTO compacts (sid, project, t, tokens) VALUES (?,?,?,?)')
+    .run('s1', '-x-CSM', now, 100000);
+  raw.prepare('INSERT INTO zone_transitions (sid, project, t, to_zone) VALUES (?,?,?,?)')
+    .run('s1', 'mm', now, 'red');
+  raw.pragma(`user_version = ${userVersion}`);
+  raw.close();
+  events._setDbPathForTest(sb.dbPath);
+}
+
+test('v3 migration adds fill columns to a user_version 2 DB and leaves old rows NULL', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 2);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      const compactCols = tableCols(verify, 'compacts');
+      const zoneCols = tableCols(verify, 'zone_transitions');
+      for (const c of V3_COMPACT_COLS) assert.equal(compactCols.filter((n) => n === c).length, 1, `compacts.${c} once`);
+      for (const c of V3_ZONE_COLS) assert.equal(zoneCols.filter((n) => n === c).length, 1, `zone_transitions.${c} once`);
+      assert.equal(verify.prepare('SELECT fill_pct FROM compacts').get().fill_pct, null);
+      assert.equal(verify.prepare('SELECT fill_pct FROM zone_transitions').get().fill_pct, null);
+      assert.ok(verify.pragma('user_version', { simple: true }) >= 3);
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('v3 migration from user_version 0 runs v1, v2 and v3 in one open', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 0);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      // v1: disagreeing project keys backfilled from sessions.
+      assert.equal(verify.prepare('SELECT project FROM compacts').get().project, 'CSM');
+      assert.equal(verify.prepare('SELECT project FROM zone_transitions').get().project, 'CSM');
+      // v3: fill columns present, old rows NULL.
+      assert.ok(V3_COMPACT_COLS.every((c) => tableCols(verify, 'compacts').includes(c)));
+      assert.ok(V3_ZONE_COLS.every((c) => tableCols(verify, 'zone_transitions').includes(c)));
+      assert.equal(verify.prepare('SELECT fill_pct FROM compacts').get().fill_pct, null);
+      assert.equal(verify.pragma('user_version', { simple: true }), require('../lib/events-migrations').SCHEMA_VERSION);
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('v3 migration is a no-op on a second open (no duplicate columns, rows kept)', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 2);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const first = openDatabase(sb.dbPath).db;
+    const before = { c: tableCols(first, 'compacts'), z: tableCols(first, 'zone_transitions') };
+    first.close();
+    events._setDbPathForTest(sb.dbPath);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const second = openDatabase(sb.dbPath).db;
+    try {
+      assert.deepEqual(tableCols(second, 'compacts'), before.c);
+      assert.deepEqual(tableCols(second, 'zone_transitions'), before.z);
+      assert.equal(second.prepare('SELECT COUNT(*) AS n FROM compacts').get().n, 1);
+    } finally { second.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact stores contextCap/fillPct/model; aggregateStats splits fill p50 by trigger', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: now });
+    events.recordCompact({ sid: 's1', project: 'p', t: now, tokens: 480000, contextCap: 1000000, fillPct: 48, model: 'claude-opus-5-5', trigger: 'auto' });
+    events.recordCompact({ sid: 's1', project: 'p', t: now + 1, tokens: 300000, contextCap: 1000000, fillPct: 30, model: 'claude-opus-5-5', trigger: 'manual' });
+    const s = events.aggregateStats({ sinceDays: 30 });
+    assert.deepEqual(s.compactFill, { auto: { n: 1, p50: 48 }, manual: { n: 1, p50: 30 } });
+    const latest = events.listRecentCompacts({ limit: 1 })[0];
+    assert.equal(latest.fill_pct, 30);
+    assert.equal(latest.context_cap, 1000000);
+    assert.equal(latest.model, 'claude-opus-5-5');
+    assert.equal(s.recentCompacts[0].fill_pct, 30);
+  } finally { cleanup(sb); }
+});
+
+test('compactFill is empty-safe and ignores rows without fill_pct', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 's1', project: 'p', t: now, tokens: 1, trigger: 'auto' });
+    events.recordCompact({ sid: 's1', project: 'p', t: now + 1, tokens: 2, fillPct: Number.NaN, trigger: 'manual' });
+    const s = events.aggregateStats({ sinceDays: 30 });
+    assert.deepEqual(s.compactFill, { auto: { n: 0, p50: null }, manual: { n: 0, p50: null } });
+    assert.equal(events.listRecentCompacts({ limit: 1 })[0].fill_pct, null);
+  } finally { cleanup(sb); }
+});
+
+test('recordZoneTransition stores contextCap/fillPct/model/trigger', () => {
+  const sb = mkSandboxDb();
+  try {
+    events.recordZoneTransition({ sid: 's1', project: 'p', fromZone: 'green', toZone: 'yellow', tokens: 210000, reason: 'crossing', contextCap: 1000000, fillPct: 21, model: 'claude-fable-5-1', trigger: 'Read' });
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      const row = verify.prepare('SELECT context_cap, fill_pct, model, trigger, reason FROM zone_transitions').get();
+      assert.deepEqual({ ...row }, { context_cap: 1000000, fill_pct: 21, model: 'claude-fable-5-1', trigger: 'Read', reason: 'crossing' });
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});

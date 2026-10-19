@@ -6,7 +6,7 @@
 
 'use strict';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const GUARDED_ADD_COLUMNS = Object.freeze([
   "ALTER TABLE agent_invocations ADD COLUMN model TEXT",
@@ -185,9 +185,37 @@ function migrateV2(db) {
   repriceAgentInvocations(db);
 }
 
+// Fill columns (user_version 2 -> 3): the context window and fill percentage
+// at the moment of each compact / zone crossing, plus the model and (for zone
+// rows) the PostToolUse tool that fired the crossing. Old rows keep NULL.
+const V3_COLUMNS = Object.freeze([
+  ['compacts', 'context_cap', 'INTEGER'],
+  ['compacts', 'fill_pct', 'REAL'],
+  ['compacts', 'model', 'TEXT'],
+  ['zone_transitions', 'context_cap', 'INTEGER'],
+  ['zone_transitions', 'fill_pct', 'REAL'],
+  ['zone_transitions', 'model', 'TEXT'],
+  ['zone_transitions', 'trigger', 'TEXT'],
+]);
+
+function hasColumn(db, table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+}
+
+// Probe before ALTER so each column is added exactly once. A real ALTER
+// failure propagates so runMigrations leaves the version unadvanced.
+function migrateV3(db) {
+  for (const [table, column, type] of V3_COLUMNS) {
+    if (!hasColumn(db, table, column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
+  }
+}
+
 const MIGRATIONS = Object.freeze([
   { version: 1, run: migrateV1 },
   { version: 2, run: migrateV2 },
+  { version: 3, run: migrateV3 },
 ]);
 
 /**
@@ -217,6 +245,7 @@ function initSchema(db) {
 module.exports = {
   SCHEMA_VERSION,
   GUARDED_ADD_COLUMNS,
+  MIGRATIONS,
   initSchema,
   runMigrations,
   repriceAgentInvocations,

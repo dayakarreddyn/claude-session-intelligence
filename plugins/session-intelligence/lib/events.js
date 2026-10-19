@@ -117,8 +117,9 @@ function recordCompact(entry) {
   try {
     db.prepare(`
       INSERT INTO compacts
-        (sid, project, cwd, t, tokens, cost, cost_at_compact, hot_dirs, warm_dirs, dropped_dirs, had_shift, trigger)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (sid, project, cwd, t, tokens, cost, cost_at_compact, hot_dirs, warm_dirs, dropped_dirs, had_shift, trigger,
+         context_cap, fill_pct, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.sid,
       entry.project || null,
@@ -132,19 +133,26 @@ function recordCompact(entry) {
       JSON.stringify(entry.droppedDirs || []),
       entry.hadShift ? 1 : 0,
       entry.trigger || null,
+      Number.isFinite(entry.contextCap) ? entry.contextCap : null,
+      Number.isFinite(entry.fillPct) ? entry.fillPct : null,
+      entry.model || null,
     );
     return true;
   } catch { return false; }
 }
 
-function recordZoneTransition({ sid, project, t, fromZone, toZone, tokens, cost, reason }) {
+function recordZoneTransition({
+  sid, project, t, fromZone, toZone, tokens, cost, reason,
+  contextCap, fillPct, model, trigger,
+}) {
   const db = openDb();
   if (!db || !sid || !toZone) return false;
   try {
     db.prepare(`
       INSERT INTO zone_transitions
-        (sid, project, t, from_zone, to_zone, tokens, cost, reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (sid, project, t, from_zone, to_zone, tokens, cost, reason,
+         context_cap, fill_pct, model, trigger)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       sid, project || null,
       Number.isFinite(t) ? t : Date.now(),
@@ -152,6 +160,10 @@ function recordZoneTransition({ sid, project, t, fromZone, toZone, tokens, cost,
       Number.isFinite(tokens) ? tokens : null,
       Number.isFinite(cost) ? cost : null,
       reason || null,
+      Number.isFinite(contextCap) ? contextCap : null,
+      Number.isFinite(fillPct) ? fillPct : null,
+      model || null,
+      trigger || null,
     );
     return true;
   } catch { return false; }

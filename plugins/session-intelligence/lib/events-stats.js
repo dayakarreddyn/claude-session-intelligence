@@ -7,6 +7,24 @@
 
 'use strict';
 
+const FILL_TRIGGERS = Object.freeze(['auto', 'manual']);
+
+// Fill-at-compact p50 split by trigger. Percentile in JS (no SQLite percentile);
+// only rows that carry a fill_pct count, so pre-v3 rows never skew it.
+function fillByTrigger(db, cutoff, projectClause, projectArgs) {
+  const rows = db.prepare(`
+    SELECT fill_pct, trigger FROM compacts
+    WHERE t >= ? ${projectClause} AND fill_pct IS NOT NULL
+    ORDER BY fill_pct ASC
+  `).all(cutoff, ...projectArgs);
+  const summarize = (name) => {
+    const vals = rows.filter((r) => r.trigger === name).map((r) => r.fill_pct);
+    const p50 = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.5))] : null;
+    return { n: vals.length, p50 };
+  };
+  return Object.fromEntries(FILL_TRIGGERS.map((name) => [name, summarize(name)]));
+}
+
 function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
   if (!db) return null;
   try {
@@ -43,6 +61,8 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
       p50: pct(compactTokens, 0.5),
       p90: pct(compactTokens, 0.9),
     };
+
+    const compactFill = fillByTrigger(db, cutoff, projectClause, projectArgs);
 
     const zones = db.prepare(`
       SELECT to_zone AS zone, COUNT(*) AS n
@@ -207,13 +227,13 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
 
     // Recent compacts — same shape as listRecentCompacts but capped + project-scoped.
     const recentCompacts = db.prepare(`
-      SELECT sid, project, t, tokens, cost, had_shift, trigger
+      SELECT sid, project, t, tokens, cost, had_shift, trigger, fill_pct, context_cap, model
       FROM compacts WHERE t >= ? ${projectClause}
       ORDER BY t DESC LIMIT 8
     `).all(cutoff, ...projectArgs);
 
     return {
-      sessions, compacts, compactPercentiles, zones, archives,
+      sessions, compacts, compactPercentiles, compactFill, zones, archives,
       agents, agentTypes,
       topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
       sinceDays, project,
@@ -227,7 +247,8 @@ function listRecentCompacts(db, { limit = 20, project = null } = {}) {
     const projectClause = project ? 'WHERE project = ?' : '';
     const args = project ? [project, limit] : [limit];
     return db.prepare(`
-      SELECT sid, project, t, tokens, cost, cost_at_compact, had_shift, trigger
+      SELECT sid, project, t, tokens, cost, cost_at_compact, had_shift, trigger,
+             fill_pct, context_cap, model
       FROM compacts ${projectClause}
       ORDER BY t DESC LIMIT ?
     `).all(...args);

@@ -94,3 +94,10 @@ test('lib/events.js stays under 800 lines after the split', () => {
   const lines = fs.readFileSync(path.join(__dirname, '..', 'lib', 'events.js'), 'utf8').split('\n').length;
   assert.ok(lines < 800, `events.js is ${lines} lines`);
 });
+
+test('SCHEMA_VERSION equals the highest MIGRATIONS entry and versions are contiguous', () => {
+  const { MIGRATIONS } = require('../lib/events-migrations');
+  const versions = MIGRATIONS.map((m) => m.version);
+  assert.deepEqual(versions, versions.map((_, i) => i + 1));
+  assert.equal(SCHEMA_VERSION, versions[versions.length - 1]);
+});
