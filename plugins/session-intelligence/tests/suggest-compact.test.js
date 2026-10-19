@@ -109,3 +109,33 @@ test('si-stop reports peak_tokens from the peak file, not the cumulative estimat
     assert.equal(row.peak_tokens, 210000);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('yellow callout names duplicate reads from the shape log', () => {
+  const { home, state } = sandbox();
+  try {
+    const sid = 'sid-dupreads';
+    const entry = (i, tool, root, file, chars) => ({
+      t: 1000 + i, tok: 1000 * (i + 1), tool, root, file, event: null, chars, inputHash: `h${i}`,
+    });
+    const entries = [
+      entry(0, 'Read', 'src', 'src/a.js', 30000),
+      entry(1, 'Read', 'lib', 'lib/b.js', 100),
+      entry(2, 'Read', 'src', 'src/a.js', 30000),
+      entry(3, 'Read', 'docs', 'docs/c.md', 100),
+      entry(4, 'Read', 'hooks', 'hooks/d.js', 100),
+      entry(5, 'Read', 'src', 'src/a.js', 30000),
+      entry(6, 'Read', 'tests', 'tests/e.js', 100),
+      entry(7, 'Read', 'bin', 'bin/f.js', 100),
+    ];
+    fs.writeFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`),
+      entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const t = writeTranscript(home, [userLine, usageLine('claude-opus-5-5', {
+      input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+    })]);
+    const r = runHook('si-suggest-compact.js',
+      { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' }, { home });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /Duplicate reads: src\/a\.js ×3 — later reads add no information; prefer the latest copy\./);
+    assert.ok(r.stderr.length < 10000);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

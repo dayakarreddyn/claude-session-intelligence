@@ -61,6 +61,7 @@ const {
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const { readLatestUsage, updatePeak } = require(path.join(SI_LIB, 'transcript-usage'));
 const { resolveContextCap, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+const MAX_DUP_READ_LINES = 3;
 const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
@@ -373,6 +374,10 @@ async function main() {
       const headline = `[StrategicCompact] ${header}${tokStr}. Advisory only — continue if the task needs full context.`;
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
+      const dupReads = (shape && shape.duplicates && shape.duplicates.reads) || [];
+      for (const d of dupReads.slice(0, MAX_DUP_READ_LINES)) {
+        body.push(`Duplicate reads: ${d.file} ×${d.count} — later reads add no information; prefer the latest copy.`);
+      }
 
       // Memory-offload nudge — give Claude a turn to write rich detail to
       // auto-memory BEFORE /compact collapses it. Context is still live at
