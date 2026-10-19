@@ -607,32 +607,11 @@ function loadCurrentTask(projectDir, cwd, maxLen = 40, staleHours = 12) {
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 
-/**
- * Claude's effective context cap for the active model.
- *
- *   1. Explicit `statusline.contextCap` in config wins (escape hatch).
- *   2. `context_window.context_window_size` from the statusline stdin
- *      JSON — Claude Code ≥2.1.90 reports the session's real window, which
- *      beats any name-based guess.
- *   3. Legacy `[1m]` / `-1m` marker in the model id → 1M.
- *   4. Any Opus 4.x / 5.x, Sonnet 4.x / 5.x, or the Claude 5 family
- *      (Fable / Mythos) — 1M. Newer Claude Code builds dropped the `[1m]`
- *      marker once 1M became the default for these models, so key off the
- *      family name instead.
- *   5. Fallback 200k (Haiku-class models).
- */
+// Context cap resolution lives in lib/context-cap.js (shared with hooks).
 function contextCap(input, cfg) {
-  if (cfg && Number.isFinite(cfg.contextCap) && cfg.contextCap > 0) {
-    return cfg.contextCap;
-  }
-  const cw = input && input.context_window && input.context_window.context_window_size;
-  if (Number.isFinite(cw) && cw > 0) return cw;
-  const id = String(
-    (input && input.model && (input.model.id || input.model.display_name)) || ''
-  ).toLowerCase();
-  if (/\[1m\]|-1m|\b1m\b|1000k|1000000/.test(id)) return 1000000;
-  if (/opus[\s-]?[4-9]|sonnet[\s-]?[4-9]|fable|mythos/.test(id)) return 1000000;
-  return 200000;
+  const dir = resolveLibDir(); let lib = null;
+  try { lib = dir && require(path.join(dir, 'context-cap.js')); } catch { /* fall through */ }
+  return lib ? lib.resolveContextCap({ model: input.model && (input.model.id || input.model.display_name), env: process.env, contextWindowSize: input.context_window && input.context_window.context_window_size, configCap: cfg.contextCap }).cap : 200000;
 }
 
 /**
