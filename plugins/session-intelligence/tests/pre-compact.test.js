@@ -306,6 +306,34 @@ test('PreCompact over the cap keeps the registry intact, drops optional blocks f
     const log = fs.readdirSync(logDir).filter((f) => f.startsWith('session-intel-'))
       .map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
     assert.match(log, /block assembled/);
-    assert.match(log, /block assembled.*"dropped":\["[a-zA-Z]+"/);
+    const line = log.split('\n').find((l) => l.includes('block assembled'));
+    const dropped = JSON.parse(line.slice(line.indexOf('{'))).dropped;
+    assert.equal(dropped[0], 'next');
+    assert.ok(!dropped.includes('registry'));
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('PreCompact still injects the registry when the state dir is unwritable', { skip: process.getuid && process.getuid() === 0 }, () => {
+  const ctx = '# Session Context\n\n## Key Decisions\n- Never rewrite earlier turns\n';
+  const sid = 'sid-pc-ro';
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const stateDir = path.join(home, '.claude', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const projectDir = path.join(home, '.claude', 'projects', path.join(home, 'proj').replace(/\//g, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(path.join(home, 'proj'), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'session-context.md'), ctx);
+  fs.chmodSync(stateDir, 0o500);
+  try {
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd: path.join(home, 'proj'), trigger: 'manual', hook_event_name: 'PreCompact' }),
+      env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /## CONSTRAINT REGISTRY/);
+    assert.match(r.stdout, /Never rewrite earlier turns/);
+  } finally {
+    fs.chmodSync(stateDir, 0o700);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

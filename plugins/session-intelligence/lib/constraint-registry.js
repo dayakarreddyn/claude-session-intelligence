@@ -56,8 +56,7 @@ function extractCompactInstructions(claudeMdText) {
 /**
  * Constraint lines of one session-context section body: bullets, numbered
  * items, `Key: value` lines (value kept) and plain prose. Drop lines, HTML
- * comment lines (si:autofill sentinels) and
- * headings are skipped.
+ * comment lines (si:autofill sentinels) and headings are skipped.
  */
 function linesOfSection(body) {
   const out = [];

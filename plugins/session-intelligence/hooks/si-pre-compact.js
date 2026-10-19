@@ -548,10 +548,19 @@ async function main() {
   // and reused by the history record below.
   let latest = null;
   let cap = 0;
+  let registry = null;
   let registryBlock = '';
+  const registryLib = require(path.join(SI_LIB, 'constraint-registry'));
   try {
-    const capLib = require(path.join(SI_LIB, 'context-cap'));
-    const registryLib = require(path.join(SI_LIB, 'constraint-registry'));
+    registry = registryLib.fitRegistryToCap(registryLib.buildRegistry({
+      sections, claudeMdText: readFile(path.join(cwd, 'CLAUDE.md')) || '',
+    }));
+    registryBlock = registryLib.renderRegistryBlock(registry);
+  } catch (err) {
+    intelLog('pre-compact', 'warn', 'constraint registry failed', { err: err && err.message });
+  }
+  const capLib = require(path.join(SI_LIB, 'context-cap'));
+  try {
     latest = require(path.join(SI_LIB, 'transcript-usage'))
       .readLatestUsage(stdinInput.transcript_path, { sessionId });
     ({ cap } = capLib.resolveContextCap({
@@ -560,18 +569,20 @@ async function main() {
       settings: capLib.loadSettingsForCwd(cwd),
       configCap: siCfg.statusline && siCfg.statusline.contextCap,
     }));
-    const registry = registryLib.fitRegistryToCap(registryLib.buildRegistry({
-      sections, claudeMdText: readFile(path.join(cwd, 'CLAUDE.md')) || '',
-    }));
+  } catch (err) {
+    intelLog('pre-compact', 'warn', 'context usage/cap unresolved', { err: err && err.message });
+  }
+  // State write never affects the injected block.
+  try {
     const contextTokens = (latest && latest.contextTokens) || 0;
-    registryLib.writeRegistryState(sessionId, {
+    const wrote = registry && registryLib.writeRegistryState(sessionId, {
       t: Date.now(), items: registry.items, contextTokens, contextCap: cap,
       fillPct: capLib.fillPctOf(contextTokens, cap),
       model: (latest && latest.model) || null, trigger: stdinInput.trigger || null,
     });
-    registryBlock = registryLib.renderRegistryBlock(registry);
+    if (registry && !wrote) intelLog('pre-compact', 'warn', 'registry state not written', { sessionId });
   } catch (err) {
-    intelLog('pre-compact', 'warn', 'constraint registry failed', { err: err && err.message });
+    intelLog('pre-compact', 'warn', 'registry state write failed', { err: err && err.message });
   }
 
   // Memory-offload directive — tell Claude to write rich detail into
@@ -693,6 +704,7 @@ async function main() {
         ? Number(costSnapshot.total_cost_usd.toFixed(4))
         : null;
 
+      if (!cap) throw new Error('context cap unresolved; compact record skipped');
       const { historyEntry, dbRow, snapshot } = require(path.join(SI_LIB, 'compact-record')).buildCompactRecord({
         latest, cap, entries, trigger: stdinInput.trigger || null, cwd, sessionId, cost, costAtCompactUsd, analysis,
       });

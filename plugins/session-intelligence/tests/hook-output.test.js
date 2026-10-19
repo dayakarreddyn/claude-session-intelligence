@@ -42,3 +42,9 @@ test('assembleUnderCap does not mutate its input', () => {
   const blocks = Object.freeze([Object.freeze({ name: 'a', text: 'x'.repeat(50), required: true })]);
   assert.doesNotThrow(() => assembleUnderCap(blocks, { maxChars: 20 }));
 });
+
+test('a fitted registry always leaves at least 6000 chars for optional blocks', () => {
+  const { MAX_BLOCK_CHARS } = require('../lib/constraint-registry');
+  const heading = '\n# Session Intelligence \u2014 compaction guidance\n'.length;
+  assert.ok(HOOK_OUTPUT_CAP_CHARS - MAX_BLOCK_CHARS - heading >= 6000);
+});
