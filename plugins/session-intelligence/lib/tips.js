@@ -20,7 +20,7 @@ const TIP_POOLS = {
     '`/compact preserve <topic>, drop <topic>` beats a bare `/compact` for keeping signal.',
   ],
   orange: [
-    'delegate the next wide grep/read to a subagent — keep the conclusion, not the output.',
+    'delegate the next wide grep/read to a subagent (frontmatter `autoCompactWindow: 400000`) — keep the conclusion, not the output.',
     'commit in-flight work now; a clean tree survives /compact without needing to be re-described.',
     'offload non-obvious findings to `memory/` before they collapse — the pre-compact block is a safety net, not the primary capture surface.',
   ],

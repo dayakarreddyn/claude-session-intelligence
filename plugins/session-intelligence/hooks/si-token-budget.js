@@ -249,7 +249,7 @@ async function main() {
       } catch { /* best-effort — never break the hook */ }
     }
     const cmd = toolInput.command || '';
-    const toolOutput = (parsedInput && (parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
+    const toolOutput = (parsedInput && (parsedInput.tool_response || parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
     let event = null;
     if (detectPhaseEvent) {
       event = detectPhaseEvent(toolName, toolInput, toolOutput);
@@ -264,7 +264,8 @@ async function main() {
     // and no event adds noise unless its result is large enough to matter.
     const outStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput || '');
     const chars = outStr.length;
-    if (root || event || chars >= SHAPE_MIN_CHARS) {
+    const isAgent = toolName === 'Agent' || toolName === 'Task';
+    if (root || event || isAgent || chars >= SHAPE_MIN_CHARS) {
       // clampMaxEntries enforces [50, 5000] so a perProject typo can't
       // either starve the analyzer or balloon the shape file.
       let maxEntries;

@@ -100,3 +100,32 @@ test('token-budget hook logs chars/inputHash and records a same-input re-run', (
     assert.deepEqual(rows.map((r) => r.gap_calls), [1]);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('largeReadDelegationLine emits the exact delegation copy', () => {
+  const { largeReadDelegationLine } = require('../lib/shape-signals');
+  assert.equal(
+    largeReadDelegationLine(3),
+    'Large results detected: 3 tool results ≥20K tokens in the last 40 calls. Delegate the next wide read/grep to a subagent (frontmatter `autoCompactWindow: 400000`) and keep the conclusion, not the output.',
+  );
+});
+
+test('token-budget hook always appends Agent and Task shape entries, even when small', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { spawnSync } = require('node:child_process');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-agent-'));
+  try {
+    const env = { ...process.env, HOME: home, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') };
+    const calls = [['Agent', 'r'.repeat(25000)], ['Task', 'tiny']];
+    for (const [tool_name, tool_output] of calls) {
+      const payload = JSON.stringify({ session_id: 'sa', cwd: home, tool_name, tool_input: { prompt: 'x' }, tool_response: tool_output });
+      const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-token-budget.js')], { input: payload, env });
+      assert.equal(r.status, 0);
+    }
+    const lines = fs.readFileSync(path.join(home, '.claude', 'state', 'claude-ctx-shape-sa.jsonl'), 'utf8')
+      .trim().split('\n').map(JSON.parse);
+    assert.equal(lines.length, 2);
+    assert.deepEqual(lines.map((l) => [l.tool, l.chars, l.root]), [['Agent', 25000, null], ['Agent', 4, null]]);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

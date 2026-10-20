@@ -780,3 +780,12 @@ test('analyzeShape surfaces duplicate reads; draft and injection mention them', 
   assert.ok(draftMessage(a).includes('dup reads: src/a.js ×3'));
   assert.ok(formatCompactInjection(a).includes('**Duplicate reads (drop all but the latest):**'));
 });
+
+test('draftMessage names agent returns above 20K chars', () => {
+  const { draftMessage } = require('../lib/context-shape');
+  const entries = [0, 1].map((i) => ({ t: i, tok: 1000 * (i + 1), tool: 'Agent', root: null, file: null, event: null, chars: 22500, inputHash: `a${i}` }));
+  const filler = [2, 3, 4, 5, 6, 7].map((i) => ({ t: i, tok: 1000 * (i + 1), tool: 'Read', root: 'src', file: `src/f${i}.js`, event: null, chars: 100, inputHash: `f${i}` }));
+  const a = analyzeShape([...entries, ...filler]);
+  assert.deepEqual(a.agentReturns, { count: 2, chars: 45000 });
+  assert.match(draftMessage(a), /agents: 2 returns ~15k tokens/);
+});

@@ -27,7 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { detectDuplicates, countLargeResults, agentReturns, duplicateReadsPhrase, renderDuplicateReadsBlock } = require('./shape-signals');
+const { detectDuplicates, countLargeResults, agentReturns, duplicateReadsPhrase, renderDuplicateReadsBlock, agentReturnsPhrase } = require('./shape-signals');
 
 const DEFAULT_MAX_ENTRIES = 200;
 const MAX_ENTRIES_HARD_CEILING = 2000; // above this the byte cap kicks in first anyway
@@ -809,6 +809,8 @@ function draftMessage(analysis) {
   }
   const dup = duplicateReadsPhrase(analysis.duplicates);
   if (dup) parts.push(dup);
+  const agents = agentReturnsPhrase(analysis.agentReturns);
+  if (agents) parts.push(agents);
   return parts.join(' \u00b7 ');
 }
 

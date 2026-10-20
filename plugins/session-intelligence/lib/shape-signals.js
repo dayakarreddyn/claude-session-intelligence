@@ -81,6 +81,10 @@ function agentReturns(entries, { window = SIGNAL_WINDOW } = {}) {
     .reduce((acc, e) => ({ count: acc.count + 1, chars: acc.chars + charsOf(e) }), { count: 0, chars: 0 });
 }
 
+function largeReadDelegationLine(n) {
+  return `Large results detected: ${n} tool results ≥20K tokens in the last 40 calls. Delegate the next wide read/grep to a subagent (frontmatter \`autoCompactWindow: 400000\`) and keep the conclusion, not the output.`;
+}
+
 const tokensK = (chars) => `~${Math.round(chars / CHARS_PER_TOKEN / 1000)}k tokens`;
 
 function duplicateReadsPhrase(duplicates) {
@@ -106,6 +110,6 @@ function agentReturnsPhrase(returns) {
 
 module.exports = {
   SIGNAL_WINDOW, RERUN_GAP_CALLS, LARGE_RESULT_CHARS, CHARS_PER_TOKEN,
-  detectDuplicates, newestRerun, countLargeResults, agentReturns,
+  detectDuplicates, newestRerun, countLargeResults, agentReturns, largeReadDelegationLine,
   duplicateReadsPhrase, renderDuplicateReadsBlock, agentReturnsPhrase,
 };

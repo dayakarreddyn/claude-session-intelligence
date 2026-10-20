@@ -66,6 +66,18 @@ After **≥5 compacts** land in `~/.claude/logs/compact-history.jsonl`, the zone
 
 Claude Code compacts a 1M model at roughly 967K tokens, far past where long-context quality has degraded. Set a per-model window of **400,000-500,000** with `/autocompact 450k` (saved per model under `modelSettings`) or `"autoCompactWindow": 450000` in `~/.claude/settings.json`. `/si doctor` flags a 1M model with no window configured, and the `contextPct` field (`cmp:NN%`) then counts toward the window you chose.
 
+### Subagent frontmatter
+
+When session-intelligence reports large tool results, it suggests delegating the next wide read or grep to a subagent. The plugin ships no agents of its own, so this is a recommendation for agents you define yourself (`.claude/agents/<name>.md`): give them their own compaction window so their long searches compact independently of the main session.
+
+```markdown
+---
+name: wide-reader
+description: Reads or greps broadly and returns only the conclusion.
+autoCompactWindow: 400000
+---
+```
+
 ## Install
 
 Two supported paths. **Plugin install is the recommended default** — zero shell scripts, zero manual settings edits.

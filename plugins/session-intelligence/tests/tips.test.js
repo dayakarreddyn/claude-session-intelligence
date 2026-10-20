@@ -42,3 +42,7 @@ test('pickTip tolerates empty salt', () => {
 test('red tip pool mentions the /clear handoff', () => {
   assert.ok(TIP_POOLS.red.some((t) => /\/clear/.test(t) && /handoff/.test(t)));
 });
+
+test('orange tip 1 names autoCompactWindow: 400000', () => {
+  assert.match(TIP_POOLS.orange[0], /autoCompactWindow: 400000/);
+});

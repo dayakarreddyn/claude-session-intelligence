@@ -259,3 +259,26 @@ test('suggest-compact records one cache_hits row per message id across runs', ()
     assert.equal(rows[0].cache_read, 200000);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('callout adds the delegation prompt at 3 or more large results', () => {
+  const { largeReadDelegationLine } = require('../lib/shape-signals');
+  const shape = [0, 1, 2].map((i) => ({
+    t: 1000 + i, tok: 1000 * (i + 1), tool: 'Bash', root: 'src', file: null, event: null, chars: 70000, inputHash: `d${i}`,
+  }));
+  const r = calloutRun('sid-deleg', 'claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+  }, { shape });
+  assert.equal(r.status, 2);
+  assert.ok(r.stderr.includes(largeReadDelegationLine(3)), r.stderr);
+});
+
+test('callout keeps the plain count line below 3 large results', () => {
+  const shape = [0, 1].map((i) => ({
+    t: 1000 + i, tok: 1000 * (i + 1), tool: 'Bash', root: 'src', file: null, event: null, chars: 70000, inputHash: `e${i}`,
+  }));
+  const r = calloutRun('sid-deleg2', 'claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+  }, { shape });
+  assert.match(r.stderr, /2 tool results ≥20K tokens in the last 40 calls\./);
+  assert.doesNotMatch(r.stderr, /Delegate the next wide read/);
+});

@@ -5,6 +5,7 @@
  * 50K-token bucket so the text is stable across many consecutive calls.
  */
 const { bucketPct, windowLabel } = require('./context-cap');
+const { largeReadDelegationLine } = require('./shape-signals');
 
 const AWAY_BUCKET_TOKENS = 50000;
 
@@ -21,7 +22,10 @@ function numbersSegment({ fillPct, cap, point, contextTokens, bucketStep }) {
   return ` — context at ~${pct}% of a ${windowLabel(cap)} window; auto-compaction at ~${formatK(point)} (~${formatK(away)} away)`;
 }
 
+const DELEGATION_MIN_RESULTS = 3;
+
 function largeResultsLine(count) {
+  if (count >= DELEGATION_MIN_RESULTS) return largeReadDelegationLine(count);
   return count > 0 ? `${count} tool results ≥20K tokens in the last 40 calls.` : '';
 }
 
