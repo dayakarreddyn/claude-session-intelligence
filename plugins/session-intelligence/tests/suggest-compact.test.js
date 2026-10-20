@@ -189,3 +189,35 @@ test('stablePrefix=true still omits the numbers segment', () => {
   const head = r.stderr.split('\n').find((l) => l.includes('[StrategicCompact]'));
   assert.ok(head && !head.includes('%'), head);
 });
+
+function shapeEntries(events) {
+  return events.map((event, i) => JSON.stringify({
+    t: 1000 + i, tok: 1000 * (i + 1), tool: 'Bash', root: 'src', file: `src/f${i}.js`, event, chars: 100, inputHash: `p${i}`,
+  })).join('\n') + '\n';
+}
+
+function phaseRun(events) {
+  const { home, state } = sandbox();
+  const sid = 'sid-phase';
+  fs.writeFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`), shapeEntries(events));
+  const t = writeTranscript(home, [userLine, usageLine('claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+  })]);
+  const r = runHook('si-suggest-compact.js',
+    { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' }, { home });
+  fs.rmSync(home, { recursive: true, force: true });
+  return r;
+}
+
+test('callout names a fresh phase marker as a compaction boundary', () => {
+  const r = phaseRun([null, null, null, 'commit', null]);
+  assert.equal(r.status, 2);
+  assert.ok(r.stderr.includes('A commit just landed — natural compaction boundary; `/compact` now carries the least in-flight state.'), r.stderr);
+  assert.match(r.stderr, /\[StrategicCompact\] Caution zone — context at ~/);
+});
+
+test('callout omits the boundary line when the newest phase marker is older than 5 entries', () => {
+  const r = phaseRun(['push', null, null, null, null, null]);
+  assert.equal(r.status, 2);
+  assert.equal(r.stderr.includes('natural compaction boundary'), false);
+});

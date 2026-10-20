@@ -105,3 +105,34 @@ test('si-task-change still scores a normal user prompt when token budget is low'
     assert.ok(!/\[TaskChange\]/.test(res.stderr || ''));
   } finally { cleanup(dir); }
 });
+
+test('si-task-change writes a handoff with registry constraints before recommending /clear', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-tc-home-'));
+  try {
+    const cwd = path.join(home, 'proj');
+    fs.mkdirSync(cwd, { recursive: true });
+    const projectDir = path.join(home, '.claude', 'projects', cwd.replace(/\//g, '-'));
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(path.join(projectDir, 'session-context.md'),
+      '## Current Task\nShip the auth refactor in src/auth.ts and wire new tokens.\n\n## Key Files\n- src/auth.ts\n');
+    const state = path.join(home, '.claude', 'state');
+    fs.mkdirSync(state, { recursive: true });
+    const sid = `tc-clear-${process.pid}-${Date.now()}`; // one-shot prompt-hash file lives in os.tmpdir()
+    fs.writeFileSync(path.join(state, `claude-token-budget-${sid}`), '500000');
+    fs.writeFileSync(path.join(state, `claude-constraints-${sid}.json`),
+      JSON.stringify({ t: 1, items: [{ type: 'Rule', text: 'never touch the migrations folder', source: 'CLAUDE.md' }] }));
+    const res = spawnSync('node', [HOOK], {
+      input: JSON.stringify({
+        cwd, session_id: sid,
+        prompt: 'Now please design a gradient colour palette for the marketing landing page hero banner with warm sunset tones and accessible contrast ratios throughout',
+      }),
+      encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, CLAUDE_SI_DEBUG: '0' },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stderr, /`\/clear`/);
+    assert.match(res.stderr, /fresh handoff/);
+    const handoff = JSON.parse(fs.readFileSync(path.join(projectDir, '.si-handoff.json'), 'utf8'));
+    assert.match(handoff.currentTask, /auth refactor/);
+    assert.deepEqual(handoff.constraints.map((c) => c.text), ['never touch the migrations folder']);
+  } finally { cleanup(home); }
+});

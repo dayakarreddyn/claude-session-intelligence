@@ -61,7 +61,7 @@ const {
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const { readLatestUsage, updatePeak } = require(path.join(SI_LIB, 'transcript-usage'));
 const { resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
-const { numbersSegment, largeResultsLine } = require(path.join(SI_LIB, 'callout'));
+const { numbersSegment, largeResultsLine, phaseBoundaryLine } = require(path.join(SI_LIB, 'callout'));
 const { countLargeResults } = require(path.join(SI_LIB, 'shape-signals'));
 const MAX_DUP_READ_LINES = 3;
 const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
@@ -388,6 +388,8 @@ async function main() {
         const largeLine = largeResultsLine(countLargeResults(readShape(sessionId)));
         if (largeLine) body.push(largeLine);
       }
+      const phaseLine = phaseBoundaryLine(readShape(sessionId));
+      if (phaseLine) body.push(phaseLine);
       const dupReads = (shape && shape.duplicates && shape.duplicates.reads) || [];
       for (const d of dupReads.slice(0, MAX_DUP_READ_LINES)) {
         body.push(`Duplicate reads: ${d.file} ×${d.count} — later reads add no information; prefer the latest copy.`);

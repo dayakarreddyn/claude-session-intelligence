@@ -25,4 +25,24 @@ function largeResultsLine(count) {
   return count > 0 ? `${count} tool results ≥20K tokens in the last 40 calls.` : '';
 }
 
-module.exports = { numbersSegment, largeResultsLine, AWAY_BUCKET_TOKENS };
+const PHASE_RECENCY_ENTRIES = 5;
+
+/** Boundary line when the newest phase marker is within the last 5 shape entries, else ''. */
+function phaseBoundaryLine(entries) {
+  const recent = (Array.isArray(entries) ? entries : []).slice(-PHASE_RECENCY_ENTRIES);
+  const hit = [...recent].reverse().find((e) => e && e.event);
+  return hit
+    ? `A ${hit.event} just landed — natural compaction boundary; \`/compact\` now carries the least in-flight state.`
+    : '';
+}
+
+/** Task-change hint tail for a domain shift that recommends /clear. */
+function clearHandoffHint(wroteHandoff, constraintCount) {
+  if (!wroteHandoff) return 'Consider `/clear` before heavy new work.';
+  const n = constraintCount > 0 ? ` and ${constraintCount} constraint${constraintCount === 1 ? '' : 's'}` : '';
+  return `Consider \`/clear\` with a fresh handoff — SI just saved the current task${n}, restored on the next session start.`;
+}
+
+module.exports = {
+  numbersSegment, largeResultsLine, phaseBoundaryLine, clearHandoffHint, AWAY_BUCKET_TOKENS,
+};

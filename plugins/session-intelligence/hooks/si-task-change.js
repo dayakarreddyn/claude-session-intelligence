@@ -56,6 +56,7 @@ const {
   readTranscriptTokens,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
+const { clearHandoffHint } = require(path.join(SI_LIB, 'callout'));
 
 function loadSiConfig() {
   try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
@@ -535,10 +536,17 @@ function main() {
   // `/si set taskChange.enabled false`.
   const slash = action === 'clear' ? '/clear' : '/compact';
   const parenth = slash === '/compact' ? ' (preserve current task context)' : '';
+  let nextStep = `Consider \`${slash}\`${parenth} before heavy new work.`;
+  if (action === 'clear') {
+    const registry = require(path.join(SI_LIB, 'constraint-registry')).readRegistryState(sessionId);
+    const constraints = registry && Array.isArray(registry.items) ? registry.items : [];
+    const wrote = require(path.join(SI_LIB, 'handoff')).writeHandoff({ projectDir, cwd, sessionId, constraints });
+    nextStep = clearHandoffHint(wrote, constraints.length);
+  }
   const msg =
     `[TaskChange hint] Prompt looks like a different task domain ` +
     `(same-domain score ${combined.score.toFixed(2)}, ~${fmtTokens(tokenBudget)} tokens). ` +
-    `Consider \`${slash}\`${parenth} before heavy new work. ` +
+    `${nextStep} ` +
     `Disable via /si set taskChange.enabled false.`;
   process.stderr.write(`${msg}\n`);
   process.exit(0);

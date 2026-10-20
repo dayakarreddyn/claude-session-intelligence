@@ -27,7 +27,7 @@ const TIP_POOLS = {
   red: [
     '`/compact preserve <current task>, drop <finished work>` — explicit hints beat the auto-summary at this size.',
     'use `/si expand <tool_use_id>` after compact to replay any large Read/Bash output you still need.',
-    'if the current topic is done, `/clear` + a short handoff note is cheaper than another /compact.',
+    'if the current topic is done, `/clear` is cheaper than another /compact — SI writes a handoff so the constraints and task survive the clear.',
   ],
   compact: [
     'after compact: if a tool result gets summarised away, `/si expand <tool_use_id>` replays the archived body.',
