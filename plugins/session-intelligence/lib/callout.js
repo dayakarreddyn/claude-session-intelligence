@@ -22,6 +22,7 @@ function numbersSegment({ fillPct, cap, point, contextTokens, bucketStep }) {
   return ` — context at ~${pct}% of a ${windowLabel(cap)} window; auto-compaction at ~${formatK(point)} (~${formatK(away)} away)`;
 }
 
+// Task 22 brief: the delegation prompt fires at >= 3 large results.
 const DELEGATION_MIN_RESULTS = 3;
 
 function largeResultsLine(count) {

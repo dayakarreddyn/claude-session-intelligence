@@ -132,3 +132,34 @@ test('si-token-budget emits no [TokenBudget] zone line even when the estimate cr
     assert.ok(parseInt(fs.readFileSync(file, 'utf8'), 10) > 200000, 'diagnostic file still written');
   } finally { cleanup(home); }
 });
+
+function runBudget(home, sid, tool_name, tool_response) {
+  const payload = JSON.stringify({ session_id: sid, cwd: home, tool_name, tool_response });
+  const env = { ...process.env, HOME: home, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') };
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-token-budget.js')], { input: payload, env });
+  assert.equal(r.status, 0);
+  const state = path.join(home, '.claude', 'state');
+  const lines = fs.readFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+  const budget = parseInt(fs.readFileSync(path.join(state, `claude-token-budget-${sid}`), 'utf8').trim(), 10);
+  return { last: lines[lines.length - 1], budget };
+}
+
+test('token-budget counts a Read tool_response by file.content, not the JSON wrapper', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-body-read-'));
+  try {
+    const { last, budget } = runBudget(home, 'sr', 'Read', {
+      type: 'text', file: { filePath: 'x', content: 'y'.repeat(30000), numLines: 1, startLine: 1, totalLines: 1 },
+    });
+    assert.equal(last.chars, 30000);
+    assert.equal(budget, 100 + Math.ceil(30000 / 3));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('token-budget counts a Bash tool_response by stdout only', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-body-bash-'));
+  try {
+    const { last, budget } = runBudget(home, 'sb', 'Bash', { stdout: 'z'.repeat(5000), stderr: 'e'.repeat(2000) });
+    assert.equal(last.chars, 5000);
+    assert.equal(budget, 100 + Math.ceil(5000 / 3));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

@@ -15,6 +15,11 @@
  *   - User/assistant messages add ~200-500 tokens each
  *
  * We only track tool I/O since that's the majority of context growth.
+ *
+ * The response body for both the estimate and the shape `chars` comes from one
+ * shared extraction (lib/prune.js responseText: Read file.content, Bash stdout,
+ * plain string). Since the estimate is diagnostic-only, counting the real body
+ * (rather than missing tool_response entirely) shifts it upward; that is accepted.
  */
 
 const fs = require('fs');
@@ -111,6 +116,16 @@ function loadSiConfig() {
 const CHARS_PER_TOKEN = 3; // calibrated for code/JSON-heavy tool I/O
 const TOOL_OVERHEAD_TOKENS = 100;
 
+/** One extraction of the response body shared by the estimate and the shape chars. */
+function responseBodyOf(payload) {
+  const { responseText } = require(path.join(SI_LIB, 'prune'));
+  return responseText({
+    toolName: payload.tool_name,
+    toolResponse: payload.tool_response,
+    fallbackFields: payload,
+  });
+}
+
 async function main() {
   // Read stdin FIRST so we can pick up session_id from the hook payload.
   // Claude Code passes the session id on stdin; env is a fallback only.
@@ -155,8 +170,7 @@ async function main() {
   // Estimate tokens from this tool call (stdin was already read above).
   let callTokens = TOOL_OVERHEAD_TOKENS;
   if (parsedInput) {
-    const output = parsedInput.tool_output || parsedInput.output || parsedInput.result || '';
-    const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
+    const outputStr = responseBodyOf(parsedInput);
     callTokens += Math.ceil(outputStr.length / CHARS_PER_TOKEN);
 
     const toolIn = parsedInput.tool_input || parsedInput.input || '';
@@ -249,7 +263,7 @@ async function main() {
       } catch { /* best-effort — never break the hook */ }
     }
     const cmd = toolInput.command || '';
-    const toolOutput = (parsedInput && (parsedInput.tool_response || parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
+    const toolOutput = parsedInput ? responseBodyOf(parsedInput) : '';
     let event = null;
     if (detectPhaseEvent) {
       event = detectPhaseEvent(toolName, toolInput, toolOutput);
@@ -262,7 +276,7 @@ async function main() {
     }
     // Only append entries that carry a signal — a pure Bash echo with no file
     // and no event adds noise unless its result is large enough to matter.
-    const outStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput || '');
+    const outStr = toolOutput;
     const chars = outStr.length;
     const isAgent = toolName === 'Agent' || toolName === 'Task';
     if (root || event || isAgent || chars >= SHAPE_MIN_CHARS) {

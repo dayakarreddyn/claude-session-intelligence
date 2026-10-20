@@ -72,6 +72,23 @@ function extractPrunableText({ toolName, toolResponse } = {}) {
   return null;
 }
 
+/**
+ * The single response-body extraction for the shape log, the tool-I/O
+ * estimate and the pruner: Read file.content / Bash stdout / plain string,
+ * else a safe stringify of tool_response, else the legacy payload fields.
+ */
+function responseText({ toolName, toolResponse, fallbackFields } = {}) {
+  const extracted = extractPrunableText({ toolName, toolResponse });
+  if (extracted) return extracted.text;
+  if (toolResponse !== undefined && toolResponse !== null && toolResponse !== '') {
+    try { return JSON.stringify(toolResponse) || ''; } catch { return ''; }
+  }
+  const legacy = fallbackFields || {};
+  const raw = legacy.tool_output || legacy.output || legacy.result || '';
+  if (typeof raw === 'string') return raw;
+  try { return JSON.stringify(raw) || ''; } catch { return ''; }
+}
+
 function decidePrune({ toolName, toolUseId, body, cfg }) {
   if (!cfg || !cfg.enabled) return { pruned: false, reason: 'disabled' };
   if (typeof body !== 'string') return { pruned: false, reason: 'not-string' };
@@ -125,4 +142,4 @@ function inputHash(toolName, toolInput) {
   return crypto.createHash('sha1').update(`${toolName}\n${canonical}`).digest('hex').slice(0, INPUT_HASH_LENGTH);
 }
 
-module.exports = { extractPrunableText, decidePrune, buildExcerpt, rewriteCommand, inputHash, DEFAULT_INPUT_RULES };
+module.exports = { extractPrunableText, responseText, decidePrune, buildExcerpt, rewriteCommand, inputHash, DEFAULT_INPUT_RULES };
