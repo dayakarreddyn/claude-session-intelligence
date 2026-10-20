@@ -200,10 +200,20 @@ function stampCompactOutcomeAfter({ sid, compactT, fillAfter } = {}) {
   const db = openDb();
   if (!db || !sid || !Number.isFinite(compactT) || !Number.isFinite(fillAfter)) return false;
   try {
-    db.prepare('UPDATE compact_outcomes SET fill_after = ? WHERE sid = ? AND compact_t = ?')
+    const res = db.prepare('UPDATE compact_outcomes SET fill_after = ? WHERE sid = ? AND compact_t = ?')
       .run(fillAfter, sid, compactT);
-    return true;
+    return res.changes > 0;
   } catch { return false; }
+}
+
+/** Timestamp of the newest compacts row for a session, or null. */
+function latestCompactTime(sid) {
+  const db = openDb();
+  if (!db || !sid) return null;
+  try {
+    const row = db.prepare('SELECT t FROM compacts WHERE sid = ? ORDER BY t DESC LIMIT 1').get(sid);
+    return row && Number.isFinite(row.t) ? row.t : null;
+  } catch { return null; }
 }
 
 function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
@@ -570,6 +580,7 @@ module.exports = {
   recordZoneTransition,
   recordCompactOutcome,
   stampCompactOutcomeAfter,
+  latestCompactTime,
   recordToolArchive,
   recordRerun,
   markArchiveRecalled,

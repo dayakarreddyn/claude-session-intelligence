@@ -27,8 +27,6 @@ function readStdinJson() {
   } catch { return {}; }
 }
 
-function finiteOrNull(n) { return Number.isFinite(n) ? n : null; }
-
 function main() {
   const input = readStdinJson();
   const sid = input.session_id || process.env.CLAUDE_SESSION_ID;
@@ -46,18 +44,26 @@ function main() {
   let project = null;
   try { project = require(path.join(SI_LIB, 'context-shape')).projectKeyOf(input.cwd); } catch { /* optional */ }
 
+  // compact_t must equal the regret snapshot's t: the PostToolUse fill_after
+  // stamp joins on it. Registry state carries its own, earlier Date.now().
+  const events = require(path.join(SI_LIB, 'events'));
+  let snapT = null;
+  try { snapT = require(path.join(SI_LIB, 'compact-history')).readSnapshot(sid)?.t; } catch { /* optional */ }
+  const compactT = [snapT, events.latestCompactTime(sid), state && state.t]
+    .find((v) => Number.isFinite(v)) ?? null;
+
   const trigger = input.trigger || (state && state.trigger) || null;
-  const recorded = require(path.join(SI_LIB, 'events')).recordCompactOutcome({
+  const recorded = events.recordCompactOutcome({
     sid, project, t: Date.now(),
-    compactT: state ? finiteOrNull(state.t) : null,
+    compactT,
     trigger,
     summaryChars: summary.length,
     constraintsTotal: result ? result.total : null,
     constraintsRetained: result ? result.retained : null,
     retention: result ? result.ratio : null,
     missing: result ? result.missing : null,
-    fillBefore: state ? finiteOrNull(state.fillPct) : null,
-    contextCap: state ? finiteOrNull(state.contextCap) : null,
+    fillBefore: state ? state.fillPct : null,
+    contextCap: state ? state.contextCap : null,
     model: (state && state.model) || null,
   });
   intelLog('post-compact', 'info', 'recorded', {

@@ -82,8 +82,6 @@ catch { /* optional */ }
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 
-// Unified config — gives us shape.rootDirDepth (monorepo knob) with env
-// overrides already applied. Failure here just means we fall back to depth 2.
 /**
  * First usage after a compact = the window the compaction actually left.
  * Stamps fill_after on the matching compact_outcomes row (no-op when the
@@ -103,6 +101,8 @@ function stampOutcomeFill(sessionId, snap, usage) {
   }
 }
 
+// Unified config — gives us shape.rootDirDepth (monorepo knob) with env
+// overrides already applied. Failure here just means we fall back to depth 2.
 function loadSiConfig() {
   try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
   catch { return {}; }

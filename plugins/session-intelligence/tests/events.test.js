@@ -684,7 +684,8 @@ test('stampCompactOutcomeAfter fills fill_after on the matching compact_t', () =
   try {
     assert.ok(events.recordCompactOutcome({ sid: 's', t: 2000, compactT: 1000, trigger: 'manual', summaryChars: 10, fillBefore: 48 }));
     assert.equal(events.aggregateStats({ sinceDays: 36500 }).outcomes.avg_fill_after, null);
-    assert.ok(events.stampCompactOutcomeAfter({ sid: 's', compactT: 1000, fillAfter: 9.5 }));
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 's', compactT: 999, fillAfter: 1 }), false, 'non-matching key updates nothing');
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 's', compactT: 1000, fillAfter: 9.5 }), true);
     const o = events.aggregateStats({ sinceDays: 36500 }).outcomes;
     assert.equal(o.avg_fill_after, 9.5);
     assert.equal(o.n, 1);
