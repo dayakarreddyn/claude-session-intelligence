@@ -111,10 +111,26 @@ function recordSessionEnd({ sid, endedAt, totalCostUsd, peakTokens, toolCalls })
   } catch { return false; }
 }
 
+/** Canonical project for a row: the sessions row wins, else the caller's key, else the cwd's repo key. */
+function canonicalProject(db, sid, project, cwd) {
+  let fallback = project || null;
+  if (!fallback && cwd) {
+    try { fallback = require('./context-shape').projectKeyOf(cwd); } catch { fallback = null; }
+  }
+  const row = db.prepare('SELECT project FROM sessions WHERE sid = ?').get(sid);
+  return (row && row.project) || fallback;
+}
+
 function recordCompact(entry) {
   const db = openDb();
   if (!db || !entry || !entry.sid) return false;
   try {
+    const t = Number.isFinite(entry.t) ? entry.t : Date.now();
+    const project = canonicalProject(db, entry.sid, entry.project, entry.cwd);
+    // A compact without a session row would vanish from per-project tables.
+    db.prepare('INSERT OR IGNORE INTO sessions (sid, project, cwd, started_at) VALUES (?, ?, ?, ?)')
+      .run(entry.sid, project, entry.cwd || null, t);
+    const tokens = Number.isFinite(entry.tokens) ? entry.tokens : entry.contextTokens;
     db.prepare(`
       INSERT INTO compacts
         (sid, project, cwd, t, tokens, cost, cost_at_compact, hot_dirs, warm_dirs, dropped_dirs, had_shift, trigger,
@@ -122,10 +138,10 @@ function recordCompact(entry) {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.sid,
-      entry.project || null,
+      project,
       entry.cwd || null,
-      Number.isFinite(entry.t) ? entry.t : Date.now(),
-      Number.isFinite(entry.tokens) ? entry.tokens : null,
+      t,
+      Number.isFinite(tokens) ? tokens : null,
       Number.isFinite(entry.cost) ? entry.cost : null,
       Number.isFinite(entry.costAtCompactUsd) ? entry.costAtCompactUsd : null,
       JSON.stringify(entry.hotDirs || []),
@@ -141,6 +157,26 @@ function recordCompact(entry) {
   } catch { return false; }
 }
 
+/**
+ * Back-fill compacts rows from compact-history entries whose DB write never
+ * happened (the hook died between the JSONL append and the insert). Keyed on
+ * (sid, t) so it is safe to run every SessionStart. Returns rows inserted.
+ */
+function reconcileCompactHistory(entries) {
+  const db = openDb();
+  if (!db || !Array.isArray(entries)) return 0;
+  let inserted = 0;
+  try {
+    const exists = db.prepare('SELECT 1 FROM compacts WHERE sid = ? AND t = ? LIMIT 1');
+    for (const e of entries) {
+      if (!e || !e.sid || !Number.isFinite(e.t)) continue;
+      if (exists.get(e.sid, e.t)) continue;
+      if (recordCompact(e)) inserted += 1;
+    }
+  } catch { /* best-effort — next session retries */ }
+  return inserted;
+}
+
 function recordZoneTransition({
   sid, project, t, fromZone, toZone, tokens, cost, reason,
   contextCap, fillPct, model, trigger,
@@ -148,13 +184,14 @@ function recordZoneTransition({
   const db = openDb();
   if (!db || !sid || !toZone) return false;
   try {
+    const canonical = canonicalProject(db, sid, project, null);
     db.prepare(`
       INSERT INTO zone_transitions
         (sid, project, t, from_zone, to_zone, tokens, cost, reason,
          context_cap, fill_pct, model, trigger)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      sid, project || null,
+      sid, canonical,
       Number.isFinite(t) ? t : Date.now(),
       fromZone || null, toZone,
       Number.isFinite(tokens) ? tokens : null,
@@ -264,6 +301,21 @@ function recordRerun({ sid, t, tool, inputHash, gapCalls, wasPruned }) {
   } catch { return false; }
 }
 
+/** Price a row from its tokens and model; null while either is still unknown. */
+function costFromTokens({ model, t, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens }) {
+  const hasTokens = [inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens].some(Number.isFinite);
+  if (!model || !hasTokens) return null;
+  try {
+    const { priceForModel, costFromUsage } = require('./cost-estimation');
+    return costFromUsage({
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: cacheCreationTokens,
+      cache_read_input_tokens: cacheReadTokens,
+    }, priceForModel(model, Number.isFinite(t) ? t : Date.now()));
+  } catch { return null; }
+}
+
 function recordAgentInvocation({
   sid, toolUseId, subagentType, description,
   promptChars, responseChars, durationMs, t, isError,
@@ -272,6 +324,9 @@ function recordAgentInvocation({
   const db = openDb();
   if (!db || !sid) return false;
   try {
+    const pricedUsd = Number.isFinite(costUsd) ? costUsd : costFromTokens({
+      model, t, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
+    });
     db.prepare(`
       INSERT INTO agent_invocations
         (sid, tool_use_id, subagent_type, description,
@@ -292,7 +347,7 @@ function recordAgentInvocation({
       Number.isFinite(outputTokens) ? outputTokens : null,
       Number.isFinite(cacheCreationTokens) ? cacheCreationTokens : null,
       Number.isFinite(cacheReadTokens) ? cacheReadTokens : null,
-      Number.isFinite(costUsd) ? costUsd : null,
+      pricedUsd,
     );
     return true;
   } catch { return false; }
@@ -594,6 +649,7 @@ module.exports = {
   recordSessionStart,
   recordSessionEnd,
   recordCompact,
+  reconcileCompactHistory,
   recordZoneTransition,
   recordCompactOutcome,
   recordCacheHit,

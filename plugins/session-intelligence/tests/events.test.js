@@ -724,3 +724,65 @@ test('recordCacheHit ignores duplicates and aggregateStats averages per model', 
     assert.deepEqual(stats.cacheHits, [{ model: 'claude-opus-5-5', n: 2, avg_ratio: 0.75 }]);
   } finally { cleanup(sb); }
 });
+
+test('reconcileCompactHistory inserts missing (sid, t) rows and is idempotent', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 'a', project: 'P', startedAt: now });
+    events.recordCompact({ sid: 'a', t: now - 2000, tokens: 100000 });
+    const entries = [
+      { sid: 'a', t: now - 2000, tokens: 100000 },
+      { sid: 'a', t: now - 1000, contextTokens: 300000, fillPct: 30, contextCap: 1000000, trigger: 'manual', cwd: '/r' },
+    ];
+    assert.equal(events.reconcileCompactHistory(entries), 1);
+    assert.equal(events.reconcileCompactHistory(entries), 0);
+    assert.equal(events.aggregateStats({ sinceDays: 3650 }).compacts.n, 2);
+  } finally { cleanup(sb); }
+});
+
+test('compacts total_cost sums each session\'s last cumulative cost, not every row', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 'a', t: now - 2000, tokens: 1, cost: 10 });
+    events.recordCompact({ sid: 'a', t: now - 1000, tokens: 1, cost: 25 });
+    events.recordCompact({ sid: 'b', t: now - 500, tokens: 1, cost: 5 });
+    assert.equal(events.aggregateStats({ sinceDays: 30 }).compacts.total_cost, 30);
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact and recordZoneTransition take the canonical project from the sessions row', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's', project: 'CSM', cwd: '/x/CSM', startedAt: now });
+    events.recordCompact({ sid: 's', project: 'dashboard', t: now, tokens: 1 });
+    events.recordZoneTransition({ sid: 's', project: 'mm', toZone: 'red', tokens: 1 });
+    const stats = events.aggregateStats({ sinceDays: 30, project: 'CSM' });
+    assert.equal(stats.compacts.n, 1);
+    assert.equal(stats.zones.find((z) => z.zone === 'red').n, 1);
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact for an unknown sid creates a minimal sessions row so per-project tables see it', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 'orphan', project: 'ReelCuts', cwd: '/r', t: now, tokens: 1 });
+    const row = events.aggregateStats({ sinceDays: 30 }).perProject.find((p) => p.project === 'ReelCuts');
+    assert.equal(row.compacts, 1);
+  } finally { cleanup(sb); }
+});
+
+test('recordAgentInvocation prices a row from tokens when costUsd is absent; unpriced rows are counted', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordAgentInvocation({ sid: 's', toolUseId: 't', subagentType: 'x', t: now, model: 'claude-opus-5-5', inputTokens: 1000000 });
+    events.recordAgentInvocation({ sid: 's', toolUseId: 'u', subagentType: 'x', t: now });
+    const agents = events.aggregateStats({ sinceDays: 30 }).agents;
+    assert.ok(Math.abs(agents.cost_usd - 4.0) < 1e-9);
+    assert.equal(agents.unpriced, 1);
+  } finally { cleanup(sb); }
+});

@@ -379,7 +379,7 @@ function renderCompacts(stats) {
   const shiftPct = fmtPct(c0.shifts, c0.n);
   const rows = [
     ['Count',           String(c0.n)],
-    ['Total cost',      fmtUsd(totalCost)],
+    ['Session cost at last compact (sum)', fmtUsd(totalCost)],
     ['Avg cost',        fmtUsd(c0.avg_cost)],
     ['Tokens (avg)',    fmtTokens(c0.avg_tokens)],
     ['Tokens (p50/p90)',
@@ -484,7 +484,7 @@ function renderAgents(stats) {
   const summary = [
     ['Invocations', String(a.n)],
     ['Errors',      `${a.errors || 0} (${errPct})`],
-    ['Cost',        fmtUsd(a.cost_usd)],
+    ['Cost',        a.unpriced ? `${fmtUsd(a.cost_usd)}  (${a.unpriced} unpriced)` : fmtUsd(a.cost_usd)],
     ['Tokens',      `${fmtTokens(totalTokens)}  (in ${fmtTokens(a.input_tokens)} · out ${fmtTokens(a.output_tokens)} · cache_r ${fmtTokens(a.cache_read_tokens)})`],
     ['Duration',    `${fmtDuration(a.total_ms)} total · avg ${fmtDuration(a.avg_ms)}`],
     ['Prompt I/O',  `${fmtBytes(a.prompt_chars)} in / ${fmtBytes(a.response_chars)} out`],

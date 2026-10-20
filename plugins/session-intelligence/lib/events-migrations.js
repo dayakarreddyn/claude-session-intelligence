@@ -65,6 +65,7 @@ function createTables(db) {
     CREATE INDEX IF NOT EXISTS compacts_sid_idx ON compacts(sid);
     CREATE INDEX IF NOT EXISTS compacts_project_idx ON compacts(project);
     CREATE INDEX IF NOT EXISTS compacts_t_idx ON compacts(t);
+    CREATE INDEX IF NOT EXISTS compacts_sid_t_idx ON compacts(sid, t);
 
     CREATE TABLE IF NOT EXISTS zone_transitions (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,

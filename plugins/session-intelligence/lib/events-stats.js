@@ -69,10 +69,13 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
 
     const compacts = db.prepare(`
       SELECT COUNT(*) AS n, AVG(tokens) AS avg_tokens, AVG(cost) AS avg_cost,
-             SUM(cost) AS total_cost, SUM(had_shift) AS shifts,
+             (SELECT SUM(m) FROM (
+               SELECT MAX(cost) AS m FROM compacts
+               WHERE t >= ? ${projectClause} AND cost IS NOT NULL GROUP BY sid
+             )) AS total_cost, SUM(had_shift) AS shifts,
              MIN(tokens) AS min_tokens, MAX(tokens) AS max_tokens
       FROM compacts WHERE t >= ? ${projectClause}
-    `).get(cutoff, ...projectArgs);
+    `).get(cutoff, ...projectArgs, cutoff, ...projectArgs);
 
     // Sorted token list → compute p50/p90 in JS (SQLite has no native percentile).
     const compactTokens = db.prepare(`
@@ -126,7 +129,8 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
              SUM(output_tokens) AS output_tokens,
              SUM(cache_creation_tokens) AS cache_creation_tokens,
              SUM(cache_read_tokens) AS cache_read_tokens,
-             SUM(cost_usd) AS cost_usd
+             SUM(cost_usd) AS cost_usd,
+             SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced
       FROM agent_invocations WHERE t >= ? ${agentProjectClause}
     `).get(cutoff, ...projectArgs);
     const agentTypes = db.prepare(`

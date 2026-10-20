@@ -906,6 +906,13 @@ function main() {
     const pruned = require(path.join(SI_LIB, 'tool-archive')).reconcileDb();
     if (pruned > 0) intelLog('bootstrap', 'info', 'archive DB reconciled', { pruned });
   } catch { /* best effort */ }
+  // Back-fill compacts rows whose DB write never happened (hook died after the
+  // JSONL append) so history and DB agree on the compact count.
+  try {
+    const recovered = require(path.join(SI_LIB, 'events'))
+      .reconcileCompactHistory(require(path.join(SI_LIB, 'compact-history')).readHistory(200));
+    if (recovered > 0) intelLog('bootstrap', 'info', 'compact history reconciled', { recovered });
+  } catch { /* best effort */ }
   // Backfill workflow-spawned agents — the `Workflow` tool fires no PostToolUse
   // hook, so si-agent-tracker can't see them; reconcile from transcripts here.
   try {
