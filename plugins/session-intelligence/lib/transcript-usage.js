@@ -179,6 +179,19 @@ function cacheEntry(record, offset, previous, identity) {
   };
 }
 
+/** Last message id already written to the cache-hit series, or null. */
+function lastRecordedOf(sessionId) {
+  const cache = readCache(sessionId);
+  return (cache && cache.lastRecordedMessageId) || null;
+}
+
+/** Remember the last message id written to the cache-hit series (no DB read on later calls). */
+function markRecorded(sessionId, messageId) {
+  const cache = readCache(sessionId);
+  if (!cache || !messageId) return;
+  writeCache(sessionId, { ...cache, lastRecordedMessageId: messageId });
+}
+
 function readLatestUsage(transcriptPath, { sessionId } = {}) {
   if (!transcriptPath) return null;
   const cached = readCache(sessionId);
@@ -239,6 +252,8 @@ function updatePeak(sessionId, contextTokens) {
 
 module.exports = {
   readLatestUsage,
+  markRecorded,
+  lastRecordedOf,
   contextTokensOf,
   usageCachePath,
   peakPath,

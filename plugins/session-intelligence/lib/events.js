@@ -196,6 +196,23 @@ function recordCompactOutcome({
   } catch { return false; }
 }
 
+/** One row per assistant message; a repeat of (sid, messageId) is ignored. */
+function recordCacheHit({ sid, t, model, messageId, ratio, cacheRead, cacheCreation, contextTokens } = {}) {
+  const db = openDb();
+  if (!db || !sid || !messageId) return false;
+  try {
+    const res = db.prepare(`
+      INSERT OR IGNORE INTO cache_hits
+        (sid, t, model, message_id, ratio, cache_read, cache_creation, context_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, Number.isFinite(t) ? t : Date.now(), model || null, messageId,
+      finiteOrNull(ratio), finiteOrNull(cacheRead), finiteOrNull(cacheCreation), finiteOrNull(contextTokens),
+    );
+    return res.changes > 0;
+  } catch { return false; }
+}
+
 function stampCompactOutcomeAfter({ sid, compactT, fillAfter } = {}) {
   const db = openDb();
   if (!db || !sid || !Number.isFinite(compactT) || !Number.isFinite(fillAfter)) return false;
@@ -579,6 +596,7 @@ module.exports = {
   recordCompact,
   recordZoneTransition,
   recordCompactOutcome,
+  recordCacheHit,
   stampCompactOutcomeAfter,
   latestCompactTime,
   recordToolArchive,

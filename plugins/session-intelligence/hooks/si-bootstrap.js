@@ -983,7 +983,7 @@ function main() {
     } catch { /* rendering failure shouldn't block the hook */ }
   }
 
-  emitAdditionalContext([continuation, nexus, hygiene], systemMessage);
+  emitAdditionalContext([continuation, nexus, hygiene, require(path.join(SI_LIB, 'resume-advice')).buildResumeCacheContext(input)], systemMessage);
 
   process.exit(0);
 }

@@ -45,6 +45,14 @@ function outcomesAggregate(db, cutoff, projectClause, projectArgs) {
   };
 }
 
+function cacheHitsAggregate(db, cutoff) {
+  return db.prepare(`
+    SELECT model, COUNT(*) AS n, AVG(ratio) AS avg_ratio
+    FROM cache_hits WHERE t >= ? AND ratio IS NOT NULL
+    GROUP BY model ORDER BY n DESC
+  `).all(cutoff).map((r) => ({ model: r.model, n: r.n, avg_ratio: r.avg_ratio }));
+}
+
 function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
   if (!db) return null;
   try {
@@ -84,6 +92,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
 
     const compactFill = fillByTrigger(db, cutoff, projectClause, projectArgs);
     const outcomes = outcomesAggregate(db, cutoff, projectClause, projectArgs);
+    const cacheHits = cacheHitsAggregate(db, cutoff);
 
     const zones = db.prepare(`
       SELECT to_zone AS zone, COUNT(*) AS n
@@ -260,7 +269,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     `).all(cutoff, ...projectArgs);
 
     return {
-      sessions, compacts, compactPercentiles, compactFill, outcomes, zones, archives, reruns,
+      sessions, compacts, compactPercentiles, compactFill, outcomes, cacheHits, zones, archives, reruns,
       agents, agentTypes,
       topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
       sinceDays, project,

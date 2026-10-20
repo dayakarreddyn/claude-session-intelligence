@@ -234,6 +234,11 @@ function renderHeadline(stats, sinceDays, project) {
     ['Peak tokens (max / avg)',
       `${fmtTokens(stats.sessions.max_peak)} / ${fmtTokens(stats.sessions.avg_peak)}`],
   ];
+  const cacheHits = Array.isArray(stats.cacheHits) ? stats.cacheHits : [];
+  if (cacheHits.length) {
+    rows.push(['Cache hit (mean per model)',
+      cacheHits.map((h) => `${h.model || 'unknown'} ${Math.round(h.avg_ratio * 100)}% (${h.n})`).join(', ')]);
+  }
   // Budget rows render whenever tracking is enabled (number cap OR "unlimited").
   // Unlimited prints "spend / unlimited (∞)" so the user sees the row but no alert.
   if (isBudgetEnabled(budget.daily) && today) {

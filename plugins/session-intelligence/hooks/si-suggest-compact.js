@@ -59,7 +59,7 @@ const {
   resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
-const { readLatestUsage, updatePeak } = require(path.join(SI_LIB, 'transcript-usage'));
+const { readLatestUsage, updatePeak, markRecorded, lastRecordedOf } = require(path.join(SI_LIB, 'transcript-usage'));
 const { resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
 const { numbersSegment, largeResultsLine, phaseBoundaryLine } = require(path.join(SI_LIB, 'callout'));
 const { countLargeResults } = require(path.join(SI_LIB, 'shape-signals'));
@@ -180,6 +180,19 @@ async function main() {
   const tokenBudget = latest ? latest.contextTokens : 0;
   const tokenSource = latest ? latest.source : 'none';
   const model = (latest && latest.model) || null;
+  // Per-turn cache-hit series: one row per new assistant message id.
+  try {
+    const ratio = costEst && latest && latest.messageId ? costEst.cacheHitRatio(latest.usage) : null;
+    if (ratio !== null && latest.messageId !== lastRecordedOf(sessionId)) {
+      const u = latest.usage;
+      require(path.join(SI_LIB, 'events')).recordCacheHit({
+        sid: sessionId, t: Date.now(), model, messageId: latest.messageId, ratio,
+        cacheRead: u.cache_read_input_tokens, cacheCreation: u.cache_creation_input_tokens,
+        contextTokens: latest.contextTokens,
+      });
+      markRecorded(sessionId, latest.messageId);
+    }
+  } catch { /* telemetry is best-effort */ }
   let cap = 0;
   let fillPct = 0;
   let autoPoint = 0;

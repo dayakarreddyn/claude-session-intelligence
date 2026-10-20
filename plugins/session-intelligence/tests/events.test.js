@@ -712,3 +712,15 @@ test('aggregateStats outcomes averages retention and splits fill_before by trigg
     assert.equal(events.stampCompactOutcomeAfter({ sid: 'a' }), false);
   } finally { cleanup(sb); }
 });
+
+test('recordCacheHit ignores duplicates and aggregateStats averages per model', () => {
+  const sb = mkSandboxDb();
+  try {
+    const base = { sid: 's1', t: Date.now(), model: 'claude-opus-5-5', cacheRead: 1, cacheCreation: 1, contextTokens: 2 };
+    events.recordCacheHit({ ...base, messageId: 'm1', ratio: 0.5 });
+    events.recordCacheHit({ ...base, messageId: 'm1', ratio: 0.9 });
+    events.recordCacheHit({ ...base, messageId: 'm2', ratio: 1 });
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.deepEqual(stats.cacheHits, [{ model: 'claude-opus-5-5', n: 2, avg_ratio: 0.75 }]);
+  } finally { cleanup(sb); }
+});

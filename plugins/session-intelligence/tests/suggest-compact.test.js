@@ -238,3 +238,24 @@ test('stablePrefix mode suppresses the phase boundary line', () => {
     assert.equal(r.stderr.includes('natural compaction boundary'), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('suggest-compact records one cache_hits row per message id across runs', () => {
+  const { home } = sandbox();
+  try {
+    const sid = 'sid-cachehit';
+    const t = writeTranscript(home, [userLine, usageLine('claude-opus-5-5', {
+      input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+    })]);
+    const payload = { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' };
+    runHook('si-suggest-compact.js', payload, { home });
+    runHook('si-suggest-compact.js', payload, { home });
+    const rows = withDb(home, (db) => (db
+      ? db.prepare('SELECT message_id, model, ratio, cache_read, context_tokens FROM cache_hits WHERE sid = ?').all(sid)
+      : []));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].message_id, 'msg_1');
+    assert.equal(rows[0].model, 'claude-opus-5-5');
+    assert.equal(rows[0].ratio, 1);
+    assert.equal(rows[0].cache_read, 200000);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

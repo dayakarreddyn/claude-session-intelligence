@@ -103,6 +103,19 @@ function createTables(db) {
     );
     CREATE INDEX IF NOT EXISTS tool_reruns_sid_idx ON tool_reruns(sid);
 
+    CREATE TABLE IF NOT EXISTS cache_hits (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      sid            TEXT NOT NULL,
+      t              INTEGER NOT NULL,
+      model          TEXT,
+      message_id     TEXT NOT NULL,
+      ratio          REAL,
+      cache_read     INTEGER,
+      cache_creation INTEGER,
+      context_tokens INTEGER,
+      UNIQUE(sid, message_id)
+    );
+
     CREATE TABLE IF NOT EXISTS compact_outcomes (
       id                   INTEGER PRIMARY KEY AUTOINCREMENT,
       sid                  TEXT NOT NULL,
