@@ -337,3 +337,32 @@ test('PreCompact still injects the registry when the state dir is unwritable', {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('PreCompact with an unreadable transcript still writes the regret snapshot, exits 0, and never records cap 0', () => {
+  const sid = 'sid-pc-nousage';
+  const snapFile = path.join(os.tmpdir(), `claude-compact-snapshot-${sid}.json`);
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  try {
+    fs.rmSync(snapFile, { force: true });
+    const cwd = path.join(home, 'proj');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd, transcript_path: path.join(home, 'missing.jsonl'), trigger: 'auto', hook_event_name: 'PreCompact' }),
+      env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(snapFile), 'regret snapshot must be written without usage evidence');
+    const dbFile = path.join(home, '.claude', 'state', 'si-events.db');
+    if (fs.existsSync(dbFile)) {
+      const { db } = openDatabase(dbFile);
+      try {
+        const row = db.prepare('SELECT context_cap FROM compacts WHERE sid = ?').get(sid);
+        assert.ok(!row || row.context_cap !== 0);
+      } finally { db.close(); }
+    }
+  } finally {
+    fs.rmSync(snapFile, { force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
