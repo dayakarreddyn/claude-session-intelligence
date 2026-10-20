@@ -6,7 +6,7 @@
 
 'use strict';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const GUARDED_ADD_COLUMNS = Object.freeze([
   "ALTER TABLE agent_invocations ADD COLUMN model TEXT",
@@ -245,10 +245,17 @@ function migrateV3(db) {
   }
 }
 
+// Claude 5.5-era reprice (user_version 3 -> 4): Fable 5.1 cache read, Opus 5.5,
+// Sonnet 5.5 and tiered Haiku 5.5 rows replace the family-prefix rates.
+function migrateV4(db) {
+  repriceAgentInvocations(db);
+}
+
 const MIGRATIONS = Object.freeze([
   { version: 1, run: migrateV1 },
   { version: 2, run: migrateV2 },
   { version: 3, run: migrateV3 },
+  { version: 4, run: migrateV4 },
 ]);
 
 /**

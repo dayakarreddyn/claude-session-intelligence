@@ -103,3 +103,25 @@ test('SCHEMA_VERSION equals the highest MIGRATIONS entry and versions are contig
   assert.deepEqual(versions, versions.map((_, i) => i + 1));
   assert.equal(SCHEMA_VERSION, versions[versions.length - 1]);
 });
+
+test('v4 migration reprices an Opus 5.5 agent row from the generic Opus rate', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const raw = openDatabase(sb.dbPath).db;
+    raw.prepare(`
+      INSERT INTO agent_invocations (sid, tool_use_id, subagent_type, t, model, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?)
+    `).run('s1', 'toolu_o55', 'Explore', Date.now(), 'claude-opus-5-5', 1000000, 0, 0, 0, 5.0);
+    raw.pragma('user_version = 3');
+    raw.close();
+    const reopened = openDatabase(sb.dbPath);
+    const { runMigrations: run } = require('../lib/events-migrations');
+    assert.deepEqual(run(reopened.db), { from: 3, to: 4 });
+    const row = reopened.db.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_o55'").get();
+    assert.equal(reopened.db.pragma('user_version', { simple: true }), 4);
+    reopened.db.close();
+    assert.ok(Math.abs(row.cost_usd - 4.0) < 1e-9, `cost=${row.cost_usd}`);
+  } finally { cleanup(sb); }
+});

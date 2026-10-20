@@ -206,3 +206,32 @@ test('totalsFromTranscript accumulates per-model cost buckets', () => {
   assert.deepEqual(out2.byModel, out.byModel);
   fs.unlinkSync(path_);
 });
+
+test('Claude 5.5-era rows win over family prefixes', () => {
+  assert.deepEqual(costEst.knownPriceForModel('claude-fable-5-1'), { input: 10, cache_creation: 12.50, cache_creation_1h: 20, cache_read: 0.25, output: 50 });
+  assert.deepEqual(costEst.knownPriceForModel('claude-mythos-5-1'), { input: 10, cache_creation: 12.50, cache_creation_1h: 20, cache_read: 0.25, output: 50 });
+  assert.deepEqual(costEst.knownPriceForModel('claude-opus-5-5'), { input: 4, cache_creation: 5, cache_creation_1h: 8, cache_read: 0.20, output: 20 });
+  assert.deepEqual(costEst.knownPriceForModel('claude-sonnet-5-5', Date.parse('2026-10-19')), { input: 2, cache_creation: 2.50, cache_creation_1h: 4, cache_read: 0.10, output: 10 });
+  assert.equal(costEst.knownPriceForModel('claude-fable-5').cache_read, 1.00, 'Fable 5 row unchanged');
+});
+
+test('Haiku 5.5 tiers at 100,000 context tokens', () => {
+  const p = costEst.knownPriceForModel('claude-haiku-5-5');
+  assert.equal(costEst.costFromUsage({ input_tokens: 100000 }, p), 0.01);
+  assert.ok(Math.abs(costEst.costFromUsage({ input_tokens: 100001 }, p) - 0.0500005) < 1e-9);
+  assert.equal(costEst.tierFor(p, 50000).input, 0.10);
+  assert.equal(costEst.tierFor(p, 150000).input, 0.50);
+  assert.equal(costEst.tierFor(costEst.DEFAULT_PRICES, 1).input, costEst.DEFAULT_PRICES.input);
+  // savedFromUsage must not NaN on a tiered row.
+  assert.ok(Number.isFinite(costEst.savedFromUsage({ cache_read_input_tokens: 200000 }, p)));
+});
+
+test('costFromUsage bills 1h cache writes at the 1h rate when the breakdown is present', () => {
+  const p = costEst.knownPriceForModel('claude-fable-5-1');
+  assert.equal(costEst.costFromUsage({ cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 1000000, ephemeral_5m_input_tokens: 0 } }, p), 20);
+  assert.equal(costEst.costFromUsage({ cache_creation_input_tokens: 1000000 }, p), 12.5);
+  assert.equal(costEst.costFromUsage({ cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 500000 } }, p), 16.25);
+  // Rows without a 1h rate fall back to cache_creation x 1.6.
+  const old = costEst.knownPriceForModel('claude-fable-5');
+  assert.ok(Math.abs(costEst.costFromUsage({ cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 1000000 } }, old) - 20) < 1e-9);
+});

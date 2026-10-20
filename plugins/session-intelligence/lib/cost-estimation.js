@@ -35,7 +35,19 @@ const DEFAULT_PRICES = {
 // agents, Sonnet for reviewers), so a per-model lookup is needed for honest
 // cost. cache_creation is the 5-minute write rate (1.25x input) — what
 // Claude Code sessions use.
-const PRICING_BY_MODEL = {
+const PRICING_BY_MODEL = Object.freeze({
+  // Claude 5.5-era rows (pricing page 2026-10-19). Explicit rows are longer
+  // than their family prefix so they win the longest-prefix match.
+  // cache_creation_1h is the 1-hour TTL write rate (2x input).
+  'claude-fable-5-1':  Object.freeze({ input: 10, cache_creation: 12.50, cache_creation_1h: 20, cache_read: 0.25, output: 50 }),
+  'claude-mythos-5-1': Object.freeze({ input: 10, cache_creation: 12.50, cache_creation_1h: 20, cache_read: 0.25, output: 50 }),
+  'claude-opus-5-5':   Object.freeze({ input: 4, cache_creation: 5, cache_creation_1h: 8, cache_read: 0.20, output: 20 }),
+  'claude-sonnet-5-5': Object.freeze({ input: 2, cache_creation: 2.50, cache_creation_1h: 4, cache_read: 0.10, output: 10 }),
+  // Haiku 5.5 is tiered on the request's total context tokens (see tierFor).
+  'claude-haiku-5-5': Object.freeze({ tiers: Object.freeze([
+    Object.freeze({ upToContextTokens: 100000, input: 0.10, cache_creation: 0.125, cache_creation_1h: 0.20, cache_read: 0.01, output: 0.50 }),
+    Object.freeze({ input: 0.50, cache_creation: 0.625, cache_creation_1h: 1, cache_read: 0.05, output: 2.50 }),
+  ]) }),
   // Claude 5 family — Fable 5 / Mythos 5 share pricing.
   'claude-fable':  { input: 10, cache_creation: 12.50, cache_read: 1.00, output: 50 },
   'claude-mythos': { input: 10, cache_creation: 12.50, cache_read: 1.00, output: 50 },
@@ -50,7 +62,7 @@ const PRICING_BY_MODEL = {
   'claude-sonnet-5': { input: 2, cache_creation: 2.50, cache_read: 0.20, output: 10 },
   'claude-sonnet': { input: 3,  cache_creation: 3.75,  cache_read: 0.30, output: 15 },
   'claude-haiku':  { input: 1,  cache_creation: 1.25,  cache_read: 0.10, output: 5  },
-};
+});
 
 const SONNET5_INTRO_END_MS = Date.parse('2026-09-01T00:00:00Z');
 
@@ -77,14 +89,36 @@ function priceForModel(modelId, at = Date.now()) {
   return knownPriceForModel(modelId, at) || DEFAULT_PRICES;
 }
 
+const CACHE_1H_FALLBACK_MULT = 1.6; // 1h write (2x input) over 5m write (1.25x)
+
+/** Flat price object for a context size; non-tiered rows pass through. */
+function tierFor(prices, contextTokens) {
+  if (!prices || !Array.isArray(prices.tiers)) return prices;
+  const n = contextTokens || 0;
+  for (const t of prices.tiers) {
+    if (t.upToContextTokens === undefined || n <= t.upToContextTokens) return t;
+  }
+  return prices.tiers[prices.tiers.length - 1];
+}
+
+function contextTokensOf(u) {
+  return (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+}
+
 /** Cost of one usage block in USD. */
 function costFromUsage(u, prices = DEFAULT_PRICES) {
   if (!u) return 0;
-  const per = (n, p) => ((n || 0) / 1_000_000) * p;
-  return per(u.input_tokens, prices.input)
-       + per(u.cache_creation_input_tokens, prices.cache_creation)
-       + per(u.cache_read_input_tokens, prices.cache_read)
-       + per(u.output_tokens, prices.output);
+  const p = tierFor(prices, contextTokensOf(u));
+  // Multiply before dividing so round token counts price without float drift.
+  const per = (n, rate) => ((n || 0) * rate) / 1_000_000;
+  const total = u.cache_creation_input_tokens || 0;
+  const oneHour = Math.min(total, Math.max(0, (u.cache_creation && u.cache_creation.ephemeral_1h_input_tokens) || 0));
+  const rate1h = p.cache_creation_1h !== undefined ? p.cache_creation_1h : p.cache_creation * CACHE_1H_FALLBACK_MULT;
+  return per(u.input_tokens, p.input)
+       + per(total - oneHour, p.cache_creation)
+       + per(oneHour, rate1h)
+       + per(u.cache_read_input_tokens, p.cache_read)
+       + per(u.output_tokens, p.output);
 }
 
 /**
@@ -96,7 +130,8 @@ function savedFromUsage(u, prices = DEFAULT_PRICES) {
   if (!u) return 0;
   const read = u.cache_read_input_tokens || 0;
   if (read <= 0) return 0;
-  const delta = (prices.input || 0) - (prices.cache_read || 0);
+  const p = tierFor(prices, contextTokensOf(u));
+  const delta = (p.input || 0) - (p.cache_read || 0);
   if (delta <= 0) return 0;
   return (read / 1_000_000) * delta;
 }
@@ -347,6 +382,7 @@ module.exports = {
   PRICING_BY_MODEL,
   knownPriceForModel,
   priceForModel,
+  tierFor,
   costFromUsage,
   savedFromUsage,
   totalCostFromTranscript,

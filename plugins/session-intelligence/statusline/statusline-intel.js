@@ -1690,6 +1690,10 @@ const DEFAULT_PRICES = {
 
 function costFromUsage(u, prices = DEFAULT_PRICES) {
   if (!u) return 0;
+  // Tiered rows (Haiku 5.5) and 1h cache writes live in the shared lib.
+  if (knownPriceForModelSafe('') === null && _costLibCached && typeof _costLibCached.costFromUsage === 'function') {
+    return _costLibCached.costFromUsage(u, prices);
+  }
   const per = (n, p) => ((n || 0) / 1_000_000) * p;
   return per(u.input_tokens, prices.input)
        + per(u.cache_creation_input_tokens, prices.cache_creation)
@@ -1704,6 +1708,9 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
 // compatible since the missing field is treated as 0).
 function savedFromUsage(u, prices = DEFAULT_PRICES) {
   if (!u) return 0;
+  if (knownPriceForModelSafe('') === null && _costLibCached && typeof _costLibCached.savedFromUsage === 'function') {
+    return _costLibCached.savedFromUsage(u, prices);
+  }
   const read = u.cache_read_input_tokens || 0;
   if (read <= 0) return 0;
   const delta = (prices.input || 0) - (prices.cache_read || 0);
