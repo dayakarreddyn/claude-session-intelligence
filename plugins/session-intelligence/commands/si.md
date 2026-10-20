@@ -71,7 +71,7 @@ ${CLAUDE_PLUGIN_ROOT}/hooks/status-report.js
 
 Invoke as: `echo '{"session_id":"<sid>"}' | node <path>`. Relay the script's stdout verbatim — it's already formatted. Do not attempt to parse or summarise it unless the user asks a follow-up.
 
-**`doctor`** — One-shot project health check. Answers, authoritatively: *is SI actually wired up for the project I'm sitting in right now?* Diagnoses the most common silent failure (project `enabledPlugins` whitelist excluding SI), plus plugin-cache presence, unified-config readability, and whether the shape log is being written for this session. Resolve the script path in this order and invoke the first that exists:
+**`doctor`** — One-shot project health check. Answers, authoritatively: *is SI actually wired up for the project I'm sitting in right now?* Diagnoses the most common silent failure (project `enabledPlugins` whitelist excluding SI), plus plugin-cache presence, unified-config readability, and whether the shape log is being written for this session. When the model is known (pass `"model"` on stdin or `--model <id>`) it also checks the context window: resolved cap and whether `autoCompactWindow` is set on a 1M model. Resolve the script path in this order and invoke the first that exists:
 
 ```
 ${CLAUDE_PLUGIN_ROOT}/hooks/si-doctor.js

@@ -62,6 +62,10 @@ No official degradation point exists for Claude 5; these fractions are calibrate
 
 After **≥5 compacts** land in `~/.claude/logs/compact-history.jsonl`, the zones adapt to your own pattern: `orange` anchors to P50 of your historical compact-at-tokens, `red` to P90. Bounded ±30% from defaults so a noisy history can't silence the warnings. See [Learning Loop](#learning-loop) below.
 
+### Recommended: autoCompactWindow on 1M models
+
+Claude Code compacts a 1M model at roughly 967K tokens, far past where long-context quality has degraded. Set a per-model window of **400,000-500,000** with `/autocompact 450k` (saved per model under `modelSettings`) or `"autoCompactWindow": 450000` in `~/.claude/settings.json`. `/si doctor` flags a 1M model with no window configured, and the `contextPct` field (`cmp:NN%`) then counts toward the window you chose.
+
 ## Install
 
 Two supported paths. **Plugin install is the recommended default** — zero shell scripts, zero manual settings edits.
@@ -280,7 +284,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
 | `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
 | `tokens` | `▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)` | **Full context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap, colored green → yellow → orange → red by current zone. Cap auto-detects: `[1m]` / `-1m` tag in `model.id` → 1M, Opus 4.x / Sonnet 4.x family → 1M (newer Claude Code builds drop the `[1m]` marker once 1M is the default), else 200k. Override with `statusline.contextCap`. Prefixed with `~` when using the estimate fallback. Zones are adaptive (fall back to defaults when history < 5 compacts) |
-| `contextPct` | `ctx:43%` | Context-window % on its own (no bar). Zone-coloured like `tokens`. Useful when you want the signal on a different row from the bar — redundant when `tokens` is already present on the same line. Not in any default preset |
+| `contextPct` | `cmp:43%` | **% to compaction.** Context tokens divided by the resolved auto-compaction point (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then `modelSettings.<model>.autoCompactWindow`, then `autoCompactWindow`, else the model default: ~967K on 1M models). 100% means Claude Code is about to compact; this is not a window percentage. Zone-coloured (<60% green, 60-85% yellow, 85-95% orange, 95%+ red). Silent until the transcript has a real usage line. Not in any default preset |
 | `zone` | `orange` | Zone name only, coloured |
 | `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
 | `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
@@ -465,6 +469,8 @@ Runtime evidence (this session)
 
 VERDICT: SI is dark for this project. See "Fix:" above.
 ```
+
+When the model is known (`"model"` on stdin or `--model <id>`), the doctor adds a `Context window` section: the resolved cap and its source, plus the `autoCompactWindow` check (configured value and source, or the recommendation above on a 1M model with none set).
 
 Exits 0 when SI is live, 1 when dark. Pure read-only — never writes. The `siHealth` statusline field surfaces the same gating check passively on every render so users don't have to think to run the doctor.
 

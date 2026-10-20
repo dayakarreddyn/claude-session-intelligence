@@ -103,10 +103,28 @@ function check(label, status, detail) {
   return `  ${mark} ${label}${detail ? `  — ${detail}` : ''}`;
 }
 
+function contextWindowLines(model, cwd) {
+  const cc = require('../lib/context-cap');
+  const settings = cc.loadSettingsForCwd(cwd);
+  const { cap, source } = cc.resolveContextCap({ model, env: process.env, settings });
+  const lines = [check('resolved cap', 'pass', `${cap.toLocaleString('en-US')} (${source}: ${model})`)];
+  const { point, source: pointSource } = cc.resolveAutoCompactPoint({ cap, model, env: process.env, settings });
+  if (pointSource !== 'default') {
+    lines.push(check('autoCompactWindow', 'pass', `${point} (${pointSource})`));
+  } else if (cap >= cc.ONE_M) {
+    const { min, max } = cc.RECOMMENDED_AUTO_COMPACT;
+    lines.push('  ! autoCompactWindow not set — ' +
+      `Claude Code compacts this 1M model at ~${Math.round(point / 1000)}K; recommend ${min}–${max} ` +
+      'via `/autocompact 450k` (saved per model under modelSettings) or "autoCompactWindow": 450000 in ~/.claude/settings.json');
+  }
+  return lines;
+}
+
 function main() {
   const stdin = readStdinJsonOrEmpty();
   const cwd = readArg('--cwd') || stdin.cwd || process.cwd();
   const sid = resolveSessionId(stdin);
+  const model = readArg('--model') || stdin.model || null;
 
   const cachePath = pluginCachePath();
   const project = findProjectEnabledPlugins(cwd);
@@ -174,6 +192,12 @@ function main() {
     }
   }
   out.push('');
+
+  if (model) {
+    out.push('Context window');
+    out.push(...contextWindowLines(typeof model === 'object' ? (model.id || model.display_name) : model, cwd));
+    out.push('');
+  }
 
   // Verdict — one line, easy to grep.
   const dark = pluginGated === 'missing-from-whitelist' || pluginGated === 'explicitly-disabled'

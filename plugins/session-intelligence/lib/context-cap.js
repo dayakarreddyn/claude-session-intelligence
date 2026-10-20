@@ -101,6 +101,12 @@ function fillPctOf(tokens, cap) {
   return Math.round((tokens / cap) * 1000) / 10;
 }
 
+/** Percent of the way to the auto-compaction point; null when there is nothing to measure. */
+function pctToCompaction({ contextTokens, point } = {}) {
+  if (!(contextTokens > 0) || !(point > 0)) return null;
+  return Math.round((contextTokens / point) * 100);
+}
+
 function bucketPct(pct, step = DEFAULT_BUCKET_STEP) {
   return Math.floor(pct / step) * step;
 }
@@ -112,5 +118,5 @@ function windowLabel(cap) {
 module.exports = {
   ONE_M, DEFAULT_CAP, AUTO_COMPACT_1M_DEFAULT, RECOMMENDED_AUTO_COMPACT,
   resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd,
-  isNative1M, fillPctOf, bucketPct, windowLabel,
+  isNative1M, fillPctOf, pctToCompaction, bucketPct, windowLabel,
 };

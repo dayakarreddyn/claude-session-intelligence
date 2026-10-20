@@ -87,3 +87,10 @@ test('loadSettingsForCwd merges user then project then local', () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('pctToCompaction rounds tokens over the point and is null without input', () => {
+  const { pctToCompaction } = require('../lib/context-cap');
+  assert.equal(pctToCompaction({ contextTokens: 450000, point: 500000 }), 90);
+  assert.equal(pctToCompaction({ contextTokens: 0, point: 500000 }), null);
+  assert.equal(pctToCompaction({ contextTokens: 5, point: 0 }), null);
+});

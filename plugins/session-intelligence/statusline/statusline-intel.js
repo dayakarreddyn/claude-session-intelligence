@@ -1385,23 +1385,27 @@ function buildRenderers(C) {
       return `${C.dim}${parts.join('/')}${C.reset}`;
     },
 
-    /** Percentage of the context window consumed. Replaces ccstatusline's
-     *  `93.0%` signal so we can retire the 1.5 s `npx` spend. Uses zones.red
-     *  as the 100% reference (the compact-advisory ceiling from context-rot
-     *  research), clamped to 90% of the model's real window so a 200k-cap
-     *  model can actually reach 100% — with a 400k red line it never would.
+    /** Distance to auto-compaction: context tokens / the resolved
+     *  auto-compaction point (env, modelSettings, settings, else the model
+     *  default), as `cmp:43%`. Silent without a real usage line.
      *  Zone-colored: <60% green · 60-85% yellow · 85-95% orange · >=95% red */
     contextPct: (input, ctx) => {
-      const zoneRed = (ctx.cfg.zones && ctx.cfg.zones.red) || 400000;
-      const cap = contextCap(input, ctx.cfg);
-      const max = Math.min(zoneRed, Math.round(cap * 0.9));
-      if (!ctx.tokens || ctx.tokens <= 0) return '';
-      const pct = Math.round((ctx.tokens / max) * 100);
+      const dir = resolveLibDir();
+      if (!ctx.usedTranscript || !dir) return '';
+      let pct = null;
+      try {
+        const lib = require(path.join(dir, 'context-cap.js'));
+        const model = input.model && (input.model.id || input.model.display_name);
+        const cap = contextCap(input, ctx.cfg);
+        const { point } = lib.resolveAutoCompactPoint({ cap, model, env: process.env, settings: lib.loadSettingsForCwd(input.cwd) });
+        pct = lib.pctToCompaction({ contextTokens: ctx.tokens, point });
+      } catch { return ''; }
+      if (pct === null) return '';
       let col = C.green;
       if (pct >= 95) col = C.red;
       else if (pct >= 85) col = C.orange;
       else if (pct >= 60) col = C.yellow;
-      return `${col}ctx:${pct}%${C.reset}`;
+      return `${col}cmp:${pct}%${C.reset}`;
     },
 
     /** Claude Code 5-hour block usage + time until reset, as `b:47% · r:3hr12m`.
