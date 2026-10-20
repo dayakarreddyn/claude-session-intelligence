@@ -72,6 +72,7 @@ function gitRecentCommits(cwd, sinceMs) {
 // tests (and the `_internal` export at the bottom of this file) stay
 // backwards-compatible.
 const sessionCtx = require('./session-context');
+const { CONSTRAINT_TYPES } = require('./constraint-registry');
 const parseSessionContextSections = sessionCtx.parseSessionContext;
 
 function readSessionContext(projectDir) {
@@ -214,7 +215,12 @@ function writeHandoff(opts) {
   const constraints = Array.isArray(opts.constraints)
     ? opts.constraints
       .filter((c) => c && typeof c.text === 'string' && c.text)
-      .map((c) => ({ type: c.type, text: c.text, source: c.source }))
+      .map((c) => ({
+        type: CONSTRAINT_TYPES.includes(c.type) ? c.type : 'Information',
+        text: c.text.replace(/\s*\n+\s*/g, ' ').trim(),
+        source: c.source,
+      }))
+      .filter((c) => c.text)
     : [];
   const hasStrongSignal = currentTaskFresh || nextPriorities.length > 0 || constraints.length > 0;
   if (!hasStrongSignal) return false;

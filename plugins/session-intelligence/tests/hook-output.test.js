@@ -48,3 +48,26 @@ test('a fitted registry always leaves at least 6000 chars for optional blocks', 
   const heading = '\n# Session Intelligence \u2014 compaction guidance\n'.length;
   assert.ok(HOOK_OUTPUT_CAP_CHARS - MAX_BLOCK_CHARS - heading >= 6000);
 });
+
+const { renderBootstrapContext } = require('../lib/hook-output');
+
+test('renderBootstrapContext keeps the required handoff constraints and drops the oversized nexus', () => {
+  const handoff = 'Resuming\n\nStanding constraints (re-injected after compact — these survive regardless of the summary):\n  - [Action] Never rewrite earlier turns\n';
+  const out = renderBootstrapContext([handoff, 'N'.repeat(12000), 'hygiene note']);
+  assert.ok(out.length < 10000);
+  assert.match(out, /Standing constraints/);
+  assert.doesNotMatch(out, /NNNN/);
+});
+
+test('renderBootstrapContext truncates an oversized required part with constraints still on top', () => {
+  const head = 'Standing constraints (re-injected after compact — x):\n  - [Process] Run npm test\n';
+  const out = renderBootstrapContext([head + 'T'.repeat(12000), 'nexus']);
+  assert.ok(out.length <= 10000);
+  assert.ok(out.startsWith('Standing constraints'));
+  assert.match(out, /…\[truncated\]/);
+});
+
+test('renderBootstrapContext ignores empty parts and joins with a blank line', () => {
+  assert.equal(renderBootstrapContext(['a', '', 'b']), 'a\n\nb');
+  assert.equal(renderBootstrapContext([]), '');
+});

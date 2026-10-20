@@ -39,4 +39,20 @@ function assembleUnderCap(blocks, { maxChars = HOOK_OUTPUT_CAP_CHARS } = {}) {
   return { text, dropped, chars: text.length, overCap };
 }
 
-module.exports = { HOOK_OUTPUT_CAP_CHARS, assembleUnderCap };
+/**
+ * Join SessionStart context parts under the hook-output cap. The first part
+ * (the compact handoff, which holds the standing constraints) is required;
+ * later parts are optional and drop from the end first. Empty/non-string
+ * parts are ignored.
+ * @param {string[]} parts
+ * @returns {string}
+ */
+function renderBootstrapContext(parts, { maxChars = HOOK_OUTPUT_CAP_CHARS } = {}) {
+  const live = (Array.isArray(parts) ? parts : []).filter((s) => typeof s === 'string' && s.length > 0);
+  return assembleUnderCap(
+    live.map((text, i) => ({ name: `part${i}`, text: i ? `\n\n${text}` : text, required: i === 0 })),
+    { maxChars },
+  ).text;
+}
+
+module.exports = { HOOK_OUTPUT_CAP_CHARS, assembleUnderCap, renderBootstrapContext };
