@@ -221,3 +221,20 @@ test('callout omits the boundary line when the newest phase marker is older than
   assert.equal(r.status, 2);
   assert.equal(r.stderr.includes('natural compaction boundary'), false);
 });
+
+test('stablePrefix mode suppresses the phase boundary line', () => {
+  const { home, state } = sandbox();
+  try {
+    const sid = 'sid-phase-stable';
+    fs.writeFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`), shapeEntries([null, 'commit']));
+    fs.writeFileSync(path.join(home, '.claude', 'session-intelligence.json'),
+      JSON.stringify({ compact: { stablePrefix: true } }));
+    const t = writeTranscript(home, [userLine, usageLine('claude-opus-5-5', {
+      input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+    })]);
+    const r = runHook('si-suggest-compact.js',
+      { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' }, { home });
+    assert.equal(r.status, 2);
+    assert.equal(r.stderr.includes('natural compaction boundary'), false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

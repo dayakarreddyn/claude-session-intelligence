@@ -385,11 +385,12 @@ async function main() {
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
       if (!stablePrefix) {
-        const largeLine = largeResultsLine(countLargeResults(readShape(sessionId)));
+        const shapeEntries = readShape(sessionId);
+        const largeLine = largeResultsLine(countLargeResults(shapeEntries));
         if (largeLine) body.push(largeLine);
+        const phaseLine = phaseBoundaryLine(shapeEntries);
+        if (phaseLine) body.push(phaseLine);
       }
-      const phaseLine = phaseBoundaryLine(readShape(sessionId));
-      if (phaseLine) body.push(phaseLine);
       const dupReads = (shape && shape.duplicates && shape.duplicates.reads) || [];
       for (const d of dupReads.slice(0, MAX_DUP_READ_LINES)) {
         body.push(`Duplicate reads: ${d.file} ×${d.count} — later reads add no information; prefer the latest copy.`);

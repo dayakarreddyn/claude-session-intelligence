@@ -106,6 +106,51 @@ test('si-task-change still scores a normal user prompt when token budget is low'
   } finally { cleanup(dir); }
 });
 
+const SHIFT_PROMPT = 'Now please design a gradient colour palette for the marketing landing page hero banner with warm sunset tones and accessible contrast ratios throughout';
+
+function shiftFixture(sid) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-tc-home-'));
+  const cwd = path.join(home, 'proj');
+  fs.mkdirSync(cwd, { recursive: true });
+  const projectDir = path.join(home, '.claude', 'projects', cwd.replace(/\//g, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'session-context.md'),
+    '## Current Task\nShip the auth refactor in src/auth.ts and wire new tokens.\n\n## Key Files\n- src/auth.ts\n');
+  const state = path.join(home, '.claude', 'state');
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(path.join(state, `claude-token-budget-${sid}`), '500000');
+  const run = () => spawnSync('node', [HOOK], {
+    input: JSON.stringify({ cwd, session_id: sid, prompt: SHIFT_PROMPT }),
+    encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, CLAUDE_SI_DEBUG: '0' },
+  });
+  return { home, state, projectDir, run };
+}
+
+test('si-task-change still prints the /clear hint when the registry state is unreadable', () => {
+  const sid = `tc-badreg-${process.pid}-${Date.now()}`;
+  const f = shiftFixture(sid);
+  try {
+    fs.mkdirSync(path.join(f.state, `claude-constraints-${sid}.json`));
+    const res = f.run();
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stderr, /\[TaskChange hint\]/);
+    assert.match(res.stderr, /`\/clear`/);
+  } finally { cleanup(f.home); }
+});
+
+test('si-task-change does not rewrite the handoff for a second identical prompt', () => {
+  const sid = `tc-twice-${process.pid}-${Date.now()}`;
+  const f = shiftFixture(sid);
+  try {
+    assert.match(f.run().stderr, /fresh handoff/);
+    const file = path.join(f.projectDir, '.si-handoff.json');
+    const before = { mtime: fs.statSync(file).mtimeMs, body: fs.readFileSync(file, 'utf8') };
+    assert.equal(f.run().stderr, '');
+    assert.equal(fs.statSync(file).mtimeMs, before.mtime);
+    assert.equal(fs.readFileSync(file, 'utf8'), before.body);
+  } finally { cleanup(f.home); }
+});
+
 test('si-task-change writes a handoff with registry constraints before recommending /clear', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-tc-home-'));
   try {

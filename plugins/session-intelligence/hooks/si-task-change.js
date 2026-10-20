@@ -538,10 +538,15 @@ function main() {
   const parenth = slash === '/compact' ? ' (preserve current task context)' : '';
   let nextStep = `Consider \`${slash}\`${parenth} before heavy new work.`;
   if (action === 'clear') {
-    const registry = require(path.join(SI_LIB, 'constraint-registry')).readRegistryState(sessionId);
-    const constraints = registry && Array.isArray(registry.items) ? registry.items : [];
-    const wrote = require(path.join(SI_LIB, 'handoff')).writeHandoff({ projectDir, cwd, sessionId, constraints });
-    nextStep = clearHandoffHint(wrote, constraints.length);
+    try {
+      const registry = require(path.join(SI_LIB, 'constraint-registry')).readRegistryState(sessionId);
+      const constraints = registry && Array.isArray(registry.items) ? registry.items : [];
+      const wrote = require(path.join(SI_LIB, 'handoff')).writeHandoff({ projectDir, cwd, sessionId, constraints });
+      nextStep = clearHandoffHint(wrote, constraints.length);
+    } catch (err) {
+      intelLog('task-change', 'warn', 'handoff write failed — plain /clear hint', { err: err.message });
+      nextStep = clearHandoffHint(false, 0);
+    }
   }
   const msg =
     `[TaskChange hint] Prompt looks like a different task domain ` +
