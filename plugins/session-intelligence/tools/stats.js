@@ -393,6 +393,25 @@ function renderCompacts(stats) {
   return lines.join('\n');
 }
 
+function renderOutcomes(stats) {
+  const o = stats.outcomes;
+  if (!o || !o.n) return null;
+  const num = (v, fmt) => (Number.isFinite(v) ? fmt(v) : '-');
+  const pct1 = (v) => `${Math.round(v * 10) / 10}%`;
+  const rows = [
+    ['Count',              String(o.n)],
+    ['Retention (mean)',   num(o.avg_retention, (v) => `${Math.round(v * 100)}%`)],
+    ['Summary chars (mean)', num(o.avg_summary_chars, (v) => String(Math.round(v)))],
+    ['Fill before (auto / manual)',
+      `${num(o.avg_fill_before_auto, pct1)} / ${num(o.avg_fill_before_manual, pct1)}`],
+    ['Fill after (mean)',  num(o.avg_fill_after, pct1)],
+  ];
+  const w = Math.max(...rows.map((r) => r[0].length));
+  const lines = [header('COMPACT OUTCOMES', 'PostCompact telemetry'), ''];
+  for (const [k, v] of rows) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
+  return lines.join('\n');
+}
+
 function renderZones(stats) {
   const lines = [header('ZONE CALLOUTS', 'crossings emitted to assistant'), ''];
   if (!stats.zones.length) {
@@ -568,6 +587,7 @@ function main() {
     renderDailyTrend(stats.dailySeries, sinceDays),
     renderWeeklyRollup(stats.weeklySeries),
     renderCompacts(stats),
+    renderOutcomes(stats),
     renderZones(stats),
     renderArchives(stats.archives, stats.reruns || {}),
     renderAgents(stats),

@@ -29,6 +29,7 @@ const GUARDED_ADD_COLUMNS = Object.freeze([
  *   zone_transitions  — yellow/orange/red callouts from suggest-compact
  *   tool_archives     — large tool-response captures (post-compact recall)
  *   tool_reruns       — same tool+input repeated within a short call window
+ *   compact_outcomes  — PostCompact retention + fill before/after per compact
  *   agent_invocations — Task tool calls (subagent runs) — type, sizes, duration
  */
 function createTables(db) {
@@ -101,6 +102,25 @@ function createTables(db) {
       was_pruned   INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS tool_reruns_sid_idx ON tool_reruns(sid);
+
+    CREATE TABLE IF NOT EXISTS compact_outcomes (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      sid                  TEXT NOT NULL,
+      project              TEXT,
+      t                    INTEGER NOT NULL,
+      compact_t            INTEGER,
+      trigger              TEXT,
+      summary_chars        INTEGER,
+      constraints_total    INTEGER,
+      constraints_retained INTEGER,
+      retention            REAL,
+      missing              TEXT,
+      fill_before          REAL,
+      fill_after           REAL,
+      context_cap          INTEGER,
+      model                TEXT
+    );
+    CREATE INDEX IF NOT EXISTS compact_outcomes_sid_idx ON compact_outcomes(sid);
 
     CREATE TABLE IF NOT EXISTS agent_invocations (
       id             INTEGER PRIMARY KEY AUTOINCREMENT,

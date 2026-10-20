@@ -169,6 +169,43 @@ function recordZoneTransition({
   } catch { return false; }
 }
 
+function finiteOrNull(n) { return Number.isFinite(n) ? n : null; }
+
+function recordCompactOutcome({
+  sid, project, t, compactT, trigger, summaryChars, constraintsTotal,
+  constraintsRetained, retention, missing, fillBefore, contextCap, model,
+}) {
+  const db = openDb();
+  if (!db || !sid) return false;
+  try {
+    db.prepare(`
+      INSERT INTO compact_outcomes
+        (sid, project, t, compact_t, trigger, summary_chars, constraints_total,
+         constraints_retained, retention, missing, fill_before, context_cap, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, project || null,
+      Number.isFinite(t) ? t : Date.now(),
+      finiteOrNull(compactT), trigger || null, finiteOrNull(summaryChars),
+      finiteOrNull(constraintsTotal), finiteOrNull(constraintsRetained),
+      finiteOrNull(retention),
+      Array.isArray(missing) ? JSON.stringify(missing) : null,
+      finiteOrNull(fillBefore), finiteOrNull(contextCap), model || null,
+    );
+    return true;
+  } catch { return false; }
+}
+
+function stampCompactOutcomeAfter({ sid, compactT, fillAfter } = {}) {
+  const db = openDb();
+  if (!db || !sid || !Number.isFinite(compactT) || !Number.isFinite(fillAfter)) return false;
+  try {
+    db.prepare('UPDATE compact_outcomes SET fill_after = ? WHERE sid = ? AND compact_t = ?')
+      .run(fillAfter, sid, compactT);
+    return true;
+  } catch { return false; }
+}
+
 function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
   const db = openDb();
   if (!db || !sid || !toolUseId) return false;
@@ -531,6 +568,8 @@ module.exports = {
   recordSessionEnd,
   recordCompact,
   recordZoneTransition,
+  recordCompactOutcome,
+  stampCompactOutcomeAfter,
   recordToolArchive,
   recordRerun,
   markArchiveRecalled,

@@ -678,3 +678,36 @@ test('recordRerun stores a re-run and aggregateStats reports reruns.n', () => {
     assert.equal(events.recordRerun({}), false);
   } finally { cleanup(sb); }
 });
+
+test('stampCompactOutcomeAfter fills fill_after on the matching compact_t', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordCompactOutcome({ sid: 's', t: 2000, compactT: 1000, trigger: 'manual', summaryChars: 10, fillBefore: 48 }));
+    assert.equal(events.aggregateStats({ sinceDays: 36500 }).outcomes.avg_fill_after, null);
+    assert.ok(events.stampCompactOutcomeAfter({ sid: 's', compactT: 1000, fillAfter: 9.5 }));
+    const o = events.aggregateStats({ sinceDays: 36500 }).outcomes;
+    assert.equal(o.avg_fill_after, 9.5);
+    assert.equal(o.n, 1);
+    assert.equal(o.avg_summary_chars, 10);
+    assert.equal(o.avg_fill_before_manual, 48);
+    assert.equal(o.avg_fill_before_auto, null);
+  } finally { cleanup(sb); }
+});
+
+test('aggregateStats outcomes averages retention and splits fill_before by trigger', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompactOutcome({ sid: 'a', t: now, compactT: 1, trigger: 'auto', summaryChars: 100, retention: 1, fillBefore: 40 });
+    events.recordCompactOutcome({ sid: 'b', t: now, compactT: 2, trigger: 'auto', summaryChars: 300, retention: 0.5, fillBefore: 60 });
+    events.recordCompactOutcome({ sid: 'c', t: now, compactT: 3, trigger: 'manual', summaryChars: 200, fillBefore: 20 });
+    const o = events.aggregateStats({ sinceDays: 30 }).outcomes;
+    assert.equal(o.n, 3);
+    assert.equal(o.avg_retention, 0.75);
+    assert.equal(o.avg_summary_chars, 200);
+    assert.equal(o.avg_fill_before_auto, 50);
+    assert.equal(o.avg_fill_before_manual, 20);
+    assert.equal(events.recordCompactOutcome({}), false);
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 'a' }), false);
+  } finally { cleanup(sb); }
+});

@@ -25,6 +25,26 @@ function fillByTrigger(db, cutoff, projectClause, projectArgs) {
   return Object.fromEntries(FILL_TRIGGERS.map((name) => [name, summarize(name)]));
 }
 
+function outcomesAggregate(db, cutoff, projectClause, projectArgs) {
+  const r = db.prepare(`
+    SELECT COUNT(*) AS n,
+           AVG(retention) AS avg_retention,
+           AVG(summary_chars) AS avg_summary_chars,
+           AVG(CASE WHEN trigger = 'auto' THEN fill_before END) AS avg_fill_before_auto,
+           AVG(CASE WHEN trigger = 'manual' THEN fill_before END) AS avg_fill_before_manual,
+           AVG(fill_after) AS avg_fill_after
+    FROM compact_outcomes WHERE t >= ? ${projectClause}
+  `).get(cutoff, ...projectArgs);
+  return {
+    n: r.n || 0,
+    avg_retention: r.avg_retention,
+    avg_summary_chars: r.avg_summary_chars,
+    avg_fill_before_auto: r.avg_fill_before_auto,
+    avg_fill_before_manual: r.avg_fill_before_manual,
+    avg_fill_after: r.avg_fill_after,
+  };
+}
+
 function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
   if (!db) return null;
   try {
@@ -63,6 +83,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     };
 
     const compactFill = fillByTrigger(db, cutoff, projectClause, projectArgs);
+    const outcomes = outcomesAggregate(db, cutoff, projectClause, projectArgs);
 
     const zones = db.prepare(`
       SELECT to_zone AS zone, COUNT(*) AS n
@@ -239,7 +260,7 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     `).all(cutoff, ...projectArgs);
 
     return {
-      sessions, compacts, compactPercentiles, compactFill, zones, archives, reruns,
+      sessions, compacts, compactPercentiles, compactFill, outcomes, zones, archives, reruns,
       agents, agentTypes,
       topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
       sinceDays, project,

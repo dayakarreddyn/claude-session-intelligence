@@ -39,3 +39,11 @@ test('PreToolUse registers si-prune-output.js on Bash with a numeric timeout', (
   const h = group.hooks.find((x) => x.command.includes('si-prune-output.js'));
   assert.equal(typeof h.timeout, 'number');
 });
+
+test('PostCompact registers si-post-compact.js with matcher * and a numeric timeout', () => {
+  const group = hooks.PostCompact.find((g) => g.hooks.some((h) => h.command.includes('si-post-compact.js')));
+  assert.ok(group, 'si-post-compact.js must be registered on PostCompact');
+  assert.equal(group.matcher, '*');
+  const h = group.hooks.find((x) => x.command.includes('si-post-compact.js'));
+  assert.equal(typeof h.timeout, 'number');
+});

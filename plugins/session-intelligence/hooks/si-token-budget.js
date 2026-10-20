@@ -84,6 +84,25 @@ try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { 
 
 // Unified config — gives us shape.rootDirDepth (monorepo knob) with env
 // overrides already applied. Failure here just means we fall back to depth 2.
+/**
+ * First usage after a compact = the window the compaction actually left.
+ * Stamps fill_after on the matching compact_outcomes row (no-op when the
+ * snapshot has no cap or PostCompact recorded nothing for this compact_t).
+ */
+function stampOutcomeFill(sessionId, snap, usage) {
+  try {
+    if (!snap || !(snap.contextCap > 0)) return;
+    const { contextTokensOf } = require(path.join(SI_LIB, 'transcript-usage'));
+    const { fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+    require(path.join(SI_LIB, 'events')).stampCompactOutcomeAfter({
+      sid: sessionId, compactT: snap.t,
+      fillAfter: fillPctOf(contextTokensOf(usage), snap.contextCap),
+    });
+  } catch (err) {
+    intelLog('token-budget', 'debug', 'outcome fill stamp failed', { err: err && err.message });
+  }
+}
+
 function loadSiConfig() {
   try { return require(path.join(SI_LIB, 'config')).loadConfig(); }
   catch { return {}; }
@@ -319,6 +338,7 @@ async function main() {
               snap.postCompactCacheCreation = u.cache_creation_input_tokens || 0;
             }
             compactHistory.writeSnapshot(sessionId, snap);
+            stampOutcomeFill(sessionId, snap, u);
             intelLog('token-budget', 'info', 'post-compact cache-hit measured',
               { ratio: snap.postCompactCacheHitRatio,
                 read: snap.postCompactCacheRead,
