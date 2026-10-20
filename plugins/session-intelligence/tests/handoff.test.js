@@ -340,3 +340,32 @@ test('readNextPriorities scans session-context.md when memory is empty', () => {
     assert.match(priorities[1], /#105/);
   } finally { cleanup(dir); }
 });
+
+// ─── constraints in the handoff ──────────────────────────────────────────
+
+test('writeHandoff writes when constraints are the only strong signal', () => {
+  const dir = tmpProject();
+  try {
+    const wrote = handoff.writeHandoff({ projectDir: dir, cwd: dir, sessionId: 's', constraints: [{ type: 'Action', text: 'Never rewrite earlier turns', source: 'key-decisions' }] });
+    assert.equal(wrote, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.si-handoff.json'), 'utf8')).constraints[0].type, 'Action');
+  } finally { cleanup(dir); }
+});
+
+test('writeHandoff without constraints or other strong signal still skips', () => {
+  const dir = tmpProject();
+  try {
+    assert.equal(handoff.writeHandoff({ projectDir: dir, cwd: dir, sessionId: 's', constraints: [] }), false);
+  } finally { cleanup(dir); }
+});
+
+test('renderHandoffBlock lists constraints before the current task', () => {
+  const out = handoff.renderHandoffBlock({ t: Date.now(), currentTask: 'Refactor auth', constraints: [{ type: 'Process', text: 'Run npm test before every commit' }] });
+  assert.ok(out.indexOf('Standing constraints (re-injected after compact') < out.indexOf('Current task'));
+  assert.match(out, /Standing constraints \(re-injected after compact — these survive regardless of the summary\):/);
+  assert.match(out, /  - \[Process\] Run npm test before every commit/);
+});
+
+test('renderHandoffBlock without constraints is unchanged', () => {
+  assert.doesNotMatch(handoff.renderHandoffBlock({ currentTask: 'x' }), /Standing constraints/);
+});

@@ -745,7 +745,7 @@ async function main() {
           const wrote = handoff.writeHandoff({
             projectDir, cwd, sessionId,
             sessionStartMs: entries.length ? entries[0].t : undefined,
-            hotDirs, droppedDirs,
+            hotDirs, droppedDirs, constraints: registry ? registry.items : [],
           });
           intelLog('pre-compact', 'info', 'continuation handoff', { wrote });
         } catch (err) {

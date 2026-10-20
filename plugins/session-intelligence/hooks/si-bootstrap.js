@@ -802,9 +802,13 @@ function buildNexusAdditionalContext(cwd) {
 // resume banner only lands via systemMessage. additionalContext still
 // carries the model-facing copy.
 function emitAdditionalContext(textParts, systemMessage) {
-  const combined = (Array.isArray(textParts) ? textParts : [textParts])
-    .filter((s) => typeof s === 'string' && s.length > 0)
-    .join('\n\n');
+  // Hook output above 10,000 chars is replaced by a preview; the handoff
+  // (first part, holds the constraints) is required, later parts drop first.
+  const parts = (Array.isArray(textParts) ? textParts : [textParts])
+    .filter((s) => typeof s === 'string' && s.length > 0);
+  const combined = require(path.join(SI_LIB, 'hook-output')).assembleUnderCap(
+    parts.map((text, i) => ({ name: `part${i}`, text: i ? `\n\n${text}` : text, required: i === 0 })),
+  ).text;
   if (!combined && !systemMessage) return;
   const out = {
     hookSpecificOutput: {
