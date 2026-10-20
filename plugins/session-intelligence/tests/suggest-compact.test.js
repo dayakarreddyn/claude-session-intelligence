@@ -139,3 +139,53 @@ test('yellow callout names duplicate reads from the shape log', () => {
     assert.ok(r.stderr.length < 10000);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+function calloutRun(sid, model, usage, { env = {}, shape = null } = {}) {
+  const { home, state } = sandbox();
+  try {
+    if (shape) {
+      fs.writeFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`),
+        shape.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    }
+    const t = writeTranscript(home, [userLine, usageLine(model, usage)]);
+    return runHook('si-suggest-compact.js',
+      { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' }, { home, env });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+}
+
+test('callout headline carries bucketed fill, window label and auto-compaction point', () => {
+  const r = calloutRun('sid-num1', 'claude-opus-5-5', {
+    input_tokens: 8000, cache_creation_input_tokens: 0, cache_read_input_tokens: 480000, output_tokens: 50,
+  });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /\[StrategicCompact\] High-risk zone — context at ~45% of a 1M window; auto-compaction at ~967k \(~450k away\)\. Advisory only/);
+  assert.doesNotMatch(r.stderr, /spent/);
+});
+
+test('callout says 200k window under CLAUDE_CODE_DISABLE_1M_CONTEXT=1 and names the configured window', () => {
+  const r = calloutRun('sid-num2', 'claude-opus-5-5', {
+    input_tokens: 5000, cache_creation_input_tokens: 0, cache_read_input_tokens: 40000, output_tokens: 50,
+  }, { env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '150000' } });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /\[StrategicCompact\] Caution zone — context at ~20% of a 200k window; auto-compaction at ~150k \(~100k away\)/);
+});
+
+test('callout counts large results from the shape log', () => {
+  const shape = [0, 1, 2].map((i) => ({
+    t: 1000 + i, tok: 1000 * (i + 1), tool: 'Bash', root: 'src', file: null, event: null, chars: 70000, inputHash: `h${i}`,
+  }));
+  const r = calloutRun('sid-num3', 'claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+  }, { shape });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /3 tool results ≥20K tokens in the last 40 calls\./);
+});
+
+test('stablePrefix=true still omits the numbers segment', () => {
+  const r = calloutRun('sid-num4', 'claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: 200000, output_tokens: 50,
+  }, { env: { CLAUDE_COMPACT_STABLE_PREFIX: '1' } });
+  assert.equal(r.status, 2);
+  const head = r.stderr.split('\n').find((l) => l.includes('[StrategicCompact]'));
+  assert.ok(head && !head.includes('%'), head);
+});

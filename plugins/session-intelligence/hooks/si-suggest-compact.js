@@ -60,7 +60,9 @@ const {
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const { readLatestUsage, updatePeak } = require(path.join(SI_LIB, 'transcript-usage'));
-const { resolveContextCap, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+const { resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+const { numbersSegment, largeResultsLine } = require(path.join(SI_LIB, 'callout'));
+const { countLargeResults } = require(path.join(SI_LIB, 'shape-signals'));
 const MAX_DUP_READ_LINES = 3;
 const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
@@ -180,15 +182,19 @@ async function main() {
   const model = (latest && latest.model) || null;
   let cap = 0;
   let fillPct = 0;
+  let autoPoint = 0;
+  let settings = null;
   if (latest) {
     try {
+      settings = loadSettingsForCwd(stdinCwd);
       cap = resolveContextCap({
         model,
         env: process.env,
-        settings: loadSettingsForCwd(stdinCwd),
+        settings,
         configCap: fullCfg.statusline && fullCfg.statusline.contextCap,
       }).cap;
       fillPct = fillPctOf(tokenBudget, cap);
+      autoPoint = resolveAutoCompactPoint({ cap, model, env: process.env, settings }).point;
     } catch { /* cap is best-effort telemetry */ }
   }
   if (tokenBudget > 0) {
@@ -368,12 +374,20 @@ async function main() {
       // Subtle label so the model can tell crossings apart from re-fires —
       // useful when scanning logs for "is this a fresh signal or a reminder?"
       const header = grewEnough ? `${baseHeader} (still)` : baseHeader;
-      const costStr = (!stablePrefix && costEst && sessionCost > 0)
-        ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
-      const tokStr = stablePrefix ? '' : ` — context at ~${formatTokens(tokenBudget)} tokens${costStr}`;
+      const canShowNumbers = !stablePrefix && cap > 0 && autoPoint > 0;
+      const tokStr = canShowNumbers
+        ? numbersSegment({
+          fillPct, cap, point: autoPoint, contextTokens: tokenBudget,
+          bucketStep: fullCfg.compact && fullCfg.compact.calloutBucketPct,
+        })
+        : '';
       const headline = `[StrategicCompact] ${header}${tokStr}. Advisory only — continue if the task needs full context.`;
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
+      if (!stablePrefix) {
+        const largeLine = largeResultsLine(countLargeResults(readShape(sessionId)));
+        if (largeLine) body.push(largeLine);
+      }
       const dupReads = (shape && shape.duplicates && shape.duplicates.reads) || [];
       for (const d of dupReads.slice(0, MAX_DUP_READ_LINES)) {
         body.push(`Duplicate reads: ${d.file} ×${d.count} — later reads add no information; prefer the latest copy.`);

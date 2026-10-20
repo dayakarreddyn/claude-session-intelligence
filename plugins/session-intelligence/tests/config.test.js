@@ -228,3 +228,8 @@ test('resolveStatuslineForCwd handles missing statusline block gracefully', () =
   const out = resolveStatuslineForCwd({}, '/anywhere');
   assert.deepEqual(out, {});
 });
+
+test('DEFAULTS.compact.stablePrefix is false and calloutBucketPct is 5', () => {
+  assert.equal(DEFAULTS.compact.stablePrefix, false);
+  assert.equal(DEFAULTS.compact.calloutBucketPct, 5);
+});

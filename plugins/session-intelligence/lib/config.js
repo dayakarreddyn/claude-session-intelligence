@@ -139,11 +139,14 @@ const DEFAULTS = {
     // per-compact-volatile values (call counts, stale-token estimates,
     // dated filenames, dollar amounts, live token counts). Trades UX
     // detail for a byte-stable prefix that survives as a cache hit for
-    // the rest of the post-compact session. On by default — the cache
-    // win (read cost −90% for the post-compact prefix) outweighs losing
-    // exact counts in the compaction guidance. Set to false or export
-    // CLAUDE_COMPACT_STABLE_PREFIX=0 to see the verbose metrics inline.
-    stablePrefix: true,
+    // the rest of the post-compact session. Off by default: the zone callout
+    // is the model's only budget instrument, so it carries bucketed numbers.
+    // Set to true or export CLAUDE_COMPACT_STABLE_PREFIX=1 for the cache-
+    // stable variant without them.
+    stablePrefix: false,
+    // Fill % in the model-visible callout is floored to this step so the
+    // text stays byte-stable across many calls.
+    calloutBucketPct: 5,
   },
   stopHook: {
     // End-of-session memory-write nudge. Mirrors Anthropic's official
