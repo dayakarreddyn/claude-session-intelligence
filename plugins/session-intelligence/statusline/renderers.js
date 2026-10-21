@@ -5,7 +5,7 @@
 const path = require('path');
 const os = require('os');
 const { resolveLibDir, loadContextShapeLib, loadTokenSpeedLib, loadEventsLib, agentModelCostsSafe, loadUsage: defaultLoadUsage } = require('./lib-loader');
-const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, resetAtMs, truncate, truncateMiddle, projectLabel } = require('./format');
+const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, resetAtMs, truncate, truncateMiddle, projectLabel, isQuotaAwareBuild } = require('./format');
 const { gitBranch, gitDirtyCount, gitDiffStat, extractIssueNumber, readDeployBreadcrumb, detectOutputStyle, detectSiPluginGate, probeHealthIfStale } = require('./git-info');
 const { contextCap, minutesSinceLastCompact, costAtLastCompact, costsSinceCompact, DEFAULT_PRICES } = require('./economics');
 
@@ -231,7 +231,7 @@ function buildRenderers(C, deps = {}) {
     },
 
     /**
-     * Short session id (first 8 chars of the UUID) — handy when you have
+     * Short session id (first 6 chars of the UUID) — handy when you have
      * multiple Claude Code windows open and want to tell them apart on
      * the status line. Hidden when no session id is present.
      */
@@ -353,7 +353,8 @@ function buildRenderers(C, deps = {}) {
       // Single-letter prefixes line up visually with the in/out/cache parts
       // and read as one cohesive cell. Use fmtTokensTight so 26.08M collapses
       // to 26M.
-      return `${C.dim}t${fmtTokensTight(total)} ↓${fmtTokensTight(t.input)} ↑${fmtTokensTight(t.output)} c${fmtTokensTight(cacheActivity)}${C.reset}`;
+      const approx = t.partial === true ? '~' : '';
+      return `${C.dim}${approx}t${fmtTokensTight(total)} ↓${fmtTokensTight(t.input)} ↑${fmtTokensTight(t.output)} c${fmtTokensTight(cacheActivity)}${C.reset}`;
     },
 
     /**
@@ -490,7 +491,7 @@ function buildRenderers(C, deps = {}) {
       if (fh && typeof fh.used_percentage === 'number') {
         return _renderUsageCellImpl('b', fh.used_percentage, fh.resets_at, C, 'dim', false);
       }
-      if (rl && typeof rl === 'object') return ''; // quota-aware build: window legitimately absent
+      if (isQuotaAwareBuild(input)) return ''; // quota-aware build: window legitimately absent or not yet sent
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
       return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!(u.stale || u.error));
@@ -504,7 +505,7 @@ function buildRenderers(C, deps = {}) {
       if (sd && typeof sd.used_percentage === 'number') {
         return _renderUsageCellImpl('w', sd.used_percentage, sd.resets_at, C, 'zone', false);
       }
-      if (rl && typeof rl === 'object') return '';
+      if (isQuotaAwareBuild(input)) return '';
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
       return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!(u.stale || u.error));
@@ -601,7 +602,7 @@ function buildRenderers(C, deps = {}) {
     modelQuota: (input, _ctx) => {
       // stdin rate_limits carries no per-model buckets (and spend_limit is a
       // budget, not a model): a quota-aware build means nothing to show.
-      if (input && input.rate_limits && typeof input.rate_limits === 'object') return '';
+      if (isQuotaAwareBuild(input)) return '';
       const u = loadUsage();
       if (!u || !u.modelQuotas) return '';
       const mark = u.stale || u.error ? '~' : '';
@@ -615,7 +616,7 @@ function buildRenderers(C, deps = {}) {
     },
 
     /** Full working directory, ccstatusline-style. Collapses $HOME to `~`
-     *  and middle-truncates when longer than 60 chars (keeps the leaf dir,
+     *  and middle-truncates when longer than `maxCwdLength` (default 36) (keeps the leaf dir,
      *  which carries most of the signal). Dim — reference context only. */
     cwd: (input, ctx) => {
       const raw = input.cwd || '';

@@ -122,3 +122,56 @@ test('savedCell label is shared by costSaved and compactCost', () => {
   assert.equal((src.match(/push\(savedCell\(saved\)\)/g) || []).length, 2);
   assert.doesNotMatch(src, /`s\$\{fmtUsd/);
 });
+
+test('quota-aware builds (version >= 2.1.90) never poll even before rate_limits arrives', (t) => {
+  withTempHome(t);
+  let calls = 0;
+  const R = buildRenderers(makeColors(false), { loadUsage: () => { calls++; return { sessionUsage: 36, weeklyUsage: 10, modelQuotas: { opus: { utilization: 12 } } }; } });
+  const input = { version: '2.1.303' };
+  assert.equal(R.blockUsage(input, {}), '');
+  assert.equal(R.weekUsage(input, {}), '');
+  assert.equal(R.modelQuota(input, {}), '');
+  assert.equal(calls, 0);
+});
+
+test('legacy or unparseable versions without rate_limits still poll', (t) => {
+  withTempHome(t);
+  for (const version of ['2.0.50', 'garbage', undefined]) {
+    let calls = 0;
+    const R = buildRenderers(makeColors(false), { loadUsage: () => { calls++; return null; } });
+    R.blockUsage({ version }, {});
+    assert.equal(calls, 1, `blockUsage polls for ${version}`);
+  }
+});
+
+test('versionAtLeast compares numerically and tolerates garbage', () => {
+  const { versionAtLeast, isQuotaAwareBuild } = require('../statusline/format');
+  assert.equal(versionAtLeast('2.1.90', '2.1.90'), true);
+  assert.equal(versionAtLeast('2.1.100', '2.1.90'), true);
+  assert.equal(versionAtLeast('2.1.89', '2.1.90'), false);
+  assert.equal(versionAtLeast('3.0.0', '2.1.90'), true);
+  assert.equal(versionAtLeast(null, '2.1.90'), false);
+  assert.equal(versionAtLeast('x.y', '2.1.90'), false);
+  assert.equal(isQuotaAwareBuild({ rate_limits: {} }), true);
+  assert.equal(isQuotaAwareBuild(null), false);
+});
+
+test('tokenFlow prefixes ~ only when the totals are still partial', (t) => {
+  withTempHome(t);
+  const R = buildRenderers(makeColors(false), { loadUsage: () => null });
+  const totals = { input: 1, output: 2, cached: 3, creation: 4 };
+  assert.match(R.tokenFlow({}, { tokenTotals: { ...totals, partial: true } }), /^~t/);
+  assert.match(R.tokenFlow({}, { tokenTotals: { ...totals, partial: false } }), /^t/);
+});
+
+test('colour: usage cell and tokens cell carry red only in the red zone', (t) => {
+  withTempHome(t);
+  const C = makeColors(true);
+  const { renderUsageCell } = require('../statusline/format');
+  assert.ok(renderUsageCell('w', 95, 2e9, C, 'zone', false).includes(C.red));
+  assert.ok(!renderUsageCell('w', 10, 2e9, C, 'zone', false).includes(C.red));
+  const R = buildRenderers(C, { loadUsage: () => null });
+  const cfg = { zones: { yellow: 100, orange: 200, red: 300 }, tokenSource: 'auto' };
+  const out = R.tokens({ model: { id: 'claude-fable-5-1' }, context_window: { context_window_size: 1000000 } }, { tokens: 400, cfg, usedTranscript: true });
+  assert.ok(out.includes(C.red));
+});

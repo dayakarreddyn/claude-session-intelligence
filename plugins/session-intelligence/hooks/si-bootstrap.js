@@ -897,6 +897,7 @@ function main() {
         cwd,
         startedAt: Date.now(),
       });
+      intelLog('events', 'debug', 'sqlite driver', { driver: events.driverName() });
     } catch { /* events lib optional */ }
   }
 

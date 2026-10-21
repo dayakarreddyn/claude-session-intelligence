@@ -181,7 +181,34 @@ function fmtDuration(ms) {
   return parts.join(' ') || '0m';
 }
 
+/** Numeric semver compare; missing or garbage versions are never "at least". */
+function versionAtLeast(version, min) {
+  const parse = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v == null ? '' : v));
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const a = parse(version);
+  const b = parse(min);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i];
+  }
+  return true;
+}
+
+const QUOTA_AWARE_MIN_VERSION = '2.1.90';
+
+/** A quota-aware build supplies `rate_limits` on stdin (after the first
+ *  response); before that, the version alone proves the poller is unneeded. */
+function isQuotaAwareBuild(input) {
+  if (!input) return false;
+  if (input.rate_limits && typeof input.rate_limits === 'object') return true;
+  return versionAtLeast(input.version, QUOTA_AWARE_MIN_VERSION);
+}
+
 module.exports = {
+  versionAtLeast,
+  isQuotaAwareBuild,
   renderUsageCell: _renderUsageCellImpl,
   resetAtMs,
   makeColors,

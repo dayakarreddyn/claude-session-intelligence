@@ -23,3 +23,17 @@ test('golden renders spawn no usage-refresh worker', (t) => {
   render(payload, { home });
   assert.equal(fs.existsSync(path.join(home, `claude-usage-lock-${require('os').userInfo().uid}.json`)), false);
 });
+
+test('entry file alone (sibling modules missing) still prints claude and exits 0', (t) => {
+  const { spawnSync } = require('child_process');
+  const home = makeHome(t);
+  const lone = path.join(home, 'lone');
+  fs.mkdirSync(lone);
+  const entry = path.join(lone, 'statusline-intel.js');
+  fs.copyFileSync(require('./helpers/statusline-fixture').STATUSLINE, entry);
+  const r = spawnSync(process.execPath, [entry], {
+    input: '{}', encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, NO_COLOR: '1' },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'claude');
+});

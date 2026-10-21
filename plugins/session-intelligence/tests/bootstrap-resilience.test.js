@@ -38,3 +38,19 @@ test('bootstrap exits 0 and still emits additionalContext with corrupt resume-ad
     assert.match(out.hookSpecificOutput.additionalContext, /Resume notice/);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('bootstrap logs the sqlite driver exactly once per session start', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-boot-drv-'));
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  try {
+    const r = spawnSync(process.execPath, [BOOTSTRAP], {
+      input: JSON.stringify({ session_id: 'boot-drv', cwd: home, source: 'startup' }),
+      env: { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, CLAUDE_INTEL_DEBUG: '1' },
+      encoding: 'utf8', timeout: 60_000,
+    });
+    assert.equal(r.status, 0, `status=${r.status} stderr=${r.stderr}`);
+    const logDir = path.join(home, '.claude', 'logs');
+    const log = fs.readdirSync(logDir).map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
+    assert.equal((log.match(/sqlite driver/g) || []).length, 1, log);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

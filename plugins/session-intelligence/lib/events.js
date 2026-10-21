@@ -27,6 +27,7 @@ const path = require('path');
 let _db = null;
 let _dbAttempted = false;
 let _dbDisabled = false;
+let _driver = null; // name of the opened SQLite driver (see driverName)
 let _dbPathOverride = null; // set by _setDbPathForTest
 
 function getEventsDbPath() {
@@ -56,12 +57,7 @@ function openDb() {
     _db.pragma('synchronous = NORMAL');
     _db.pragma('foreign_keys = ON');
     initSchema(_db);
-    if (opened.driver !== 'better-sqlite3') {
-      try {
-        const { intelLog } = require('./intel-debug');
-        intelLog('events', 'debug', 'sqlite driver', { driver: opened.driver });
-      } catch { /* optional */ }
-    }
+    _driver = opened.driver;
     return _db;
   } catch (err) {
     try {
@@ -71,6 +67,11 @@ function openDb() {
     _dbDisabled = true;
     return null;
   }
+}
+
+/** Driver backing the open DB (`better-sqlite3` | `node:sqlite`), or null when unopened. */
+function driverName() {
+  return _driver;
 }
 
 /** Schema and migrations live in lib/events-migrations.js. */
@@ -625,6 +626,7 @@ function _resetForTest() {
 
 module.exports = {
   isAvailable,
+  driverName,
   getEventsDbPath,
   recordSessionStart,
   recordSessionEnd,

@@ -18,8 +18,9 @@ test('README statusline example matches the golden render of a_fable_1m_48pct', 
 
 test('README statusline section has no stale claims', () => {
   const stale = ['wr:~', 'four lines', 'sid:82cc15b9', 'first 8 chars', 'longer than 60 chars',
-    'compact:1hr 22m ago', '12hr', '1hr12m', '2d4hr', '/tmp/claude-cost-sincecompact-<sid>', 'zero API requests'];
+    'compact:1hr 22m ago', '12hr', '1hr12m', '2d4hr', '/tmp/claude-cost-sincecompact-<sid>', 'zero API requests',
+    'getZone()', 'cost-band classification', '(1M)'];
   for (const s of stale) assert.ok(!readme.includes(s), `stale string present: ${s}`);
-  const fresh = ['spendLimit', '~s$', 'thinking_tokens', 'six characters', 'claude-cost-<sid>.v5.json'];
+  const fresh = ['spendLimit', '~s$', 'thinking_tokens', 'six characters', 'claude-cost-<sid>.v5.json', 'zoneFor', 'Upgrading'];
   for (const s of fresh) assert.ok(readme.includes(s), `fresh string missing: ${s}`);
 });

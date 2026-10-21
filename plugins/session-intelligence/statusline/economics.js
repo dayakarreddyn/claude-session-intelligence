@@ -53,7 +53,8 @@ function loadEstimate(sessionId) {
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 
 // Context cap resolution lives in lib/context-cap.js (shared with hooks).
-// Returns { cap, source }; source 'fallback' means the 200000 is a guess.
+// Returns { cap, source }; source is 'config'|'statusline'|'env-max-context'|
+// 'env-disable-1m'|'model-id'|'fallback'. 'fallback' means the 200000 is a guess.
 function contextCap(input, cfg) {
   input = input || {}; cfg = cfg || {};
   const dir = resolveLibDir(); let lib = null;
@@ -187,7 +188,7 @@ function costFromUsage(u, prices = DEFAULT_PRICES) {
 
 // USD saved by a single turn's cache-read hits vs. paying the uncached input
 // rate for the same tokens. Used by the line-3 `cacheSaved` field + summed
-// incrementally by totalCostFromTranscript into the same /tmp/claude-cost
+// incrementally by totalCostFromTranscript into the same ~/.claude/state/claude-cost-<sid>
 // cache (extended with a `saved` property — older caches are backward-
 // compatible since the missing field is treated as 0).
 function savedFromUsage(u, prices = DEFAULT_PRICES) {
@@ -207,7 +208,7 @@ function savedFromUsage(u, prices = DEFAULT_PRICES) {
  * in the transcript. Each turn's cache_read/cache_creation/input/output is
  * billed separately by Anthropic, so summing is correct.
  *
- * Keyed by sessionId, cached as `{offset, cost}` in /tmp. On each call we
+ * Keyed by sessionId, cached as `{offset, cost}` in ~/.claude/state/claude-cost-<sid>.v5.json. On each call we
  * read only the bytes between the cached offset and stat.size — a handful of
  * KB per turn instead of the full multi-MB transcript. The old `(size, mtime)`
  * cache only helped when the transcript hadn't changed, i.e. never during

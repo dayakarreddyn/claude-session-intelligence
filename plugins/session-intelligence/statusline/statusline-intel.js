@@ -17,6 +17,12 @@
  * status line never shows broken.
  */
 
+// A failed sibling require must never blank the bar: fall back to a bare
+// "claude". Registered before the sibling requires, entry-point runs only.
+if (require.main === module) {
+  process.on('uncaughtException', () => { process.stdout.write('claude'); process.exit(0); });
+}
+
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -212,7 +218,7 @@ function main() {
   // Thinking-token estimate — tail-scanned residual from the transcript.
   // Skipped entirely when the field isn't configured, so the extra 512 KB
   // read only runs for users who've opted into the `thinking` field.
-  let thinking = { total: 0, turns: 0, recent: 0, lastTurnAgo: null };
+  let thinking = { total: 0, turns: 0, recent: 0, lastTurnAgo: null, exact: false };
   if (cfg.fields.includes('thinking')) {
     const lib = loadThinkingLib();
     if (lib && typeof lib.estimateThinkingTokens === 'function') {

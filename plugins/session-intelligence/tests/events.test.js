@@ -775,7 +775,7 @@ test('recordAgentInvocation prices a row from tokens when costUsd is absent; unp
   } finally { cleanup(sb); }
 });
 
-test('sqlite driver line is logged only for the fallback driver', () => {
+test('events.js alone never logs the sqlite driver (bootstrap logs it once per session)', () => {
   const { spawnSync } = require('node:child_process');
   const script = `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:'drv',project:'p',cwd:'/x',startedAt:1})`;
   const run = (extra) => {
@@ -791,12 +791,6 @@ test('sqlite driver line is logged only for the fallback driver', () => {
       return files.map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   };
-  const probe = spawnSync(process.execPath, ['-e',
-    `const d=require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'sqlite-driver'))}).openDatabase(':memory:');process.stdout.write(d.driver)`],
-  { env: { HOME: os.tmpdir(), PATH: process.env.PATH }, encoding: 'utf8' });
-  const defaultDriver = probe.stdout.trim();
-  const defaultLog = run({});
-  if (defaultDriver === 'better-sqlite3') assert.doesNotMatch(defaultLog, /sqlite driver/);
-  else assert.match(defaultLog, /sqlite driver/);
-  if (Number(process.versions.node.split('.')[0]) >= 22) assert.match(run({ SI_SQLITE_DRIVER: 'node:sqlite' }), /sqlite driver/);
+  assert.doesNotMatch(run({}), /sqlite driver/);
+  if (Number(process.versions.node.split('.')[0]) >= 22) assert.doesNotMatch(run({ SI_SQLITE_DRIVER: 'node:sqlite' }), /sqlite driver/);
 });
