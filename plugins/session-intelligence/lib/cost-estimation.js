@@ -7,7 +7,7 @@
  * cache_read/cache_creation/input/output is billed separately by Anthropic,
  * so summing is correct.
  *
- * A per-session cache `/tmp/claude-cost-<sid>` stores `{offset, cost}` so
+ * A per-session cache `<state dir>/claude-cost-<sid>.v5.json` stores `{offset, cost}` so
  * subsequent reads only process delta bytes. This matters because the
  * transcript file can grow into the tens of MB over a long session and
  * every hook would re-parse from scratch otherwise.
@@ -16,6 +16,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_BYTES_PER_PASS = 64 * 1024 * 1024;
+const MAX_SEEN_IDS = 5000;
 
 // Per-million-token prices (USD). Loose conservative default (legacy Opus
 // rates — an upper bound for any model we don't recognize); the caller can
@@ -157,147 +161,193 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
 }
 
 /**
- * Single incremental pass that accumulates both {cost, saved} — callers pick
- * whichever they need. One transcript read + one cache file per session.
- * Falls back to {cost: 0, saved: 0} on any failure so callers can degrade
- * silently. Cache file format is extended with `saved`; older caches without
- * the field re-accumulate from saved=0, which is safe (the next incremental
- * read picks up from the offset, so only tail-bytes get re-counted for saved).
+ * Chunked, bounded transcript scanner shared by totalsFromTranscript and
+ * costsSinceCompact. Reads `chunkBytes` at a time into ONE reused Buffer,
+ * carries the trailing partial line across chunks, and calls onRow(parsed)
+ * for every complete JSON line. Once `maxBytesPerPass` bytes have been
+ * consumed it stops at the last complete newline and reports partial:true so
+ * the next render resumes from the returned offset. Never reads past the
+ * size observed at start; an unterminated tail line is left unconsumed.
  */
-function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {} };
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
+function scanTranscript(transcriptPath, fromOffset, onRow, opts = {}) {
+  const chunkBytes = opts.chunkBytes > 0 ? Math.floor(opts.chunkBytes) : DEFAULT_CHUNK_BYTES;
+  const maxBytes = opts.maxBytesPerPass > 0 ? opts.maxBytesPerPass : DEFAULT_MAX_BYTES_PER_PASS;
+  const fd = fs.openSync(transcriptPath, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const buf = Buffer.alloc(chunkBytes);
+    let pos = fromOffset;
+    let offset = fromOffset; // just past the last fully processed newline
+    let consumed = 0;
+    let carry = [];
+    let stopped = false;
+    const emit = (lineBuf) => {
+      if (lineBuf.length === 0) return;
+      let row = null;
+      try { row = JSON.parse(lineBuf.toString('utf8')); } catch { return; }
+      onRow(row);
+    };
+    while (pos < size) {
+      if (consumed >= maxBytes && offset > fromOffset) { stopped = true; break; }
+      const want = Math.min(chunkBytes, size - pos);
+      const got = fs.readSync(fd, buf, 0, want, pos);
+      if (got <= 0) break;
+      let start = 0;
+      for (let nl = buf.indexOf(0x0A, start); nl >= 0 && nl < got; nl = buf.indexOf(0x0A, start)) {
+        const piece = buf.subarray(start, nl);
+        emit(carry.length ? Buffer.concat([...carry, piece]) : piece);
+        carry = [];
+        start = nl + 1;
+        offset = pos + nl + 1;
+      }
+      if (start < got) carry = [...carry, Buffer.from(buf.subarray(start, got))];
+      pos += got;
+      consumed += got;
+    }
+    return { offset, partial: stopped };
+  } finally { fs.closeSync(fd); }
+}
 
+function safeSid(sessionId) {
+  return String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+function readJsonFile(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function writeJsonFile(file, value) {
+  try { fs.writeFileSync(file, JSON.stringify(value), 'utf8'); } catch { /* best effort */ }
+}
+
+function resolveCacheDir(opts) {
+  if (opts && opts.cacheDir) return opts.cacheDir;
+  try { return require('./utils').getStateDir(); } catch { return os.tmpdir(); }
+}
+
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+function trimSeen(seen) {
+  const all = Array.from(seen);
+  return all.length > MAX_SEEN_IDS ? all.slice(all.length - MAX_SEEN_IDS) : all;
+}
+
+function emptyTotals() {
+  return { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {}, partial: false };
+}
+
+/**
+ * Single incremental pass that accumulates both {cost, saved} plus token
+ * totals and per-model cost buckets. State lives in
+ * `<cacheDir>/claude-cost-<sid>.v5.json` (default cacheDir: the state dir, which
+ * macOS tmpdir cleanup cannot wipe). Falls back to the cached totals on any
+ * failure so callers can degrade silently. `partial: true` means the pass hit
+ * `maxBytesPerPass` and the next call continues from the persisted offset.
+ */
+function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES, opts = {}) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return emptyTotals();
+  let stat;
+  try { stat = fs.statSync(transcriptPath); } catch { return emptyTotals(); }
+
+  const priceFor = typeof opts.priceFor === 'function' ? opts.priceFor : knownPriceForModel;
+  const cacheFile = path.join(resolveCacheDir(opts), `claude-cost-${safeSid(sessionId)}.v5.json`);
+
+  const c = readJsonFile(cacheFile);
+  const valid = c && typeof c.offset === 'number' && typeof c.cost === 'number'
+    && c.offset >= 0 && c.offset <= stat.size;
+  let acc = valid
+    ? {
+      offset: c.offset, cost: c.cost, saved: num(c.saved), input: num(c.input),
+      output: num(c.output), cached: num(c.cached), creation: num(c.creation),
+      byModel: c.byModel && typeof c.byModel === 'object' ? { ...c.byModel } : {},
+    }
+    : { offset: 0, cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {} };
+  const seen = new Set(valid && Array.isArray(c.seenIds) ? c.seenIds : []);
+
+  const result = (a, partial) => ({
+    cost: a.cost, saved: a.saved, input: a.input, output: a.output,
+    cached: a.cached, creation: a.creation, byModel: a.byModel, partial,
+  });
+  if (stat.size === acc.offset) return result(acc, false);
+
+  const cost = { ...acc, byModel: { ...acc.byModel } };
+  const onRow = (d) => {
+    const u = d && d.message && d.message.usage;
+    if (!u) return;
+    // Dedupe streaming snapshots by message.id: one row per stream chunk of
+    // the same assistant message would otherwise over-count 4-7x.
+    const mid = d.message.id;
+    if (mid) {
+      if (seen.has(mid)) return;
+      seen.add(mid);
+    }
+    // Per-turn model pricing; `prices` is only the unknown-model fallback.
+    const lineModel = d.message.model || 'other';
+    const linePrices = priceFor(lineModel) || prices;
+    const lineCost = costFromUsage(u, linePrices);
+    cost.byModel[lineModel] = (cost.byModel[lineModel] || 0) + lineCost;
+    cost.cost += lineCost;
+    cost.saved += savedFromUsage(u, linePrices);
+    cost.input += u.input_tokens || 0;
+    cost.output += u.output_tokens || 0;
+    cost.cached += u.cache_read_input_tokens || 0;
+    cost.creation += u.cache_creation_input_tokens || 0;
+  };
+
+  let scan;
+  try { scan = scanTranscript(transcriptPath, acc.offset, onRow, opts); }
+  catch { return result(acc, false); }
+
+  cost.offset = scan.offset;
+  writeJsonFile(cacheFile, { ...cost, seenIds: trimSeen(seen) });
+  return result(cost, scan.partial);
+}
+
+/**
+ * Cost + cache savings accrued by rows whose timestamp is >= compactMs.
+ * Cache `<cacheDir>/claude-cost-sincecompact-<sid>.v4.json` is keyed by
+ * compactMs, so a new compact resets it. Same chunked, bounded scan as
+ * totalsFromTranscript.
+ */
+function costsSinceCompact(transcriptPath, sessionId, compactMs, prices = DEFAULT_PRICES, opts = {}) {
+  const empty = { cost: 0, saved: 0, partial: false };
+  if (!compactMs || !transcriptPath || !fs.existsSync(transcriptPath)) return empty;
   let stat;
   try { stat = fs.statSync(transcriptPath); } catch { return empty; }
 
-  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v4: adds per-model cost buckets (`byModel`) for the modelSplit field.
-  // v3 introduced per-turn model pricing (each line's `message.model`
-  // looked up via knownPriceForModel; the `prices` arg is only the
-  // unknown-model fallback). Older cache files are abandoned (TMPDIR
-  // cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
+  const priceFor = typeof opts.priceFor === 'function' ? opts.priceFor : knownPriceForModel;
+  const cacheFile = path.join(resolveCacheDir(opts), `claude-cost-sincecompact-${safeSid(sessionId)}.v4.json`);
 
-  let cachedOffset = 0;
-  let cachedCost = 0;
-  let cachedSaved = 0;
-  let cachedInput = 0;
-  let cachedOutput = 0;
-  let cachedCacheRead = 0;
-  let cachedCreation = 0;
-  let cachedSeenIds = [];
-  let cachedByModel = {};
-  try {
-    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
-        && cached.offset >= 0 && cached.offset <= stat.size) {
-      cachedOffset = cached.offset;
-      cachedCost = cached.cost;
-      cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
-      cachedInput = typeof cached.input === 'number' ? cached.input : 0;
-      cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
-      cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
-      cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
-      cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
-      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
+  const p = readJsonFile(cacheFile);
+  const hit = p && p.compactMs === compactMs && typeof p.offset === 'number'
+    && p.offset >= 0 && p.offset <= stat.size;
+  const acc = { offset: hit ? p.offset : 0, cost: hit ? num(p.cost) : 0, saved: hit ? num(p.saved) : 0 };
+  const seen = new Set(hit && Array.isArray(p.seenIds) ? p.seenIds : []);
+  if (stat.size === acc.offset) return { cost: acc.cost, saved: acc.saved, partial: false };
+
+  const sum = { ...acc };
+  const onRow = (d) => {
+    const u = d && d.message && d.message.usage;
+    if (!u) return;
+    const ts = d.timestamp ? Date.parse(d.timestamp) : NaN;
+    if (!Number.isFinite(ts) || ts < compactMs) return;
+    const mid = d.message.id;
+    if (mid) {
+      if (seen.has(mid)) return;
+      seen.add(mid);
     }
-  } catch { /* cache miss or corrupt — read from 0 */ }
-  const seen = new Set(cachedSeenIds);
-
-  // File shrank (rotation / compact) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) {
-    cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
-    cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
-    cachedByModel = {};
-    seen.clear();
-  }
-  if (stat.size === cachedOffset) {
-    return {
-      cost: cachedCost, saved: cachedSaved,
-      input: cachedInput, output: cachedOutput,
-      cached: cachedCacheRead, creation: cachedCreation,
-      byModel: cachedByModel,
-    };
-  }
-
-  let newCost = cachedCost;
-  let newSaved = cachedSaved;
-  let newInput = cachedInput;
-  let newOutput = cachedOutput;
-  let newCacheRead = cachedCacheRead;
-  let newCreation = cachedCreation;
-  let newOffset = cachedOffset;
-  const byModel = { ...cachedByModel };
-  try {
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const bytesToRead = stat.size - cachedOffset;
-      const buf = Buffer.alloc(bytesToRead);
-      fs.readSync(fd, buf, 0, bytesToRead, cachedOffset);
-      const lastNl = buf.lastIndexOf(0x0A);
-      if (lastNl >= 0) {
-        const text = buf.slice(0, lastNl).toString('utf8');
-        for (const line of text.split('\n')) {
-          if (!line) continue;
-          try {
-            const d = JSON.parse(line);
-            const u = d && d.message && d.message.usage;
-            if (u) {
-              // Dedupe streaming snapshots by message.id. The transcript
-              // contains one row per stream chunk for the same assistant
-              // message; without this guard the totals are over-counted
-              // by the chunk multiplier (typically 4-7×).
-              const mid = d.message && d.message.id;
-              if (mid) {
-                if (seen.has(mid)) continue;
-                seen.add(mid);
-              }
-              // Per-turn model pricing: a session can mix models (plan-mode
-              // Opus turns inside a Sonnet session, model switches). Fall
-              // back to the caller's price list only when the turn's model
-              // is absent or unrecognized.
-              const lineModel = (d.message && d.message.model) || 'other';
-              const linePrices = knownPriceForModel(lineModel) || prices;
-              const lineCost = costFromUsage(u, linePrices);
-              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
-              newCost += lineCost;
-              newSaved += savedFromUsage(u, linePrices);
-              newInput += u.input_tokens || 0;
-              newOutput += u.output_tokens || 0;
-              newCacheRead += u.cache_read_input_tokens || 0;
-              newCreation += u.cache_creation_input_tokens || 0;
-            }
-          } catch { /* invalid line — skip */ }
-        }
-        newOffset = cachedOffset + lastNl + 1;
-      }
-    } finally { fs.closeSync(fd); }
-  } catch {
-    return {
-      cost: cachedCost, saved: cachedSaved,
-      input: cachedInput, output: cachedOutput,
-      cached: cachedCacheRead, creation: cachedCreation,
-      byModel: cachedByModel,
-    };
-  }
-
-  try {
-    fs.writeFileSync(cacheFile, JSON.stringify({
-      offset: newOffset, cost: newCost, saved: newSaved,
-      input: newInput, output: newOutput,
-      cached: newCacheRead, creation: newCreation,
-      seenIds: Array.from(seen),
-      byModel,
-    }), 'utf8');
-  } catch { /* best effort */ }
-
-  return {
-    cost: newCost, saved: newSaved,
-    input: newInput, output: newOutput,
-    cached: newCacheRead, creation: newCreation,
-    byModel,
+    const linePrices = priceFor(d.message.model) || prices;
+    sum.cost += costFromUsage(u, linePrices);
+    sum.saved += savedFromUsage(u, linePrices);
   };
+
+  let scan;
+  try { scan = scanTranscript(transcriptPath, acc.offset, onRow, opts); }
+  catch { return { cost: acc.cost, saved: acc.saved, partial: false }; }
+
+  sum.offset = scan.offset;
+  writeJsonFile(cacheFile, { compactMs, ...sum, seenIds: trimSeen(seen) });
+  return { cost: sum.cost, saved: sum.saved, partial: scan.partial };
 }
 
 /**
@@ -388,6 +438,10 @@ module.exports = {
   totalCostFromTranscript,
   totalCacheSavedFromTranscript,
   totalsFromTranscript,
+  costsSinceCompact,
+  scanTranscript,
+  DEFAULT_CHUNK_BYTES,
+  DEFAULT_MAX_BYTES_PER_PASS,
   costBand,
   firstAssistantUsageAfter,
   cacheHitRatio,

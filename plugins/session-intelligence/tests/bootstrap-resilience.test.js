@@ -14,7 +14,7 @@ test('STALE_TEMP_PREFIX_RE sweeps usage-cache, context-peak and constraints stat
   const m = src.match(/const STALE_TEMP_PREFIX_RE = (\/.*\/);/);
   assert.ok(m, 'regex literal found');
   const re = new Function(`return ${m[1]};`)();
-  for (const name of ['claude-usage-cache-abc.json', 'claude-context-peak-abc', 'claude-constraints-abc.json', 'claude-tool-archive-abc']) {
+  for (const name of ['claude-usage-cache-abc.json', 'claude-context-peak-abc', 'claude-constraints-abc.json', 'claude-tool-archive-abc', 'claude-cost-abc.v5.json', 'claude-cost-sincecompact-abc.v4.json', 'claude-cost-snapshot-abc']) {
     assert.ok(re.test(name), name);
   }
   assert.equal(re.test('claude-unrelated-abc'), false);

@@ -137,87 +137,33 @@ function costAtLastCompact(sessionId) {
   return null;
 }
 
+// The transcript scanners live in lib/cost-estimation.js (one chunked, bounded
+// implementation). These wrappers resolve the lib, inject the statusline's
+// per-model price lookup, and return the empty shape when the lib is absent.
+// `opts.costLib` overrides the lib (tests); null simulates a missing lib.
+const EMPTY_TOTALS = Object.freeze({
+  cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {}, partial: false,
+});
+
+function resolveCostLib(opts) {
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'costLib')) return opts.costLib;
+  knownPriceForModelSafe(''); // primes the loader's lib memo
+  return getCostLibCached();
+}
+
 /**
  * Cost + cache-savings accrued since the last /compact IN THIS SESSION.
- * Returns zeroes when the session hasn't compacted yet — the cell renders
- * empty in that case, same as compactAge. Scans transcript JSONL lines
- * whose `timestamp` is >= the session's last-compact timestamp.
- * Incrementally cached under /tmp keyed by sessionId + compactMs — when
- * the session compacts again, the cache resets automatically.
+ * Returns zeroes when the session hasn't compacted yet. The cache is keyed by
+ * compactMs, so a later compact resets it.
  */
-function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0 };
+function costsSinceCompact(transcriptPath, sessionId, prices = DEFAULT_PRICES, opts = {}) {
+  const empty = { cost: 0, saved: 0, partial: false };
+  const lib = resolveCostLib(opts);
+  if (!lib || typeof lib.costsSinceCompact !== 'function') return empty;
   const compactMs = lastCompactMsForSession(sessionId);
   if (!compactMs) return empty;
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
-
-  let stat;
-  try { stat = fs.statSync(transcriptPath); } catch { return empty; }
-
-  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v3: per-turn model pricing (each line's message.model is looked up;
-  // the flat `prices` arg only covers unknown models). v2 accumulated at
-  // one flat price list — mixing modes in one cache would blend pricing.
-  // Old v1/v2 cache files are abandoned (TMPDIR cleanup handles eviction).
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-sincecompact-${sid}.v3`);
-
-  let cache = null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    if (parsed && parsed.compactMs === compactMs
-        && typeof parsed.offset === 'number' && parsed.offset >= 0
-        && parsed.offset <= stat.size) {
-      cache = parsed;
-    }
-  } catch { /* miss or stale */ }
-
-  if (!cache) cache = { compactMs, offset: 0, cost: 0, saved: 0, seenIds: [] };
-  const seen = new Set(Array.isArray(cache.seenIds) ? cache.seenIds : []);
-  if (stat.size === cache.offset) return { cost: cache.cost, saved: cache.saved };
-
-  try {
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const bytesToRead = stat.size - cache.offset;
-      const buf = Buffer.alloc(bytesToRead);
-      fs.readSync(fd, buf, 0, bytesToRead, cache.offset);
-      const lastNl = buf.lastIndexOf(0x0A);
-      if (lastNl >= 0) {
-        const text = buf.slice(0, lastNl).toString('utf8');
-        for (const line of text.split('\n')) {
-          if (!line) continue;
-          try {
-            const d = JSON.parse(line);
-            const u = d && d.message && d.message.usage;
-            if (!u) continue;
-            const ts = d.timestamp ? Date.parse(d.timestamp) : NaN;
-            if (!Number.isFinite(ts) || ts < compactMs) continue;
-            // Dedupe streaming snapshots: same message.id appears once per
-            // stream chunk in the transcript. Without this guard the cost
-            // is over-counted by the chunk multiplier (typically 4-7×).
-            const mid = d.message && d.message.id;
-            if (mid) {
-              if (seen.has(mid)) continue;
-              seen.add(mid);
-            }
-            const linePrices = knownPriceForModelSafe(d.message && d.message.model) || prices;
-            cache.cost += costFromUsage(u, linePrices);
-            cache.saved += savedFromUsage(u, linePrices);
-          } catch { /* skip bad line */ }
-        }
-        cache.offset += lastNl + 1;
-      }
-    } finally { fs.closeSync(fd); }
-  } catch {
-    return { cost: cache.cost, saved: cache.saved };
-  }
-
-  try {
-    cache.seenIds = Array.from(seen);
-    fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8');
-  } catch { /* best effort */ }
-
-  return { cost: cache.cost, saved: cache.saved };
+  return lib.costsSinceCompact(transcriptPath, sessionId, compactMs, prices,
+    { priceFor: knownPriceForModelSafe, ...opts });
 }
 
 // ─── Cost estimation ─────────────────────────────────────────────────────────
@@ -280,136 +226,14 @@ function totalCacheSavedFromTranscript(transcriptPath, sessionId, prices = DEFAU
 }
 
 /**
- * Single incremental pass returning both {cost, saved}. Keeps one /tmp cache
- * file per session keyed by sessionId. Shares the cache with the lib
- * implementation so both renderers see the same offsets.
+ * Single incremental pass returning {cost, saved, tokens, byModel, partial};
+ * delegates to the shared chunked scanner in lib/cost-estimation.js.
  */
-function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES) {
-  const empty = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0 };
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return empty;
-
-  let stat;
-  try { stat = fs.statSync(transcriptPath); } catch { return empty; }
-
-  const sid = String(sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '');
-  // v4: adds per-model cost buckets (byModel) for the modelSplit field.
-  // Shares the cache name with lib/cost-estimation.js so both renderers see
-  // the same offsets; the version MUST bump in both files together.
-  const cacheFile = path.join(os.tmpdir(), `claude-cost-${sid}.v4`);
-
-  let cachedOffset = 0;
-  let cachedCost = 0;
-  let cachedSaved = 0;
-  let cachedInput = 0;
-  let cachedOutput = 0;
-  let cachedCacheRead = 0;
-  let cachedCreation = 0;
-  let cachedSeenIds = [];
-  let cachedByModel = {};
-  try {
-    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    if (cached && typeof cached.offset === 'number' && typeof cached.cost === 'number'
-        && cached.offset >= 0 && cached.offset <= stat.size) {
-      cachedOffset = cached.offset;
-      cachedCost = cached.cost;
-      cachedSaved = typeof cached.saved === 'number' ? cached.saved : 0;
-      cachedInput = typeof cached.input === 'number' ? cached.input : 0;
-      cachedOutput = typeof cached.output === 'number' ? cached.output : 0;
-      cachedCacheRead = typeof cached.cached === 'number' ? cached.cached : 0;
-      cachedCreation = typeof cached.creation === 'number' ? cached.creation : 0;
-      cachedSeenIds = Array.isArray(cached.seenIds) ? cached.seenIds : [];
-      if (cached.byModel && typeof cached.byModel === 'object') cachedByModel = cached.byModel;
-    }
-  } catch { /* cache miss or corrupt — read from 0 */ }
-  const seen = new Set(cachedSeenIds);
-
-  // File shrank (rotation / clear) → drop cache, re-read whole thing.
-  if (stat.size < cachedOffset) {
-    cachedOffset = 0; cachedCost = 0; cachedSaved = 0;
-    cachedInput = 0; cachedOutput = 0; cachedCacheRead = 0; cachedCreation = 0;
-    cachedByModel = {};
-  }
-
-  // No new bytes — short-circuit the I/O entirely.
-  if (stat.size === cachedOffset) {
-    return {
-      cost: cachedCost, saved: cachedSaved,
-      input: cachedInput, output: cachedOutput,
-      cached: cachedCacheRead, creation: cachedCreation,
-      byModel: cachedByModel,
-    };
-  }
-
-  let newCost = cachedCost;
-  let newSaved = cachedSaved;
-  let newInput = cachedInput;
-  let newOutput = cachedOutput;
-  let newCacheRead = cachedCacheRead;
-  let newCreation = cachedCreation;
-  let newOffset = cachedOffset;
-  const byModel = { ...cachedByModel };
-  try {
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const bytesToRead = stat.size - cachedOffset;
-      const buf = Buffer.alloc(bytesToRead);
-      fs.readSync(fd, buf, 0, bytesToRead, cachedOffset);
-      const lastNl = buf.lastIndexOf(0x0A);
-      if (lastNl >= 0) {
-        const text = buf.slice(0, lastNl).toString('utf8');
-        for (const line of text.split('\n')) {
-          if (!line) continue;
-          try {
-            const d = JSON.parse(line);
-            const u = d && d.message && d.message.usage;
-            if (u) {
-              // Dedupe streaming snapshots by message.id (see costsSinceCompact).
-              const mid = d.message && d.message.id;
-              if (mid) {
-                if (seen.has(mid)) continue;
-                seen.add(mid);
-              }
-              const lineModel = (d.message && d.message.model) || 'other';
-              const linePrices = knownPriceForModelSafe(lineModel) || prices;
-              const lineCost = costFromUsage(u, linePrices);
-              byModel[lineModel] = (byModel[lineModel] || 0) + lineCost;
-              newCost += lineCost;
-              newSaved += savedFromUsage(u, linePrices);
-              newInput += u.input_tokens || 0;
-              newOutput += u.output_tokens || 0;
-              newCacheRead += u.cache_read_input_tokens || 0;
-              newCreation += u.cache_creation_input_tokens || 0;
-            }
-          } catch { /* invalid line — skip */ }
-        }
-        newOffset = cachedOffset + lastNl + 1;
-      }
-    } finally { fs.closeSync(fd); }
-  } catch {
-    return {
-      cost: cachedCost, saved: cachedSaved,
-      input: cachedInput, output: cachedOutput,
-      cached: cachedCacheRead, creation: cachedCreation,
-      byModel: cachedByModel,
-    };
-  }
-
-  try {
-    fs.writeFileSync(cacheFile, JSON.stringify({
-      offset: newOffset, cost: newCost, saved: newSaved,
-      input: newInput, output: newOutput,
-      cached: newCacheRead, creation: newCreation,
-      seenIds: Array.from(seen),
-      byModel,
-    }), 'utf8');
-  } catch { /* best effort */ }
-
-  return {
-    cost: newCost, saved: newSaved,
-    input: newInput, output: newOutput,
-    cached: newCacheRead, creation: newCreation,
-    byModel,
-  };
+function totalsFromTranscript(transcriptPath, sessionId, prices = DEFAULT_PRICES, opts = {}) {
+  const lib = resolveCostLib(opts);
+  if (!lib || typeof lib.totalsFromTranscript !== 'function') return { ...EMPTY_TOTALS, byModel: {} };
+  return lib.totalsFromTranscript(transcriptPath, sessionId, prices,
+    { priceFor: knownPriceForModelSafe, ...opts });
 }
 
 module.exports = {

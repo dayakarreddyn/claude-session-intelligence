@@ -6,7 +6,8 @@ const path = require('path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { withTempHome } = require('./helpers/statusline-fixture');
-const { loadEstimate } = require('../statusline/economics');
+const { loadEstimate, totalsFromTranscript, costsSinceCompact } = require('../statusline/economics');
+const costLib = require('../lib/cost-estimation');
 
 function withTempTmpdir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-tmp-'));
@@ -48,4 +49,31 @@ test('loadEstimate returns zeros when neither exists', (t) => {
   withTempHome(t);
   withTempTmpdir(t);
   assert.deepEqual(loadEstimate('nope'), { tokens: 0, tools: 0, id: 'nope' });
+});
+
+function writeRows(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-econ-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const p = path.join(dir, 't.jsonl');
+  const rows = [0, 1].map((i) => ({
+    type: 'assistant', timestamp: '2026-04-19T18:00:00.000Z',
+    message: { id: `e${i}`, model: 'claude-sonnet-4-5', usage: { input_tokens: 500, output_tokens: 10 } },
+  }));
+  fs.writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return p;
+}
+
+test('statusline economics delegates to the lib and survives a missing lib', (t) => {
+  withTempHome(t);
+  withTempTmpdir(t);
+  const p = writeRows(t);
+  const viaStatusline = totalsFromTranscript(p, 'econ1');
+  const viaLib = costLib.totalsFromTranscript(p, 'econ1-lib', costLib.DEFAULT_PRICES, {});
+  assert.deepEqual(viaStatusline, viaLib);
+  assert.equal(viaStatusline.input, 1000);
+
+  const emptyTotals = { cost: 0, saved: 0, input: 0, output: 0, cached: 0, creation: 0, byModel: {}, partial: false };
+  assert.deepEqual(totalsFromTranscript(p, 'econ2', undefined, { costLib: null }), emptyTotals);
+  assert.deepEqual(costsSinceCompact(p, 'econ2', undefined, { costLib: null }),
+    { cost: 0, saved: 0, partial: false });
 });

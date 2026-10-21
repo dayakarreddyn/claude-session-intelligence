@@ -14,6 +14,15 @@ const assert = require('node:assert/strict');
 
 const costEst = require('../lib/cost-estimation');
 
+// Default-cacheDir calls resolve getStateDir() from HOME; keep them off the real ~/.claude.
+const ISOLATED_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'si-cost-home-'));
+const PREV_HOME = process.env.HOME;
+process.env.HOME = ISOLATED_HOME;
+test.after(() => {
+  if (PREV_HOME === undefined) delete process.env.HOME; else process.env.HOME = PREV_HOME;
+  fs.rmSync(ISOLATED_HOME, { recursive: true, force: true });
+});
+
 function writeTranscript(lines) {
   const p = path.join(os.tmpdir(), `si-cost-test-${Date.now()}-${Math.random()}.jsonl`);
   fs.writeFileSync(p, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
@@ -234,4 +243,84 @@ test('costFromUsage bills 1h cache writes at the 1h rate when the breakdown is p
   // Rows without a 1h rate fall back to cache_creation x 1.6.
   const old = costEst.knownPriceForModel('claude-fable-5');
   assert.ok(Math.abs(costEst.costFromUsage({ cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 1000000 } }, old) - 20) < 1e-9);
+});
+
+// ─── Chunked, bounded scanner (D2) ──────────────────────────────────────────
+const PRICES = costEst.DEFAULT_PRICES;
+const T0 = Date.parse('2026-04-19T18:00:00.000Z');
+
+function threeAssistantRows() {
+  return [0, 1, 2].map((i) => ({
+    type: 'assistant',
+    timestamp: new Date(T0 + i * 10_000).toISOString(),
+    message: {
+      id: `msg_chunk_${i}`, model: 'claude-sonnet-4-5',
+      usage: { input_tokens: 2000, output_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 },
+    },
+  }));
+}
+
+function scratchDir(t) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'si-cost-scan-'));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  return d;
+}
+
+function transcriptIn(t, rows) {
+  const p = path.join(scratchDir(t), 't.jsonl');
+  fs.writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return p;
+}
+
+test('totalsFromTranscript is chunk-boundary safe', (t) => {
+  const p = transcriptIn(t, threeAssistantRows());
+  const whole = costEst.totalsFromTranscript(p, 'sA', PRICES, { cacheDir: scratchDir(t) });
+  const chunked = costEst.totalsFromTranscript(p, 'sB', PRICES, { cacheDir: scratchDir(t), chunkBytes: 48 });
+  assert.deepEqual(chunked, whole);
+  assert.equal(chunked.partial, false);
+  assert.equal(chunked.input, 6000);
+});
+
+test('totalsFromTranscript bounds one pass and resumes from the persisted offset', (t) => {
+  const p = transcriptIn(t, threeAssistantRows());
+  const d = scratchDir(t);
+  const firstRowLen = fs.readFileSync(p, 'utf8').indexOf('\n') + 1;
+  const a = costEst.totalsFromTranscript(p, 'sC', PRICES, { cacheDir: d, chunkBytes: 32, maxBytesPerPass: firstRowLen });
+  assert.equal(a.partial, true);
+  assert.equal(a.input, 2000);
+  const b = costEst.totalsFromTranscript(p, 'sC', PRICES, { cacheDir: d, chunkBytes: 32, maxBytesPerPass: 1 << 20 });
+  assert.equal(b.partial, false);
+  assert.equal(b.input, 6000);
+  assert.ok(fs.existsSync(path.join(d, 'claude-cost-sC.v5.json')));
+});
+
+test('costsSinceCompact counts only rows after compactMs, chunked', (t) => {
+  const p = transcriptIn(t, threeAssistantRows());
+  const d = scratchDir(t);
+  const all = costEst.totalsFromTranscript(p, 'sD', PRICES, { cacheDir: scratchDir(t) });
+  const first = costEst.totalsFromTranscript(
+    transcriptIn(t, threeAssistantRows().slice(0, 1)), 'sD1', PRICES, { cacheDir: scratchDir(t) });
+  const out = costEst.costsSinceCompact(p, 'sD', T0 + 5_000, PRICES, { cacheDir: d, chunkBytes: 48 });
+  assert.equal(out.partial, false);
+  assert.ok(Math.abs(out.cost - (all.cost - first.cost)) < 1e-9, `got ${out.cost}`);
+  assert.ok(fs.existsSync(path.join(d, 'claude-cost-sincecompact-sD.v4.json')));
+});
+
+test('DEFAULT_CHUNK_BYTES is bounded', () => {
+  assert.ok(costEst.DEFAULT_CHUNK_BYTES <= 16 * 1024 * 1024);
+});
+
+test('seenIds retained as at most the last 5000 ids', (t) => {
+  const rows = [];
+  for (let i = 0; i < 5100; i += 1) {
+    rows.push({ type: 'assistant', timestamp: new Date(T0).toISOString(),
+      message: { id: `m${i}`, model: 'claude-sonnet-4-5', usage: { input_tokens: 1 } } });
+  }
+  const p = transcriptIn(t, rows);
+  const d = scratchDir(t);
+  const out = costEst.totalsFromTranscript(p, 'sE', PRICES, { cacheDir: d });
+  assert.equal(out.input, 5100);
+  const cache = JSON.parse(fs.readFileSync(path.join(d, 'claude-cost-sE.v5.json'), 'utf8'));
+  assert.equal(cache.seenIds.length, 5000);
+  assert.equal(cache.seenIds[4999], 'm5099');
 });
