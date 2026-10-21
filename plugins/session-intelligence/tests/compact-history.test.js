@@ -18,6 +18,9 @@ const assert = require('node:assert/strict');
 // own entries from the shared history file but leaves the dir in place.
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'si-compact-history-test-'));
 process.env.HOME = TMP_HOME;
+// compact-history writes snapshot/prefix files under os.tmpdir(); keep them in the temp home.
+process.env.TMPDIR = TMP_HOME;
+test.after(() => { fs.rmSync(TMP_HOME, { recursive: true, force: true }); });
 
 const compactHistory = require('../lib/compact-history');
 

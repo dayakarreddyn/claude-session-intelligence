@@ -774,3 +774,29 @@ test('recordAgentInvocation prices a row from tokens when costUsd is absent; unp
     assert.equal(agents.unpriced, 1);
   } finally { cleanup(sb); }
 });
+
+test('sqlite driver line is logged only for the fallback driver', () => {
+  const { spawnSync } = require('node:child_process');
+  const script = `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:'drv',project:'p',cwd:'/x',startedAt:1})`;
+  const run = (extra) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-drv-'));
+    try {
+      const r = spawnSync(process.execPath, ['-e', script], {
+        env: { HOME: home, USERPROFILE: home, TMPDIR: home, CLAUDE_INTEL_DEBUG: '1', ...extra },
+        encoding: 'utf8', timeout: 30000,
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const logDir = path.join(home, '.claude', 'logs');
+      const files = fs.existsSync(logDir) ? fs.readdirSync(logDir) : [];
+      return files.map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  };
+  const probe = spawnSync(process.execPath, ['-e',
+    `const d=require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'sqlite-driver'))}).openDatabase(':memory:');process.stdout.write(d.driver)`],
+  { env: { HOME: os.tmpdir(), PATH: process.env.PATH }, encoding: 'utf8' });
+  const defaultDriver = probe.stdout.trim();
+  const defaultLog = run({});
+  if (defaultDriver === 'better-sqlite3') assert.doesNotMatch(defaultLog, /sqlite driver/);
+  else assert.match(defaultLog, /sqlite driver/);
+  if (Number(process.versions.node.split('.')[0]) >= 22) assert.match(run({ SI_SQLITE_DRIVER: 'node:sqlite' }), /sqlite driver/);
+});

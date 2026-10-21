@@ -222,9 +222,9 @@ test('si-pre-compact stamps contextTokens/cap/fill on the history entry and comp
     }) + '\n');
     const seed = spawnSync(process.execPath, ['-e',
       `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:${JSON.stringify(sid)},project:'p',cwd:${JSON.stringify(cwd)},startedAt:1})`],
-    { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+    { env: { ...process.env, HOME: home, TMPDIR: home }, encoding: 'utf8' });
     assert.equal(seed.status, 0, seed.stderr);
-    const env = { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid };
+    const env = { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid };
     for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
     const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
       input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'auto', hook_event_name: 'PreCompact' }),
@@ -260,7 +260,7 @@ function runPreCompact({ sessionContext, sid, extraShapeLines = 0 }) {
   const projectDir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/\//g, '-'));
   fs.mkdirSync(projectDir, { recursive: true });
   fs.writeFileSync(path.join(projectDir, 'session-context.md'), sessionContext);
-  const env = { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid };
+  const env = { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid };
   for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
   const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
     input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'manual', hook_event_name: 'PreCompact' }),
@@ -327,7 +327,7 @@ test('PreCompact still injects the registry when the state dir is unwritable', {
   try {
     const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
       input: JSON.stringify({ session_id: sid, cwd: path.join(home, 'proj'), trigger: 'manual', hook_event_name: 'PreCompact' }),
-      env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
     });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /## CONSTRAINT REGISTRY/);
@@ -340,16 +340,15 @@ test('PreCompact still injects the registry when the state dir is unwritable', {
 
 test('PreCompact with an unreadable transcript still writes the regret snapshot, exits 0, and never records cap 0', () => {
   const sid = 'sid-pc-nousage';
-  const snapFile = path.join(os.tmpdir(), `claude-compact-snapshot-${sid}.json`);
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const snapFile = path.join(home, `claude-compact-snapshot-${sid}.json`);
   try {
-    fs.rmSync(snapFile, { force: true });
     const cwd = path.join(home, 'proj');
     fs.mkdirSync(cwd, { recursive: true });
     fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
     const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
       input: JSON.stringify({ session_id: sid, cwd, transcript_path: path.join(home, 'missing.jsonl'), trigger: 'auto', hook_event_name: 'PreCompact' }),
-      env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+      env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
     });
     assert.equal(r.status, 0, r.stderr);
     assert.ok(fs.existsSync(snapFile), 'regret snapshot must be written without usage evidence');

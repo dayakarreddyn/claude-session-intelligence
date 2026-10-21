@@ -24,7 +24,7 @@ function runHook(file, payload, home, timeout = 20_000) {
   for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT', 'CLAUDE_SI_PRUNE', 'CLAUDE_SI_PRUNE_FLOOR', 'CLAUDE_SI_PRUNE_REWRITE']) delete clean[k];
   return spawnSync(process.execPath, [path.join(HOOKS, file)], {
     input: JSON.stringify(payload),
-    env: { ...clean, HOME: home, CLAUDE_SESSION_ID: payload.session_id || '' },
+    env: { ...clean, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: payload.session_id || '' },
     encoding: 'utf8',
     timeout,
   });
@@ -97,7 +97,7 @@ test('PreToolUse: default config (rewriteInput false) emits nothing for npm test
 test('PreToolUse: CLAUDE_SI_PRUNE_REWRITE=1 opts in via env', () => withHome((home) => {
   const r = spawnSync(process.execPath, [path.join(HOOKS, 'si-prune-output.js')], {
     input: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: sid, tool_name: 'Bash', tool_input: { command: 'npm test' } }),
-    env: { ...process.env, HOME: home, CLAUDE_SI_PRUNE_REWRITE: '1' }, encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SI_PRUNE_REWRITE: '1' }, encoding: 'utf8', timeout: 20_000,
   });
   assert.ok(JSON.parse(r.stdout).hookSpecificOutput.updatedInput.command.includes('[exit='));
 }));
@@ -111,7 +111,7 @@ test('PreToolUse: run_in_background commands and non-Bash tools are left alone',
 
 test('hook exits 0 with empty stdout on garbage stdin', () => withHome((home) => {
   const r = spawnSync(process.execPath, [path.join(HOOKS, 'si-prune-output.js')], {
-    input: 'not json', env: { ...process.env, HOME: home }, encoding: 'utf8',
+    input: 'not json', env: { ...process.env, HOME: home, TMPDIR: home }, encoding: 'utf8',
   });
   assert.equal(r.status, 0); assert.equal(r.stdout, '');
 }));

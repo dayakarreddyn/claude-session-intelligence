@@ -614,7 +614,7 @@ function showFirstRunTips(state) {
 // — cheap (one readdir, lstat per match), best-effort (any failure logged at
 // debug and moved past), bounded (only matches our own filename prefix).
 const STALE_TEMP_MAX_AGE_DAYS = 7;
-const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot|cost|usage-cache|context-peak|constraints)-/;
+const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot|cost|usage-cache|context-peak|constraints|compact-prefix|compact-snapshot|health|usage-lock)-/;
 // Sweep both ~/.claude/state/ (current home, per-session state moved here so
 // macOS tmpdir cleanup can't strand stale-but-valid files) AND os.tmpdir()
 // (legacy home — clean up leftovers from pre-migration installs). pruneStateDir

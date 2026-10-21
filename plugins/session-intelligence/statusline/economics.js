@@ -114,13 +114,6 @@ function writeCostSnapshot(sessionId, totalCostUsd) {
   } catch { /* best effort */ }
 }
 
-function readCostSnapshot(sessionId) {
-  try {
-    const data = JSON.parse(fs.readFileSync(costSnapshotPath(sessionId), 'utf8'));
-    return data && Number.isFinite(data.total_cost_usd) ? data : null;
-  } catch { return null; }
-}
-
 /**
  * costAtCompactUsd for the current session's most recent compact, or null
  * when the entry doesn't have one (older history written before the field
@@ -247,7 +240,6 @@ module.exports = {
   minutesSinceLastCompact,
   costSnapshotPath,
   writeCostSnapshot,
-  readCostSnapshot,
   costAtLastCompact,
   costsSinceCompact,
   DEFAULT_PRICES,

@@ -18,12 +18,16 @@ const path = require('node:path');
 
 const HOOK = path.join(__dirname, '..', 'hooks', 'si-task-change.js');
 
+// Hook state (state dir, one-shot files) lives in a throwaway home, never the real one.
+const RUN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'si-tc-run-'));
+test.after(() => { fs.rmSync(RUN_HOME, { recursive: true, force: true }); });
+
 function runHook(input) {
   return spawnSync('node', [HOOK], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     timeout: 5000,
-    env: { ...process.env, CLAUDE_SI_DEBUG: '0' },
+    env: { ...process.env, HOME: RUN_HOME, USERPROFILE: RUN_HOME, TMPDIR: RUN_HOME, CLAUDE_SI_DEBUG: '0' },
   });
 }
 
@@ -121,7 +125,7 @@ function shiftFixture(sid) {
   fs.writeFileSync(path.join(state, `claude-token-budget-${sid}`), '500000');
   const run = () => spawnSync('node', [HOOK], {
     input: JSON.stringify({ cwd, session_id: sid, prompt: SHIFT_PROMPT }),
-    encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, CLAUDE_SI_DEBUG: '0' },
+    encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SI_DEBUG: '0' },
   });
   return { home, state, projectDir, run };
 }
@@ -171,7 +175,7 @@ test('si-task-change writes a handoff with registry constraints before recommend
         cwd, session_id: sid,
         prompt: 'Now please design a gradient colour palette for the marketing landing page hero banner with warm sunset tones and accessible contrast ratios throughout',
       }),
-      encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, CLAUDE_SI_DEBUG: '0' },
+      encoding: 'utf8', timeout: 5000, env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SI_DEBUG: '0' },
     });
     assert.equal(res.status, 0, res.stderr);
     assert.match(res.stderr, /`\/clear`/);

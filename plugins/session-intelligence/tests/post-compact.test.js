@@ -22,6 +22,15 @@ function sandbox() {
   return { home, cwd };
 }
 
+// compact-history resolves os.tmpdir() per call, so in-process snapshot reads follow TMPDIR.
+function withTmpdir(dir, fn) {
+  const prev = process.env.TMPDIR;
+  process.env.TMPDIR = dir;
+  try { return fn(); } finally {
+    if (prev === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prev;
+  }
+}
+
 function writeRegistryState(home, sid, data) {
   fs.writeFileSync(path.join(home, '.claude', 'state', `claude-constraints-${sid}.json`), JSON.stringify(data));
 }
@@ -29,7 +38,7 @@ function writeRegistryState(home, sid, data) {
 function runHook(home, input, raw) {
   return spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-post-compact.js')], {
     input: raw !== undefined ? raw : JSON.stringify(input),
-    env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, HOME: home, TMPDIR: home }, encoding: 'utf8', timeout: 15000,
   });
 }
 
@@ -45,7 +54,6 @@ test('si-post-compact records retention against the registry state and the trigg
   const { home, cwd } = sandbox();
   try {
     const sid = 'pc-sid-1';
-    fs.rmSync(path.join(os.tmpdir(), `claude-compact-snapshot-${sid}.json`), { force: true });
     writeRegistryState(home, sid, {
       t: 1000,
       items: [{ type: 'Action', text: 'Never rewrite earlier turns' }, { type: 'Process', text: 'Run npm test before every commit' }],
@@ -78,7 +86,7 @@ test('si-post-compact without a registry state still records summary length with
   const { home, cwd } = sandbox();
   try {
     const sid = 'pc-sid-2';
-    require('../lib/compact-history').writeSnapshot(sid, { t: 4242, sid });
+    withTmpdir(home, () => require('../lib/compact-history').writeSnapshot(sid, { t: 4242, sid }));
     const r = runHook(home, {
       hook_event_name: 'PostCompact', session_id: sid, cwd, trigger: 'manual', compact_summary: 'a short summary',
     });
@@ -108,9 +116,9 @@ test('si-post-compact exits 0 with no output on malformed or empty stdin', () =>
 test('compact_outcomes fill_before/fill_after chain: pre-compact -> post-compact -> post-tool', () => {
   const { home, cwd } = sandbox();
   const sid = 'pc-chain-' + process.pid;
-  const snapFile = path.join(os.tmpdir(), `claude-compact-snapshot-${sid}.json`);
+  const snapFile = path.join(home, `claude-compact-snapshot-${sid}.json`);
   try {
-    const env = { ...process.env, HOME: home, CLAUDE_SESSION_ID: sid };
+    const env = { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid };
     for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
     const usageLine = (id, tokens, ts) => JSON.stringify({
       type: 'assistant', timestamp: ts,
@@ -138,7 +146,7 @@ test('compact_outcomes fill_before/fill_after chain: pre-compact -> post-compact
       hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: path.join(cwd, 'a.js') }, tool_response: 'x' });
     assert.equal(tool.status, 0, tool.stderr);
 
-    const snap = require('../lib/compact-history').readSnapshot(sid);
+    const snap = withTmpdir(home, () => require('../lib/compact-history').readSnapshot(sid));
     assert.ok(snap && Number.isFinite(snap.t), 'pre-compact wrote a snapshot');
     const [row] = outcomeRows(home, sid);
     assert.ok(row, 'outcome row recorded');

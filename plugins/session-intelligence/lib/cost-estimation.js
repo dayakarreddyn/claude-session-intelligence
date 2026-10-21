@@ -351,32 +351,6 @@ function costsSinceCompact(transcriptPath, sessionId, compactMs, prices = DEFAUL
 }
 
 /**
- * Estimate how much of the current context is "expensive" vs "cache-served".
- * Returns { costPerKTok, cacheRatio, band } where band is 'cheap' / 'normal'
- * / 'expensive'. High cacheRatio = mostly replaying cached content, so
- * compacting saves less; low cacheRatio = actively generating novel tokens,
- * compact earlier to cap cost.
- */
-function costBand(usage, prices = DEFAULT_PRICES) {
-  if (!usage) return { costPerKTok: 0, cacheRatio: 0, band: 'unknown' };
-  const totalTok = (usage.input_tokens || 0)
-    + (usage.cache_creation_input_tokens || 0)
-    + (usage.cache_read_input_tokens || 0);
-  if (totalTok === 0) return { costPerKTok: 0, cacheRatio: 0, band: 'unknown' };
-
-  const cost = costFromUsage(usage, prices);
-  const costPerKTok = (cost / totalTok) * 1000;
-  const cacheRatio = (usage.cache_read_input_tokens || 0) / totalTok;
-
-  // Boundaries chosen so cache-heavy sessions (>70% cache) register as cheap
-  // and novel-work sessions (<30% cache) register as expensive.
-  let band = 'normal';
-  if (cacheRatio >= 0.7) band = 'cheap';
-  else if (cacheRatio < 0.3) band = 'expensive';
-  return { costPerKTok, cacheRatio, band };
-}
-
-/**
  * Find the first assistant turn in the transcript whose timestamp is strictly
  * after `sinceTs` (ms since epoch) and return its usage block. Used to measure
  * cache-hit ratio on the first post-compact turn — that number tells us
@@ -442,7 +416,6 @@ module.exports = {
   scanTranscript,
   DEFAULT_CHUNK_BYTES,
   DEFAULT_MAX_BYTES_PER_PASS,
-  costBand,
   firstAssistantUsageAfter,
   cacheHitRatio,
   formatUsd,

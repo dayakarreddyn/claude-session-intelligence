@@ -56,10 +56,12 @@ function openDb() {
     _db.pragma('synchronous = NORMAL');
     _db.pragma('foreign_keys = ON');
     initSchema(_db);
-    try {
-      const { intelLog } = require('./intel-debug');
-      intelLog('events', 'debug', 'sqlite driver', { driver: opened.driver });
-    } catch { /* optional */ }
+    if (opened.driver !== 'better-sqlite3') {
+      try {
+        const { intelLog } = require('./intel-debug');
+        intelLog('events', 'debug', 'sqlite driver', { driver: opened.driver });
+      } catch { /* optional */ }
+    }
     return _db;
   } catch (err) {
     try {
