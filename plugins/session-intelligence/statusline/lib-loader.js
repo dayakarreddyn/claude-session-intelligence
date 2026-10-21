@@ -51,6 +51,16 @@ function loadSharedConfig() {
   catch { return null; }
 }
 
+function loadUtilsLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'utils.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 function loadThinkingLib() {
   const dir = resolveLibDir();
   if (!dir) return null;
@@ -203,6 +213,7 @@ function resetForTests() {
 module.exports = {
   resolveLibDir,
   loadSharedConfig,
+  loadUtilsLib,
   loadThinkingLib,
   loadCompactHistoryLib,
   loadContextShapeLib,

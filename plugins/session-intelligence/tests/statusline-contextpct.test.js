@@ -46,7 +46,9 @@ test('contextPct is empty without a usage line', (t) => {
 
 test('no usage line + large chars/3 estimate file: tokens field renders idle, uncoloured by zone', (t) => {
   const ctx = setup(t, 0, ['tokens']);
-  fs.writeFileSync(path.join(ctx.home, 'claude-token-budget-golden-cmp1'), '3000000');
+  const stateDir = path.join(ctx.home, '.claude', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'claude-token-budget-golden-cmp1'), '3000000');
   const r = renderStatusline({ model: MODEL }, { home: ctx.home, fields: ['tokens'], name: 'cmp1', transcript: false, usageCache: false, env: { NO_COLOR: '' } });
   assert.match(r.stdout, /idle/);
   assert.doesNotMatch(r.stdout, /3\.0M|3000k|\d+%/);

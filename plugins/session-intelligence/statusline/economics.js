@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { resolveLibDir, loadCompactHistoryLib, knownPriceForModelSafe, getCostLibCached } = require('./lib-loader');
+const { resolveLibDir, loadUtilsLib, loadCompactHistoryLib, knownPriceForModelSafe, getCostLibCached } = require('./lib-loader');
 const { readIntFile } = require('./format');
 
 /**
@@ -21,16 +21,30 @@ function totalTokensFromUsage(u) {
   );
 }
 
+// The token-budget hook writes under getStateDir() (~/.claude/state); older
+// installs wrote to os.tmpdir(). Check the state dir first, then tmpdir.
+function estimateDirs() {
+  const dirs = [];
+  try {
+    const utils = loadUtilsLib();
+    if (utils && typeof utils.getStateDir === 'function') dirs.push(utils.getStateDir());
+  } catch { /* fall back to tmpdir only */ }
+  dirs.push(os.tmpdir());
+  return dirs;
+}
+
 function loadEstimate(sessionId) {
-  const tmp = os.tmpdir();
+  const dirs = estimateDirs();
   const ids = [sessionId, 'default'].filter(Boolean);
   for (const id of ids) {
     const sid = String(id).replace(/[^a-zA-Z0-9_-]/g, '');
     if (!sid) continue;
-    const budget = path.join(tmp, `claude-token-budget-${sid}`);
-    const count  = path.join(tmp, `claude-tool-count-${sid}`);
-    if (fs.existsSync(budget) || fs.existsSync(count)) {
-      return { tokens: readIntFile(budget), tools: readIntFile(count), id: sid };
+    for (const dir of dirs) {
+      const budget = path.join(dir, `claude-token-budget-${sid}`);
+      const count  = path.join(dir, `claude-tool-count-${sid}`);
+      if (fs.existsSync(budget) || fs.existsSync(count)) {
+        return { tokens: readIntFile(budget), tools: readIntFile(count), id: sid };
+      }
     }
   }
   return { tokens: 0, tools: 0, id: sessionId || 'default' };

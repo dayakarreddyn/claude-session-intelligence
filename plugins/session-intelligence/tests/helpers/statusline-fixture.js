@@ -32,6 +32,21 @@ function makeHome(t) {
   return home;
 }
 
+/** Temp dir installed as HOME/USERPROFILE for an in-process test; previous values restored in t.after. */
+function withTempHome(t) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  t.after(() => {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  return home;
+}
+
 function usageRow(id, ts) {
   return {
     type: 'assistant',
@@ -111,4 +126,4 @@ function render(payload, opts = {}) {
   return { stdout: r.stdout, stderr: r.stderr, status: r.status, lines: r.stdout.split('\n') };
 }
 
-module.exports = { STATUSLINE, makeHome, writeTranscript, writeFreshUsageCache, writeConfig, render, stripAnsi, normalise, uid };
+module.exports = { STATUSLINE, makeHome, withTempHome, writeTranscript, writeFreshUsageCache, writeConfig, render, stripAnsi, normalise, uid };
