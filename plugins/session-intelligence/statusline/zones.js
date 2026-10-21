@@ -1,8 +1,8 @@
 'use strict';
 
 // Context-bar zone thresholds: fractions of the resolved window (or absolute,
-// per statusline.zoneMode) via the shared getZoneThresholds, then replaced by
-// the adaptive learner's zones whenever it reports a fit. This is the exact
+// per statusline.zoneMode) via the shared getZoneThresholds, then (fraction mode
+// only) replaced by the adaptive learner's zones whenever it reports a fit. This is the exact
 // behaviour main() had inline before the split.
 
 const { loadSharedConfig } = require('./lib-loader');
@@ -17,6 +17,8 @@ function resolveZones(cfg, { cap, cwd, history, adaptiveZones } = {}) {
       zones = { yellow: base.yellow, orange: base.orange, red: base.red };
     }
   } catch { /* keep static zones on error */ }
+  // Absolute mode: the user's thresholds are authoritative; the learner never replaces them.
+  if (source === 'absolute') return { ...zones, source };
   try {
     if (typeof adaptiveZones === 'function') {
       const adaptive = adaptiveZones(history, zones, { cwd, cap });

@@ -103,7 +103,7 @@ function main() {
   // Base zones are fractions of the resolved window (or absolute, per
   // statusline.zoneMode) via the shared getZoneThresholds; the stand-alone
   // fallback keeps its static `zones`.
-  const zoneCap = contextCap(input, cfg);
+  const zoneCap = contextCap(input, cfg).cap;
   let zoneHistory = [];
   let adaptiveZones = null;
   try {

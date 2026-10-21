@@ -243,3 +243,15 @@ test('verbose presets carry spendLimit after weekUsage', () => {
   }
   assert.deepEqual(DEFAULTS.statusline.fields, STATUSLINE_PRESETS.verbose);
 });
+
+test('per-project zones override implies absolute zoneMode unless the override sets zoneMode', () => {
+  const { resolveStatuslineForCwd } = require('../lib/config');
+  const cfg = { statusline: { zoneMode: 'fraction', perProject: {
+    '/p': { zones: { red: 500000 } },
+    '/q': { zones: { red: 500000 }, zoneMode: 'fraction' },
+    '/r': { maxCwdLength: 50 },
+  } } };
+  assert.equal(resolveStatuslineForCwd(cfg, '/p').zoneMode, 'absolute');
+  assert.equal(resolveStatuslineForCwd(cfg, '/q').zoneMode, 'fraction');
+  assert.equal(resolveStatuslineForCwd(cfg, '/r').zoneMode, 'fraction');
+});

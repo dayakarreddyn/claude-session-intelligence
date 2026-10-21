@@ -578,6 +578,11 @@ function resolveStatuslineForCwd(cfg, cwd) {
   if (overrides.zones && typeof overrides.zones === 'object') {
     merged.zones = { ...(base.zones || {}), ...overrides.zones };
   }
+  // A per-project `zones` block is absolute thresholds: it implies zoneMode
+  // 'absolute' for that project unless the override sets zoneMode itself.
+  if (overrides.zones && typeof overrides.zones === 'object' && overrides.zoneMode === undefined) {
+    merged.zoneMode = 'absolute';
+  }
   if (overrides.prices && typeof overrides.prices === 'object') {
     merged.prices = { ...(base.prices || {}), ...overrides.prices };
   }

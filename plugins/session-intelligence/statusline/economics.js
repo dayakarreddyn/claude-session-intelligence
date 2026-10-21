@@ -53,11 +53,14 @@ function loadEstimate(sessionId) {
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 
 // Context cap resolution lives in lib/context-cap.js (shared with hooks).
+// Returns { cap, source }; source 'fallback' means the 200000 is a guess.
 function contextCap(input, cfg) {
   input = input || {}; cfg = cfg || {};
   const dir = resolveLibDir(); let lib = null;
   try { lib = dir && require(path.join(dir, 'context-cap.js')); } catch { /* fall through */ }
-  return lib ? lib.resolveContextCap({ model: input.model && (input.model.id || input.model.display_name), env: process.env, contextWindowSize: input.context_window && input.context_window.context_window_size, configCap: cfg.contextCap }).cap : 200000;
+  if (!lib) return { cap: 200000, source: 'fallback' };
+  const { cap, source } = lib.resolveContextCap({ model: input.model && (input.model.id || input.model.display_name), env: process.env, contextWindowSize: input.context_window && input.context_window.context_window_size, configCap: cfg.contextCap });
+  return { cap, source };
 }
 
 // ─── Compaction ──────────────────────────────────────────────────────────────

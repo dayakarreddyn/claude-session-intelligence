@@ -447,12 +447,15 @@ Mirrors `shape.perProject` but for the statusline block. Keyed by absolute canon
       "/Users/me/DWS/CSM": {
         "activeRootShowAtRoot": true,
         "maxCwdLength": 50,
+        "zoneMode": "absolute",
         "zones": { "red": 500000 }
       }
     }
   }
 }
 ```
+
+A per-project `zones` block implies `"zoneMode": "absolute"` for that project unless the override sets `zoneMode` itself.
 
 Merge rules: scalars replace; `zones` and `prices` shallow-merge so a partial override doesn't wipe siblings; `serviceHealth` is unioned so a per-project block adds to (not replaces) the global probe list. Unknown keys pass through — every key the renderer reads from `cfg.statusline` is honoured.
 

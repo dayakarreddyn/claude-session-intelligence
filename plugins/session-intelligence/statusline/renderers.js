@@ -169,11 +169,13 @@ function buildRenderers(C, deps = {}) {
       if (t <= 0) {
         return `${C.dim}${sourceTag}${zone.icon} idle${C.reset}`;
       }
-      const cap = contextCap(input, ctx.cfg);
+      const { cap, source: capSource } = contextCap(input, ctx.cfg);
+      // Unknown window (guessed fallback): no bar, percent or zone colour.
+      if (capSource === 'fallback') return `${C.dim}${sourceTag}${fmtTokens(t)}/?${C.reset}`;
       const segs = Number.isFinite(ctx.cfg.maxBarSegments) ? ctx.cfg.maxBarSegments : 14;
       const bar = renderContextBar(t, cap, ctx.cfg.zones, C, zone.color, segs);
       const used = fmtTokens(t);
-      const total = cap >= 1_000_000 ? '1M' : fmtTokens(cap);
+      const total = fmtTokens(cap);
       const pct = cap > 0 ? Math.round((t / cap) * 100) : 0;
       // `175.7k/1M 18%` — keep the cap visible so the absolute scale is
       // unambiguous; percent stays trailing, dim, sans `()` to keep the
@@ -453,7 +455,7 @@ function buildRenderers(C, deps = {}) {
       try {
         const lib = require(path.join(dir, 'context-cap.js'));
         const model = input.model && (input.model.id || input.model.display_name);
-        const cap = contextCap(input, ctx.cfg);
+        const { cap } = contextCap(input, ctx.cfg);
         const { point } = lib.resolveAutoCompactPoint({ cap, model, env: process.env, settings: lib.loadSettingsForCwd(input.cwd) });
         pct = lib.pctToCompaction({ contextTokens: ctx.tokens, point });
       } catch { return ''; }

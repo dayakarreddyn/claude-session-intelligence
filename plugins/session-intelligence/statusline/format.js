@@ -81,10 +81,15 @@ function readIntFile(filePath) {
   } catch { return 0; }
 }
 
+// Fixed-decimal number with insignificant trailing zeros removed (200.0 -> 200, 1.50 -> 1.5).
+function trimmed(value, digits) {
+  return value.toFixed(digits).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+}
+
 function fmtTokens(n) {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`; // 2.42B
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;  // 1.25M
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;      // 425.3k
+  if (n >= 1_000_000_000) return `${trimmed(n / 1_000_000_000, 2)}B`; // 2.42B
+  if (n >= 1_000_000) return `${trimmed(n / 1_000_000, 2)}M`;  // 1.25M, 1M
+  if (n >= 1_000)     return `${trimmed(n / 1_000, 1)}k`;      // 425.3k, 200k
   return String(n);
 }
 
@@ -95,11 +100,11 @@ function fmtTokens(n) {
 // really do get there).
 function fmtTokensTight(n) {
   if (n >= 10_000_000_000) return `${Math.round(n / 1_000_000_000)}B`;
-  if (n >= 1_000_000_000)  return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000_000)  return `${trimmed(n / 1_000_000_000, 1)}B`;
   if (n >= 10_000_000) return `${Math.round(n / 1_000_000)}M`;
-  if (n >= 1_000_000)  return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000_000)  return `${trimmed(n / 1_000_000, 1)}M`;
   if (n >= 10_000)     return `${Math.round(n / 1_000)}k`;
-  if (n >= 1_000)      return `${(n / 1_000).toFixed(1)}k`;
+  if (n >= 1_000)      return `${trimmed(n / 1_000, 1)}k`;
   return String(n);
 }
 

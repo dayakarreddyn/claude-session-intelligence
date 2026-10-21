@@ -87,3 +87,21 @@ test('spend_limit over 100 % is red and percent-only without USD fields', (t) =>
   const out = R.spendLimit({ rate_limits: { spend_limit: { used_percentage: 120, resets_at: FAR_RESET } } }, {});
   assert.ok(out.includes(`${C.red}sl:120%`), out);
 });
+
+test('tokens cell renders used/? without bar or percent when the cap is a fallback', (t) => {
+  withTempHome(t);
+  const payload = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'statusline', 'payloads', 'e2_unknown_model_no_cw.json'), 'utf8'));
+  const R = buildRenderers(makeColors(false), {});
+  const out = R.tokens(payload, { tokens: 175700, usedTranscript: true, cfg: { zones: { yellow: 40000, orange: 60000, red: 80000 } } });
+  assert.match(out, /175\.7k\/\?/);
+  assert.doesNotMatch(out, /▰|%/);
+});
+
+test('tokens cell keeps bar and percent when the cap is known', (t) => {
+  withTempHome(t);
+  const R = buildRenderers(makeColors(false), {});
+  const input = { model: { id: 'claude-fable-5-1' }, context_window: { context_window_size: 200000 } };
+  const out = R.tokens(input, { tokens: 100000, usedTranscript: true, cfg: { zones: { yellow: 40000, orange: 60000, red: 80000 } } });
+  assert.match(out, /100k\/200k/);
+  assert.match(out, /50%/);
+});
