@@ -86,13 +86,15 @@ function normalise(s) {
 }
 
 /**
- * Spawn the statusline. opts: { home, fields, env, usageCache (false to skip the seed), transcript (false to omit) }.
+ * Spawn the statusline. opts: { home, fields, env, usageCache (false to skip the seed), transcript (false to omit, a path to use an existing file) }.
  * Returns { stdout, stderr, status, lines } with ANSI disabled via NO_COLOR.
  */
 function render(payload, opts = {}) {
   const { home, fields = DEFAULT_FIELDS, env = {} } = opts;
   writeConfig(home, fields);
-  const transcriptPath = opts.transcript === false ? undefined : writeTranscript(home);
+  let transcriptPath;
+  if (typeof opts.transcript === 'string') transcriptPath = opts.transcript;
+  else if (opts.transcript !== false) transcriptPath = writeTranscript(home);
   if (opts.usageCache !== false) writeFreshUsageCache(home);
   const input = {
     ...payload,
