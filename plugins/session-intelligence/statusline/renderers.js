@@ -473,7 +473,7 @@ function buildRenderers(C, deps = {}) {
       return `${col}cmp:${pct}%${C.reset}`;
     },
 
-    /** Claude Code 5-hour block usage + time until reset, as `b:47% · r:3hr12m`.
+    /** Claude Code 5-hour block usage + time until reset, as `b:47% · r:3h12m`.
      *
      *  Source order:
      *   1. `rate_limits.five_hour` from the statusline stdin JSON — Claude
@@ -497,7 +497,7 @@ function buildRenderers(C, deps = {}) {
     },
 
     /** Weekly (7-day) usage + time until reset. Same shape and source
-     *  order as blockUsage with a `w` prefix. Format: `w:31% · r:4d12hr`. */
+     *  order as blockUsage with a `w` prefix. Format: `w:31% · r:4d12h`. */
     weekUsage: (input, _ctx) => {
       const rl = input && input.rate_limits;
       const sd = rl && rl.seven_day;
@@ -511,7 +511,7 @@ function buildRenderers(C, deps = {}) {
     },
 
     /** Gateway-account spend budget (stdin `rate_limits.spend_limit`,
-     *  v2.1.251+): `sl:$21/$50w r:2d4hr` with USD fields, else `sl:42%`.
+     *  v2.1.251+): `sl:$21/$50w r:2d4h` with USD fields, else `sl:42%`.
      *  Red once the budget is exhausted (>=100%). Empty when absent. */
     spendLimit: (input, _ctx) => {
       const sl = input && input.rate_limits && input.rate_limits.spend_limit;
