@@ -233,3 +233,13 @@ test('DEFAULTS.compact.stablePrefix is false and calloutBucketPct is 5', () => {
   assert.equal(DEFAULTS.compact.stablePrefix, false);
   assert.equal(DEFAULTS.compact.calloutBucketPct, 5);
 });
+
+test('verbose presets carry spendLimit after weekUsage', () => {
+  const { STATUSLINE_PRESETS } = require('../lib/config');
+  for (const name of ['verbose', 'verbose-cache']) {
+    const f = STATUSLINE_PRESETS[name];
+    const i = f.indexOf('weekUsage');
+    assert.deepEqual(f.slice(i, i + 4), ['weekUsage', 'spendLimit', 'modelQuota', 'modelSplit']);
+  }
+  assert.deepEqual(DEFAULTS.statusline.fields, STATUSLINE_PRESETS.verbose);
+});

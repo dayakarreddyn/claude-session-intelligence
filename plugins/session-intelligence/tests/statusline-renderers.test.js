@@ -28,3 +28,62 @@ test('tokenSpeed renders nothing when the transcript yields no speed sample', (t
   const input = { transcript_path: transcript, cost: { total_api_duration_ms: 3_600_000 }, context_window: { total_output_tokens: 503_000 } };
   assert.equal(R.tokenSpeed(input, { tokenTotals: { output: 503_000 } }), '');
 });
+
+const FAR_RESET = Math.floor(Date.now() / 1000) + 3 * 86400;
+const WINDOWS = {
+  five_hour: { used_percentage: 36, resets_at: FAR_RESET },
+  seven_day: { used_percentage: 95, resets_at: FAR_RESET },
+};
+
+test('stdin rate_limits never triggers the usage poller', (t) => {
+  withTempHome(t);
+  let calls = 0;
+  const R = buildRenderers(makeColors(false), { loadUsage: () => { calls++; return null; } });
+  const input = { rate_limits: WINDOWS };
+  R.blockUsage(input, {}); R.weekUsage(input, {}); R.modelQuota(input, {}); R.spendLimit(input, {});
+  assert.equal(calls, 0);
+});
+
+test('a rate_limits object missing one window renders nothing for it and skips the poller', (t) => {
+  withTempHome(t);
+  let calls = 0;
+  const R = buildRenderers(makeColors(false), { loadUsage: () => { calls++; return { weeklyUsage: 50 }; } });
+  const input = { rate_limits: { five_hour: WINDOWS.five_hour } };
+  assert.equal(R.weekUsage(input, {}), '');
+  assert.equal(calls, 0);
+});
+
+test('missing rate_limits object falls back to the poller', (t) => {
+  withTempHome(t);
+  let calls = 0;
+  const R = buildRenderers(makeColors(false), { loadUsage: () => { calls++; return { sessionUsage: 36, weeklyUsage: 10, modelQuotas: { opus: { utilization: 12 } } }; } });
+  assert.match(R.blockUsage({}, {}), /^b:36%/);
+  assert.match(R.weekUsage({}, {}), /^w:10%/);
+  assert.equal(R.modelQuota({}, {}), 'opus:12/88%');
+  assert.equal(calls, 3);
+});
+
+test('a stale-by-age cache renders with ~', (t) => {
+  withTempHome(t);
+  const R = buildRenderers(makeColors(false), { loadUsage: () => ({ sessionUsage: 36, weeklyUsage: 10, stale: true, error: false, modelQuotas: { opus: { utilization: 12 } } }) });
+  assert.match(R.blockUsage({}, {}), /~b:36%|b:~36%/);
+  assert.match(R.weekUsage({}, {}), /w:~10%/);
+  assert.match(R.modelQuota({}, {}), /opus:~12\/88%/);
+});
+
+test('spend_limit renders as a budget, never as a model quota', (t) => {
+  withTempHome(t);
+  const R = buildRenderers(makeColors(false), { loadUsage: () => null });
+  const input = { rate_limits: { spend_limit: { used_percentage: 42, resets_at: FAR_RESET, used_usd: 21, limit_usd: 50, period: 'weekly' } } };
+  assert.match(R.spendLimit(input, {}), /^sl:\$21\/\$50w r:\d/);
+  assert.equal(R.modelQuota(input, {}), '');
+  assert.equal(R.spendLimit({ rate_limits: WINDOWS }, {}), '');
+});
+
+test('spend_limit over 100 % is red and percent-only without USD fields', (t) => {
+  withTempHome(t);
+  const C = makeColors(true);
+  const R = buildRenderers(C, { loadUsage: () => null });
+  const out = R.spendLimit({ rate_limits: { spend_limit: { used_percentage: 120, resets_at: FAR_RESET } } }, {});
+  assert.ok(out.includes(`${C.red}sl:120%`), out);
+});

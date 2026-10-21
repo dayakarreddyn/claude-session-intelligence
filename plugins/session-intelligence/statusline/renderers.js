@@ -5,7 +5,7 @@
 const path = require('path');
 const os = require('os');
 const { resolveLibDir, loadContextShapeLib, loadTokenSpeedLib, loadEventsLib, agentModelCostsSafe, loadUsage: defaultLoadUsage } = require('./lib-loader');
-const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, truncate, truncateMiddle, projectLabel } = require('./format');
+const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, resetAtMs, truncate, truncateMiddle, projectLabel } = require('./format');
 const { gitBranch, gitDirtyCount, gitDiffStat, extractIssueNumber, readDeployBreadcrumb, detectOutputStyle, detectSiPluginGate, probeHealthIfStale } = require('./git-info');
 const { contextCap, minutesSinceLastCompact, costAtLastCompact, costsSinceCompact, DEFAULT_PRICES } = require('./economics');
 
@@ -477,25 +477,50 @@ function buildRenderers(C, deps = {}) {
      *      it errors the cache carries the last good values and the cell
      *      renders them with a `~` marker instead of vanishing. */
     blockUsage: (input, _ctx) => {
-      const fh = input && input.rate_limits && input.rate_limits.five_hour;
+      const rl = input && input.rate_limits;
+      const fh = rl && rl.five_hour;
       if (fh && typeof fh.used_percentage === 'number') {
         return _renderUsageCellImpl('b', fh.used_percentage, fh.resets_at, C, 'dim', false);
       }
+      if (rl && typeof rl === 'object') return ''; // quota-aware build: window legitimately absent
       const u = loadUsage();
       if (!u || typeof u.sessionUsage !== 'number') return '';
-      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!u.error);
+      return _renderUsageCellImpl('b', u.sessionUsage, u.sessionResetAt, C, 'dim', !!(u.stale || u.error));
     },
 
     /** Weekly (7-day) usage + time until reset. Same shape and source
      *  order as blockUsage with a `w` prefix. Format: `w:31% · r:4d12hr`. */
     weekUsage: (input, _ctx) => {
-      const sd = input && input.rate_limits && input.rate_limits.seven_day;
+      const rl = input && input.rate_limits;
+      const sd = rl && rl.seven_day;
       if (sd && typeof sd.used_percentage === 'number') {
         return _renderUsageCellImpl('w', sd.used_percentage, sd.resets_at, C, 'zone', false);
       }
+      if (rl && typeof rl === 'object') return '';
       const u = loadUsage();
       if (!u || typeof u.weeklyUsage !== 'number') return '';
-      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
+      return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!(u.stale || u.error));
+    },
+
+    /** Gateway-account spend budget (stdin `rate_limits.spend_limit`,
+     *  v2.1.251+): `sl:$21/$50w r:2d4hr` with USD fields, else `sl:42%`.
+     *  Red once the budget is exhausted (>=100%). Empty when absent. */
+    spendLimit: (input, _ctx) => {
+      const sl = input && input.rate_limits && input.rate_limits.spend_limit;
+      if (!sl || typeof sl.used_percentage !== 'number' || !Number.isFinite(sl.used_percentage)) return '';
+      const hasUsd = Number.isFinite(sl.used_usd) && Number.isFinite(sl.limit_usd);
+      const period = typeof sl.period === 'string' ? sl.period.charAt(0) : '';
+      const body = hasUsd
+        ? `sl:${fmtUsdShort(sl.used_usd)}/${fmtUsdShort(sl.limit_usd)}${period}`
+        : `sl:${Math.round(sl.used_percentage)}%`;
+      const col = sl.used_percentage >= 100 ? C.red : C.dim;
+      let resetStr = '';
+      if (sl.resets_at) {
+        const ms = resetAtMs(sl.resets_at) - Date.now();
+        if (Number.isFinite(ms) && ms > 0) resetStr = fmtDurationTight(ms);
+      }
+      const head = `${col}${body}${C.reset}`;
+      return resetStr ? `${head} ${C.dim}r:${resetStr}${C.reset}` : head;
     },
 
     /** Output-token generation speed, `tps:235` (tokens/sec). Median of
@@ -566,25 +591,17 @@ function buildRenderers(C, deps = {}) {
      *  worker from non-null seven_day_<model> buckets. Renders e.g.
      *  `opus:12/88% sonnet:4/96%` the day either source lights up. */
     modelQuota: (input, _ctx) => {
+      // stdin rate_limits carries no per-model buckets (and spend_limit is a
+      // budget, not a model): a quota-aware build means nothing to show.
+      if (input && input.rate_limits && typeof input.rate_limits === 'object') return '';
+      const u = loadUsage();
+      if (!u || !u.modelQuotas) return '';
+      const mark = u.stale || u.error ? '~' : '';
       const parts = [];
-      const rl = (input && input.rate_limits) || {};
-      for (const [k, v] of Object.entries(rl)) {
-        if (k === 'five_hour' || k === 'seven_day') continue;
-        if (v && typeof v.used_percentage === 'number') {
-          const name = k.replace(/^(five_hour|seven_day)_/, '');
-          const used = Math.round(v.used_percentage);
-          parts.push(`${name}:${used}/${Math.max(0, 100 - used)}%`);
-        }
-      }
-      if (!parts.length) {
-        const u = loadUsage();
-        if (u && u.modelQuotas) {
-          for (const [name, q] of Object.entries(u.modelQuotas)) {
-            if (!q || typeof q.utilization !== 'number') continue;
-            const used = Math.round(q.utilization);
-            parts.push(`${name}:${u.error ? '~' : ''}${used}/${Math.max(0, 100 - used)}%`);
-          }
-        }
+      for (const [name, q] of Object.entries(u.modelQuotas)) {
+        if (!q || typeof q.utilization !== 'number') continue;
+        const used = Math.round(q.utilization);
+        parts.push(`${name}:${mark}${used}/${Math.max(0, 100 - used)}%`);
       }
       return parts.length ? `${C.dim}${parts.join(' ')}${C.reset}` : '';
     },
