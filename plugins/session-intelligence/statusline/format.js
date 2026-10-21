@@ -112,6 +112,17 @@ function fmtUsd(n) {
   return `$${n.toFixed(2)}`;
 }
 
+// Denser USD for the per-model split, where a long session stacks several
+// figures on one line: roll to `k` past $1000 so `$1727` reads `$1.7k`,
+// `$12480` reads `$12k`. Small values keep cents.
+function fmtUsdShort(n) {
+  if (!Number.isFinite(n) || n <= 0) return '$0';
+  if (n >= 10000) return `$${Math.round(n / 1000)}k`;
+  if (n >= 1000)  return `$${(n / 1000).toFixed(1)}k`;
+  if (n >= 10)    return `$${Math.round(n)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 // Single-letter duration formatter for tight cells (compactAge, session).
 // `3hr 23m` -> `3h23m`, `11hr` -> `11h`, `45m` -> `45m`. Spans over 1d
 // keep the day component and skip minutes — the precision isn't useful at
@@ -173,6 +184,7 @@ module.exports = {
   fmtTokens,
   fmtTokensTight,
   fmtUsd,
+  fmtUsdShort,
   fmtDurationTight,
   truncate,
   truncateMiddle,

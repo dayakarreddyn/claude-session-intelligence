@@ -497,29 +497,17 @@ test('agentModelCosts aggregates per-model subagent spend for one session', () =
   } finally { cleanup(sb); }
 });
 
-test('upsertSessionModelCosts + weeklyModelSpend aggregate parent and agent spend', () => {
+test('upsertSessionModelCosts replaces (not accumulates) per-model rows for a session', () => {
   const sb = mkSandboxDb();
   try {
-    const now = Date.now();
-    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: now });
-    // Parent-session splits — second upsert replaces, not accumulates.
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: Date.now() });
     assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 50 }));
     assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 78, 'claude-opus-4-8': 2 }));
-    // Agent spend joins the weekly view.
-    events.recordAgentInvocation({ sid: 's1', toolUseId: 'a1', subagentType: 'Explore', t: now,
-      model: 'claude-opus-4-8', costUsd: 0.5 });
-    const week = events.weeklyModelSpend();
-    const byModel = Object.fromEntries(week.map((r) => [r.model, r.cost_usd]));
-    assert.ok(Math.abs(byModel['claude-fable-5'] - 78) < 1e-9, `fable=${byModel['claude-fable-5']}`);
-    assert.ok(Math.abs(byModel['claude-opus-4-8'] - 2.5) < 1e-9, `opus=${byModel['claude-opus-4-8']}`);
-    assert.equal(week[0].model, 'claude-fable-5', 'sorted by spend desc');
-    // Old rows age out of the window.
     const raw = openDatabase(sb.dbPath).db;
-    raw.prepare('UPDATE session_model_costs SET t = ? WHERE model = ?')
-      .run(now - 10 * 24 * 60 * 60 * 1000, 'claude-fable-5');
+    const rows = raw.prepare('SELECT model, cost_usd FROM session_model_costs WHERE sid = ?').all('s1');
     raw.close();
-    const week2 = events.weeklyModelSpend();
-    assert.ok(!week2.find((r) => r.model === 'claude-fable-5'), 'aged-out row excluded');
+    const byModel = Object.fromEntries(rows.map((r) => [r.model, r.cost_usd]));
+    assert.deepEqual(byModel, { 'claude-fable-5': 78, 'claude-opus-4-8': 2 });
   } finally { cleanup(sb); }
 });
 

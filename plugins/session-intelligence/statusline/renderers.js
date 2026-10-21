@@ -5,7 +5,7 @@
 const path = require('path');
 const os = require('os');
 const { resolveLibDir, loadContextShapeLib, loadTokenSpeedLib, loadEventsLib, agentModelCostsSafe, loadUsage: defaultLoadUsage } = require('./lib-loader');
-const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtDurationTight, truncate, truncateMiddle, projectLabel } = require('./format');
+const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, truncate, truncateMiddle, projectLabel } = require('./format');
 const { gitBranch, gitDirtyCount, gitDiffStat, extractIssueNumber, readDeployBreadcrumb, detectOutputStyle, detectSiPluginGate, probeHealthIfStale } = require('./git-info');
 const { contextCap, minutesSinceLastCompact, costAtLastCompact, costsSinceCompact, DEFAULT_PRICES } = require('./economics');
 
@@ -497,13 +497,6 @@ function buildRenderers(C, deps = {}) {
       return _renderUsageCellImpl('w', u.weeklyUsage, u.weeklyResetAt, C, 'zone', !!u.error);
     },
 
-    /** Per-model share of this session's transcript spend, e.g.
-     *  `fable-5:72% opus-4-8:21% haiku-4-5:7%`. Answers "which models are
-     *  burning the budget" at a glance. Cost share (not token share) so a
-     *  cheap-but-chatty Haiku doesn't dwarf an expensive Fable turn. There
-     *  is no per-model QUOTA — stdin rate_limits only carries the two
-     *  account-wide windows — so share-of-session-spend is the honest
-     *  per-model percentage. Top 4 models; empty until usage exists. */
     /** Output-token generation speed, `tps:235` (tokens/sec). Median of
      *  the last few streamed turns — per-message chunk-timestamp spans are
      *  pure generation time, so this tracks the model's real throughput
@@ -532,7 +525,7 @@ function buildRenderers(C, deps = {}) {
       return `${C.dim}tps:${v}${C.reset}`;
     },
 
-    modelSplit: (input, ctx) => {
+    modelSplit: (_input, ctx) => {
       // Parent-conversation turns from the transcript accumulator...
       const byModel = (ctx.tokenTotals && ctx.tokenTotals.byModel) || {};
       const merged = { ...byModel };
@@ -547,45 +540,28 @@ function buildRenderers(C, deps = {}) {
       if (!entries.length || total <= 0) return '';
       entries.sort((a, b) => b[1] - a[1]);
 
-      const events = loadEventsLib();
-      // Persist this session's per-model split so weeklyModelSpend can see
-      // parent-session spend across sessions (agents are already in the DB).
+      // Persist this session's per-model split for cross-session analytics
+      // (/si stats) — the only surviving record of parent-session splits
+      // once a transcript ages out.
       try {
+        const events = loadEventsLib();
         if (events && typeof events.upsertSessionModelCosts === 'function' && ctx.sessionId) {
           events.upsertSessionModelCosts(ctx.sessionId, byModel);
         }
       } catch { /* telemetry is best-effort */ }
 
-      // Per-model weekly-remaining ESTIMATE (`wr:~61%`): Anthropic exposes
-      // no per-model weekly quota (seven_day_<model> buckets are null on
-      // plans without per-model limits — verified 2026-07-17), so attribute
-      // the account weekly used% across models by their share of this
-      // week's tracked spend: wr(model) = 100 − weeklyUsed × spendShare.
-      // `~` marks it as SI's estimate, not an Anthropic number.
-      let weeklyUsed = null;
-      const sd = input && input.rate_limits && input.rate_limits.seven_day;
-      if (sd && typeof sd.used_percentage === 'number') weeklyUsed = sd.used_percentage;
-      let weekSpend = null;
-      if (weeklyUsed !== null && events && typeof events.weeklyModelSpend === 'function') {
-        try { weekSpend = events.weeklyModelSpend(); } catch { weekSpend = null; }
-      }
-      const weekTotal = weekSpend ? weekSpend.reduce((sum, r) => sum + (r.cost_usd || 0), 0) : 0;
-      const weekByModel = weekSpend
-        ? Object.fromEntries(weekSpend.map((r) => [r.model, r.cost_usd || 0]))
-        : {};
-
-      const parts = entries.slice(0, 4).map(([m, c]) => {
+      // Self-labelling `$·%`: session spend + share of session spend. No
+      // per-model quota shown — Anthropic exposes only the account-wide
+      // weekly window (the separate `w:` cell), so a per-model "weekly
+      // remaining" would be fabricated. Models rounding to 0% are dropped.
+      const parts = [];
+      for (const [m, c] of entries.slice(0, 4)) {
+        const share = Math.round((c / total) * 100);
+        if (share < 1) continue;
         const name = m.replace(/^claude-/, '').replace(/-20\d{6,}$/, '');
-        const usd = fmtUsd(c);
-        let cell = `${name}:sc${usd || '$0'}\u00b7sp${Math.round((c / total) * 100)}%`;
-        if (weeklyUsed !== null && weekTotal > 0) {
-          const share = (weekByModel[m] || 0) / weekTotal;
-          const wr = Math.max(0, Math.min(100, Math.round(100 - weeklyUsed * share)));
-          cell += `\u00b7wr:~${wr}%`;
-        }
-        return cell;
-      });
-      return `${C.dim}${parts.join(' ')}${C.reset}`;
+        parts.push(`${name}:${fmtUsdShort(c)}\u00b7${share}%`);
+      }
+      return parts.length ? `${C.dim}${parts.join(' ')}${C.reset}` : '';
     },
 
     /** Per-model QUOTA used/available — dormant until real data exists.

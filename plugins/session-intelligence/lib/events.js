@@ -519,8 +519,8 @@ function agentModelCosts(sid) {
 /**
  * Upsert the CURRENT per-model transcript spend for a session — written by
  * the statusline each redraw (cheap: one WAL upsert per model). This is the
- * cross-session record that weeklyModelSpend aggregates; parent-session
- * per-model splits exist nowhere else once the transcript ages out.
+ * cross-session record (read by /si stats); parent-session per-model splits
+ * exist nowhere else once the transcript ages out.
  */
 function upsertSessionModelCosts(sid, byModel) {
   const db = openDb();
@@ -541,28 +541,6 @@ function upsertSessionModelCosts(sid, byModel) {
     tx(Object.entries(byModel));
     return true;
   } catch { return false; }
-}
-
-/**
- * Per-model tracked spend over the trailing window: parent-session splits
- * (session_model_costs) + subagent runs (agent_invocations). Feeds the
- * statusline's per-model weekly-remaining estimate. [{ model, cost_usd }],
- * highest spend first. Never throws.
- */
-function weeklyModelSpend({ days = 7 } = {}) {
-  const db = openDb();
-  if (!db) return [];
-  try {
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return db.prepare(`
-      SELECT model, SUM(cost_usd) AS cost_usd FROM (
-        SELECT model, cost_usd FROM session_model_costs WHERE t > ? AND cost_usd > 0
-        UNION ALL
-        SELECT model, cost_usd FROM agent_invocations
-        WHERE t > ? AND model IS NOT NULL AND model != '' AND cost_usd > 0
-      ) GROUP BY model ORDER BY cost_usd DESC
-    `).all(cutoff, cutoff);
-  } catch { return []; }
 }
 
 function markArchivePruned(toolUseId) {
@@ -666,7 +644,6 @@ module.exports = {
   reconcileSubagentUsage,
   agentModelCosts,
   upsertSessionModelCosts,
-  weeklyModelSpend,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,
