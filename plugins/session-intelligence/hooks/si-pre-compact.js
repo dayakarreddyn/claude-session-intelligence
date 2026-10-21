@@ -96,6 +96,15 @@ const {
 // a "stale — verify before trusting" pointer so the model doesn't treat
 // multi-week-old guidance as current. Mirrors the handoff.js fix that
 // stopped inlining scraped `nextPriorities` bullets.
+const { assembleUnderCap, HOOK_OUTPUT_CAP_CHARS } = require(path.join(SI_LIB, 'hook-output'));
+
+// Continue-hint footer: Claude Code pauses for input after /compact, so the
+// resume banner only fires on the user's next turn; say so at the end.
+const NEXT_FOOTER = '\n## NEXT (to resume)\n'
+  + 'Send any short message (e.g. `c` or `continue`) to show the post-compact '
+  + 'resume banner and auto-continue the last task. Claude Code pauses for '
+  + 'input after /compact, so the banner only fires on your next turn.\n';
+
 const STALENESS_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
@@ -497,12 +506,13 @@ async function main() {
   }
 
   let hints = '';
+  let sections = {};
   if (projectDir) {
     const contextFile = path.join(projectDir, 'session-context.md');
     const content = readFile(contextFile);
 
     if (content && content.trim().length > 0) {
-      const sections = parseSessionContext(content);
+      sections = parseSessionContext(content);
       // mtime gates user-managed (non-autofill) sections so weeks-old hand-
       // written guidance doesn't leak into every compact. stat() failure →
       // mtimeMs=0 → treated as "unknown age" (stale) by formatCompactionHints.
@@ -529,6 +539,52 @@ async function main() {
   } else {
     log('[PreCompact] No project directory found \u2014 compacting without hints');
     intelLog('pre-compact', 'warn', 'no project directory resolved', { cwd });
+  }
+
+  // Constraint registry: typed rules from session-context + CLAUDE.md compact
+  // instructions, fitted to its block cap. The FITTED registry is what is
+  // injected and what is persisted, so PostCompact measures retention against
+  // exactly what the summariser saw. contextTokens/cap are resolved once here
+  // and reused by the history record below.
+  let latest = null;
+  let cap = 0;
+  let registry = null;
+  let registryBlock = '';
+  let registryLib = null;
+  try {
+    registryLib = require(path.join(SI_LIB, 'constraint-registry'));
+    registry = registryLib.fitRegistryToCap(registryLib.buildRegistry({
+      sections, claudeMdText: readFile(path.join(cwd, 'CLAUDE.md')) || '',
+    }));
+    registryBlock = registryLib.renderRegistryBlock(registry);
+  } catch (err) {
+    intelLog('pre-compact', 'warn', 'constraint registry failed', { err: err && err.message });
+  }
+  let capLib = null;
+  try {
+    capLib = require(path.join(SI_LIB, 'context-cap'));
+    latest = require(path.join(SI_LIB, 'transcript-usage'))
+      .readLatestUsage(stdinInput.transcript_path, { sessionId });
+    ({ cap } = capLib.resolveContextCap({
+      model: latest && latest.model,
+      env: process.env,
+      settings: capLib.loadSettingsForCwd(cwd),
+      configCap: siCfg.statusline && siCfg.statusline.contextCap,
+    }));
+  } catch (err) {
+    intelLog('pre-compact', 'warn', 'context usage/cap unresolved', { err: err && err.message });
+  }
+  // State write never affects the injected block.
+  try {
+    const contextTokens = (latest && latest.contextTokens) || 0;
+    const wrote = registry && registryLib && capLib && registryLib.writeRegistryState(sessionId, {
+      t: Date.now(), items: registry.items, contextTokens, contextCap: cap,
+      fillPct: capLib.fillPctOf(contextTokens, cap),
+      model: (latest && latest.model) || null, trigger: stdinInput.trigger || null,
+    });
+    if (registry && !wrote) intelLog('pre-compact', 'warn', 'registry state not written', { sessionId });
+  } catch (err) {
+    intelLog('pre-compact', 'warn', 'registry state write failed', { err: err && err.message });
   }
 
   // Memory-offload directive — tell Claude to write rich detail into
@@ -574,65 +630,27 @@ async function main() {
   // Claude Code surfaces it as "completed successfully: <stdout>" and folds
   // it into the summariser's context. Don't try to wrap this in a JSON
   // envelope; validation will reject the whole block and drop ALL guidance.
-  const emit = (chunk) => { if (chunk) process.stdout.write(chunk); };
-
-  if (hints || shapeInjection || memoryOffload || prioritiesReview || memoryCleanup || gitNexusRefresh || tipBlock || archiveRecall) {
-    emit(`\n# Session Intelligence \u2014 compaction guidance\n`);
-  }
-
-  // User-authored session-context.md hints first (manual curation, stronger
-  // signal), then observed shape (grounded in what actually happened), then
-  // the memory-offload directive (stands alone; doesn't depend on the others).
-  if (hints) {
-    emit(hints);
-    log('[PreCompact] Injected compaction hints from session-context.md');
-  }
-  if (shapeInjection) {
-    emit(shapeInjection);
-    log('[PreCompact] Injected observed context-shape hints');
-  }
-  if (memoryOffload) {
-    emit(memoryOffload);
-    log('[PreCompact] Injected memory-offload checkpoint directive');
-    intelLog('pre-compact', 'info', 'memory offload directive emitted', {
-      projectDir: path.basename(projectDir || ''),
-      bytes: memoryOffload.length,
-    });
-  }
-  if (prioritiesReview) {
-    emit(prioritiesReview);
-    log('[PreCompact] Injected priorities-review directive');
-    intelLog('pre-compact', 'info', 'priorities review directive emitted', {
-      projectDir: path.basename(projectDir || ''),
-      bytes: prioritiesReview.length,
-    });
-  }
-  if (memoryCleanup) {
-    emit(memoryCleanup);
-    log('[PreCompact] Injected stale-memory-cleanup directive');
-    intelLog('pre-compact', 'info', 'memory cleanup directive emitted', {
-      projectDir: path.basename(projectDir || ''),
-      bytes: memoryCleanup.length,
-    });
-  }
-  if (gitNexusRefresh) {
-    emit(gitNexusRefresh);
-    log('[PreCompact] Injected git-nexus refresh note');
-    intelLog('pre-compact', 'info', 'git-nexus refresh note emitted', {
-      anchors: gitNexusStatus.anchors,
-      sinceDays: gitNexusStatus.sinceDays,
-      bytes: gitNexusRefresh.length,
-    });
-  }
-  if (tipBlock) {
-    emit(tipBlock);
-    intelLog('pre-compact', 'debug', 'tip block emitted', { bytes: tipBlock.length });
-  }
-  if (archiveRecall) {
-    emit(archiveRecall);
-    log('[PreCompact] Injected recallable-archives list');
-    intelLog('pre-compact', 'info', 'archive recall list emitted', { bytes: archiveRecall.length });
-  }
+  const blocks = [
+    { name: 'registry', text: registryBlock, required: true },
+    { name: 'hints', text: hints },
+    { name: 'shape', text: shapeInjection },
+    { name: 'memoryOffload', text: memoryOffload },
+    { name: 'priorities', text: prioritiesReview },
+    { name: 'memoryCleanup', text: memoryCleanup },
+    { name: 'gitNexus', text: gitNexusRefresh },
+    { name: 'tip', text: tipBlock },
+    { name: 'archiveRecall', text: archiveRecall },
+    { name: 'next', text: (hints || shapeInjection || memoryOffload) ? NEXT_FOOTER : '' },
+  ];
+  // Everything is assembled under one cap: Claude Code swaps stdout above
+  // 10,000 chars for a 2,000-char preview, which would lose the registry.
+  const heading = '\n# Session Intelligence \u2014 compaction guidance\n';
+  const assembled = assembleUnderCap(blocks, { maxChars: HOOK_OUTPUT_CAP_CHARS - heading.length });
+  if (assembled.text) process.stdout.write(heading + assembled.text);
+  intelLog('pre-compact', 'info', 'block assembled',
+    { chars: assembled.chars, dropped: assembled.dropped, overCap: assembled.overCap });
+  const injected = blocks.filter((b) => b.text && !assembled.dropped.includes(b.name)).map((b) => b.name);
+  for (const name of injected) log(`[PreCompact] Injected ${name}`);
 
   // stablePrefix drift check — when the opt-in cache-friendly mode is on,
   // fingerprint the emitted block per-cwd. If the fingerprint moves between
@@ -667,20 +685,6 @@ async function main() {
     }
   }
 
-  // Continue-hint footer. Claude Code pauses for user input after /compact
-  // and won't auto-fire SessionStart until the user types something, so the
-  // resume banner only appears after that input. Surface the hint at the
-  // END of the pre-compact block — it becomes the last thing the user sees
-  // before the input prompt, which is exactly when they need it.
-  if (hints || shapeInjection || memoryOffload) {
-    emit(
-      '\n## NEXT (to resume)\n'
-      + 'Send any short message (e.g. `c` or `continue`) to show the post-compact '
-      + 'resume banner and auto-continue the last task. Claude Code pauses for '
-      + 'input after /compact, so the banner only fires on your next turn.\n'
-    );
-  }
-
   // Learning-loop logging: record this compaction event so future sessions
   // can adapt zones + dampen drop suggestions based on observed behaviour.
   // Also write a per-session snapshot so token-budget-tracker can watch for
@@ -690,83 +694,42 @@ async function main() {
       const entries = ctxShape.readShape(sessionId);
       const analysis = ctxShape.analyzeShape(entries, analyzeOpts);
 
-      // tokens-at-compact = last observed cumulative budget, fallback to 0.
-      // cost-at-compact  = same, best-effort from transcript.
-      const tokens = entries.length ? (entries[entries.length - 1].tok || 0) : 0;
       const transcriptPath = stdinInput.transcript_path;
       const cost = costEst
         ? costEst.totalCostFromTranscript(transcriptPath, sessionId, costEst.DEFAULT_PRICES)
         : 0;
 
-      const droppedDirs = analysis ? analysis.cold.map((c) => c.root) : [];
-      const hotDirs     = analysis ? analysis.hot.map((h) => h.root) : [];
-      const warmDirs    = analysis ? analysis.warm.map((w) => w.root) : [];
-
-      // Authoritative cost-at-compact, captured by the statusline's per-render
-      // snapshot. When present, the statusline `compactCost` field uses
-      // `current_total - costAtCompactUsd` for a strict subset of session
-      // cost. Falls back to the transcript-priced estimate when missing
-      // (fresh session, no statusline run yet, or `total_cost_usd` absent
-      // from stdin in this environment).
+      // Authoritative cost-at-compact from the statusline's per-render
+      // snapshot; null falls back to the transcript-priced estimate.
       const costSnapshot = readCostSnapshot(sessionId);
       const costAtCompactUsd = costSnapshot && Number.isFinite(costSnapshot.total_cost_usd)
         ? Number(costSnapshot.total_cost_usd.toFixed(4))
         : null;
 
-      const historyEntry = {
-        t: Date.now(),
-        sid: sessionId,
-        cwd,
-        tokens,
-        cost: Number(cost.toFixed(4)),
-        hotDirs,
-        warmDirs,
-        droppedDirs,
-        hadShift: !!(analysis && analysis.shift),
-        regretCount: 0, // upgraded later when the snapshot window closes
-      };
-      if (costAtCompactUsd !== null) historyEntry.costAtCompactUsd = costAtCompactUsd;
-      compactHistory.appendHistory(historyEntry);
-
-      // Mirror to durable events DB for /si stats + future dashboard. Optional —
-      // any failure (native module unavailable, write error) is swallowed by
-      // recordCompact and the JSONL above is authoritative.
-      try {
-        const events = require(path.join(SI_LIB, 'events'));
-        // Canonical project key (repo-root basename) so this row joins/filters
-        // with sessions + zone_transitions. NOT basename(projectDir) — that's
-        // the encoded ~/.claude/projects slug (e.g. -Users-0xd-DWS-CSM).
-        events.recordCompact({
-          sid: sessionId,
-          project: ctxShape ? ctxShape.projectKeyOf(cwd) : null,
-          cwd,
-          t: historyEntry.t,
-          tokens,
-          cost: historyEntry.cost,
-          costAtCompactUsd,
-          hotDirs, warmDirs, droppedDirs,
-          hadShift: historyEntry.hadShift,
-          trigger: stdinInput.trigger || null,
-        });
-      } catch { /* events lib optional */ }
-
-      // Snapshot drives post-compact regret monitoring for up to 30 calls
-      // or 30 min — whichever first. si-token-budget.js consumes it.
-      // warmDirs enables soft-regret detection: users compacting early
-      // (median 60k) rarely age dirs to COLD, so hard regret never fires.
-      // WARM-not-HOT touches post-compact are the wider signal we can act on.
-      compactHistory.writeSnapshot(sessionId, {
-        t: historyEntry.t,
-        tokens,
-        cost: historyEntry.cost,
-        hotDirs,
-        warmDirs,
-        droppedDirs,
-        callsSince: 0,
-        regretHits: [],
-        softRegretHits: [],
-        positiveHits: [],
+      const { historyEntry, dbRow, snapshot } = require(path.join(SI_LIB, 'compact-record')).buildCompactRecord({
+        latest, cap, entries, trigger: stdinInput.trigger || null, cwd, sessionId, cost, costAtCompactUsd, analysis,
       });
+      const { tokens, hotDirs, warmDirs, droppedDirs } = historyEntry;
+      // Unresolved cap: skip only the history/DB record (never stamp cap 0);
+      // the regret snapshot and handoff below do not need it and still run.
+      if (cap) {
+        compactHistory.appendHistory(historyEntry);
+
+        // Mirror to the durable events DB; optional, JSONL above is authoritative.
+        // Canonical project key (repo-root basename), not the encoded projects slug.
+        try {
+          require(path.join(SI_LIB, 'events')).recordCompact({
+            ...dbRow,
+            project: ctxShape ? ctxShape.projectKeyOf(cwd) : null,
+          });
+        } catch { /* events lib optional */ }
+      } else {
+        intelLog('pre-compact', 'warn', 'context cap unresolved; history/DB record skipped', { sessionId });
+      }
+
+      // Snapshot drives post-compact regret monitoring (30 calls / 30 min);
+      // si-token-budget.js consumes it.
+      compactHistory.writeSnapshot(sessionId, snapshot);
 
       intelLog('pre-compact', 'info', 'history + snapshot written', {
         tokens, cost: historyEntry.cost, dropped: droppedDirs.length, hot: hotDirs.length,
@@ -782,7 +745,7 @@ async function main() {
           const wrote = handoff.writeHandoff({
             projectDir, cwd, sessionId,
             sessionStartMs: entries.length ? entries[0].t : undefined,
-            hotDirs, droppedDirs,
+            hotDirs, droppedDirs, constraints: registry ? registry.items : [],
           });
           intelLog('pre-compact', 'info', 'continuation handoff', { wrote });
         } catch (err) {

@@ -22,11 +22,14 @@
  * - Compact after exploration, before execution
  * - Compact after completing a milestone, before starting next
  *
- * Token zones (from Thariq's research on 1M context):
- * - Green  (<200k): free zone, continue normally
- * - Yellow (200-300k): caution, good time to compact between tasks
- * - Orange (300-400k): context rot zone, compact soon
- * - Red    (>400k): urgent, compact immediately
+ * Token zones are fractions of the resolved context window (statusline.zoneMode
+ * 'fraction', the default; 20% / 30% / 40%), via lib/config getZoneThresholds.
+ * On a 1M window that is today's 200k / 300k / 400k; on 200K it is 40k / 60k / 80k.
+ * - Green  (<yellow): free zone, continue normally
+ * - Yellow: caution, good time to compact between tasks
+ * - Orange: context rot zone, compact soon
+ * - Red: urgent, compact immediately
+ * statusline.zoneMode 'absolute' keeps fixed token thresholds (statusline.zones).
  */
 
 const fs = require('fs');
@@ -53,10 +56,14 @@ const {
   getStateDir,
   writeFile,
   readStdinJson,
-  readTranscriptTokens,
   resolveProjectDir,
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
+const { readLatestUsage, updatePeak, markRecorded, lastRecordedOf } = require(path.join(SI_LIB, 'transcript-usage'));
+const { resolveContextCap, resolveAutoCompactPoint, loadSettingsForCwd, fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+const { numbersSegment, largeResultsLine, phaseBoundaryLine } = require(path.join(SI_LIB, 'callout'));
+const { countLargeResults } = require(path.join(SI_LIB, 'shape-signals'));
+const MAX_DUP_READ_LINES = 3;
 const { readShape, analyzeShape, draftMessage, readSessionState, projectKeyOf } = require(path.join(SI_LIB, 'context-shape'));
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
@@ -149,7 +156,6 @@ async function main() {
     || 'default';
   const sessionId = String(rawSid).replace(/[^a-zA-Z0-9_-]/g, '') || 'default';
   const counterFile = path.join(getStateDir(), `claude-tool-count-${sessionId}`);
-  const budgetFile = path.join(getStateDir(), `claude-token-budget-${sessionId}`);
   intelLog('suggest-compact', 'debug', 'hook fired',
     { sessionId, preserveGlobs: preserveGlobs.length });
   const threshold = Number.isFinite(cfg.threshold) && cfg.threshold > 0 && cfg.threshold <= 10000
@@ -165,36 +171,53 @@ async function main() {
     if (Number.isFinite(parsed) && parsed > 0) count = parsed;
   } catch { /* no count yet — tracker hasn't run */ }
 
-  // Token budget — prefer the authoritative count from the transcript's latest
-  // assistant-message usage block (same source the status line reads). Fall
-  // back to the tracker estimate when the transcript isn't available or the
-  // hook runs before any assistant reply. The tracker estimate only counts
-  // tool I/O and misses messages/prompts/thinking, so it can severely
-  // under-report on long sessions.
-  let tokenBudget = 0;
-  let tokenSource = 'none';
+  // Token budget — the transcript's latest assistant usage block is the only
+  // source for zone decisions. No usage line (fresh session, user-only tail)
+  // means tokenSource 'none' and the zone gate stays silent; the chars/4
+  // tool-I/O estimate is never a fallback.
   const transcriptPath = stdinInput && stdinInput.transcript_path;
-  const transcriptTokens = readTranscriptTokens(transcriptPath);
-  if (transcriptTokens > 0) {
-    tokenBudget = transcriptTokens;
-    tokenSource = 'transcript';
-  } else {
+  const latest = readLatestUsage(transcriptPath, { sessionId });
+  const tokenBudget = latest ? latest.contextTokens : 0;
+  const tokenSource = latest ? latest.source : 'none';
+  const model = (latest && latest.model) || null;
+  // Per-turn cache-hit series: one row per new assistant message id.
+  try {
+    const ratio = costEst && latest && latest.messageId ? costEst.cacheHitRatio(latest.usage) : null;
+    if (ratio !== null && latest.messageId !== lastRecordedOf(sessionId)) {
+      const u = latest.usage;
+      require(path.join(SI_LIB, 'events')).recordCacheHit({
+        sid: sessionId, t: Date.now(), model, messageId: latest.messageId, ratio,
+        cacheRead: u.cache_read_input_tokens, cacheCreation: u.cache_creation_input_tokens,
+        contextTokens: latest.contextTokens,
+      });
+      markRecorded(sessionId, latest.messageId);
+    }
+  } catch { /* telemetry is best-effort */ }
+  let cap = 0;
+  let fillPct = 0;
+  let autoPoint = 0;
+  let settings = null;
+  if (latest) {
     try {
-      const raw = fs.readFileSync(budgetFile, 'utf8').trim();
-      const parsed = parseInt(raw, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        tokenBudget = parsed;
-        tokenSource = 'estimate';
-      }
-    } catch { /* no budget file yet — tracker hasn't run */ }
+      settings = loadSettingsForCwd(stdinCwd);
+      cap = resolveContextCap({
+        model,
+        env: process.env,
+        settings,
+        configCap: fullCfg.statusline && fullCfg.statusline.contextCap,
+      }).cap;
+      fillPct = fillPctOf(tokenBudget, cap);
+      autoPoint = resolveAutoCompactPoint({ cap, model, env: process.env, settings }).point;
+    } catch { /* cap is best-effort telemetry */ }
+  }
+  if (tokenBudget > 0) {
+    try { updatePeak(sessionId, tokenBudget); } catch { /* best effort */ }
   }
   intelLog('suggest-compact', 'debug', 'token budget resolved',
     { tokenBudget, tokenSource });
 
-  // Session cost — surfaced in the escalation message and fed into
-  // adaptiveZones so expensive sessions compact earlier (Q2 cost-band
-  // tightening). Pulled from transcript usage; 0 when transcript isn't
-  // available.
+  // Session cost — surfaced in the escalation message. Pulled from
+  // transcript usage; 0 when transcript isn't available.
   let sessionCost = 0;
   try {
     if (costEst && transcriptPath) {
@@ -204,25 +227,22 @@ async function main() {
   } catch { /* best effort */ }
 
   // Zones: prefer adaptive thresholds derived from the user's own compact
-  // history when ≥5 samples are available. Otherwise fall back to the
-  // static 200/300/400k defaults. adaptiveZones() is bounded ±30% from the
-  // defaults so a noisy history can't silence the warnings entirely.
+  // history when ≥5 fill-based samples (fillPct of the window, scaled by the
+  // resolved `cap`) are available; legacy and no-usage entries are ignored and
+  // without a cap the static defaults stand. adaptiveZones() is bounded ±30%
+  // from the defaults so a noisy history can't silence the warnings entirely.
   //
-  // Per-cwd bucketing: when this repo has ≥5 of its own compacts, zones
+  // Per-cwd bucketing: when this repo has ≥5 valid samples of its own, zones
   // derive from those alone; otherwise cross-project history is used so
   // new repos still benefit from global learning.
-  //
-  // Cost-band: when sessionCost exceeds the user's historical p75 cost,
-  // orange tightens by 12% — expensive sessions warrant earlier warnings.
   const cwdForZones = (stdinInput && (stdinInput.cwd || (stdinInput.workspace && stdinInput.workspace.current_dir))) || process.cwd();
   // Single source of truth — same thresholds the statusline paints with.
-  // Avoids the misalignment where `statusline.zones` was customised but the
-  // hook's hardcoded {200k,300k,400k} fell out of sync.
+  // Fractions of the resolved window (or absolute `statusline.zones`).
   let baseZones;
   try {
     const cfgMod = require(path.join(SI_LIB, 'config'));
     baseZones = cfgMod.getZoneThresholds
-      ? cfgMod.getZoneThresholds(fullCfg)
+      ? cfgMod.getZoneThresholds(fullCfg, { cap: cap > 0 ? cap : undefined })
       : { yellow: 200000, orange: 300000, red: 400000 };
   } catch {
     baseZones = { yellow: 200000, orange: 300000, red: 400000 };
@@ -233,7 +253,7 @@ async function main() {
       zonesCfg = compactHistory.adaptiveZones(
         compactHistory.readHistory(),
         baseZones,
-        { cwd: cwdForZones, currentCost: sessionCost });
+        { cwd: cwdForZones, cap: cap > 0 ? cap : null });
     }
   } catch { /* keep static */ }
 
@@ -367,12 +387,27 @@ async function main() {
       // Subtle label so the model can tell crossings apart from re-fires —
       // useful when scanning logs for "is this a fresh signal or a reminder?"
       const header = grewEnough ? `${baseHeader} (still)` : baseHeader;
-      const costStr = (!stablePrefix && costEst && sessionCost > 0)
-        ? `, ${costEst.formatUsd(sessionCost)} spent` : '';
-      const tokStr = stablePrefix ? '' : ` — context at ~${formatTokens(tokenBudget)} tokens${costStr}`;
+      const canShowNumbers = !stablePrefix && cap > 0 && autoPoint > 0;
+      const tokStr = canShowNumbers
+        ? numbersSegment({
+          fillPct, cap, point: autoPoint, contextTokens: tokenBudget,
+          bucketStep: fullCfg.compact && fullCfg.compact.calloutBucketPct,
+        })
+        : '';
       const headline = `[StrategicCompact] ${header}${tokStr}. Advisory only — continue if the task needs full context.`;
       const body = [];
       if (diagnosis) body.push(`Observed: ${diagnosis}.`);
+      if (!stablePrefix) {
+        const shapeEntries = readShape(sessionId);
+        const largeLine = largeResultsLine(countLargeResults(shapeEntries));
+        if (largeLine) body.push(largeLine);
+        const phaseLine = phaseBoundaryLine(shapeEntries);
+        if (phaseLine) body.push(phaseLine);
+      }
+      const dupReads = (shape && shape.duplicates && shape.duplicates.reads) || [];
+      for (const d of dupReads.slice(0, MAX_DUP_READ_LINES)) {
+        body.push(`Duplicate reads: ${d.file} ×${d.count} — later reads add no information; prefer the latest copy.`);
+      }
 
       // Memory-offload nudge — give Claude a turn to write rich detail to
       // auto-memory BEFORE /compact collapses it. Context is still live at
@@ -394,11 +429,6 @@ async function main() {
         const scope = zonesCfg.bucket === 'cwd' ? 'this repo' : 'your history';
         body.push(
           `(Zones adapted to ${scope}: orange=${formatTokens(zonesCfg.orange)}, red=${formatTokens(zonesCfg.red)}, ${zonesCfg.sampleCount} past compacts.)`
-        );
-      }
-      if (!stablePrefix && zonesCfg.costTightened) {
-        body.push(
-          `(Orange tightened 12%: session cost ${costEst ? costEst.formatUsd(sessionCost) : `$${sessionCost.toFixed(2)}`} exceeds your historical p75 — expensive sessions warrant earlier warnings.)`
         );
       }
       if (learnCfg.announce === true && compactHistory && compactHistory.announceAdaptiveShift) {
@@ -428,7 +458,7 @@ async function main() {
         emitReason: grewEnough ? 'refire' : 'crossing',
         sessionCost,
         zonesAdaptive: !!zonesCfg.adaptive,
-        costTightened: !!zonesCfg.costTightened,
+        fillPct, cap, model,
         shape: shape ? { hot: shape.hot.length, cold: shape.cold.length, shift: !!shape.shift, stale: shape.staleTokens } : null,
       });
       // Mirror to events DB for /si stats. Best-effort.
@@ -445,6 +475,10 @@ async function main() {
           tokens: tokenBudget,
           cost: Number.isFinite(sessionCost) ? sessionCost : null,
           reason: grewEnough ? 'refire' : 'crossing',
+          contextCap: cap,
+          fillPct,
+          model,
+          trigger: (stdinInput && stdinInput.tool_name) || null,
         });
       } catch { /* events lib optional */ }
       process.exit(2); // PostToolUse exit 2 = stderr surfaces to assistant; tool NOT blocked

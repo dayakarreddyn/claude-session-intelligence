@@ -27,6 +27,7 @@ const path = require('path');
 let _db = null;
 let _dbAttempted = false;
 let _dbDisabled = false;
+let _driver = null; // name of the opened SQLite driver (see driverName)
 let _dbPathOverride = null; // set by _setDbPathForTest
 
 function getEventsDbPath() {
@@ -46,24 +47,17 @@ function openDb() {
   if (_db) return _db;
   if (_dbDisabled || _dbAttempted) return _db;
   _dbAttempted = true;
-  let Sqlite;
-  try { Sqlite = require('better-sqlite3'); }
-  catch (err) {
-    // Native module missing or failed to load — disable for the process.
-    // Caller should already be in a try/catch but log for diagnosability.
-    try {
-      const { intelLog } = require('./intel-debug');
-      intelLog('events', 'debug', 'better-sqlite3 unavailable', { err: err && err.message });
-    } catch { /* optional */ }
-    _dbDisabled = true;
-    return null;
-  }
   try {
-    _db = new Sqlite(getEventsDbPath());
+    // better-sqlite3 when its native binary matches this Node ABI, otherwise
+    // the built-in node:sqlite (Node >= 22.13). See lib/sqlite-driver.js.
+    const { openDatabase } = require('./sqlite-driver');
+    const opened = openDatabase(getEventsDbPath());
+    _db = opened.db;
     _db.pragma('journal_mode = WAL');
     _db.pragma('synchronous = NORMAL');
     _db.pragma('foreign_keys = ON');
     initSchema(_db);
+    _driver = opened.driver;
     return _db;
   } catch (err) {
     try {
@@ -75,180 +69,13 @@ function openDb() {
   }
 }
 
-/**
- * Schema is single-version, additive only. New tables append; new columns
- * use ADD COLUMN guarded by a probe. Drop-and-recreate is never allowed
- * once a release is out — the events DB is durable user data.
- *
- * Tables:
- *   sessions          — one row per Claude Code session lifecycle
- *   compacts          — one row per /compact event (manual or auto)
- *   zone_transitions  — yellow/orange/red callouts from suggest-compact
- *   tool_archives     — large tool-response captures (post-compact recall)
- *   agent_invocations — Task tool calls (subagent runs) — type, sizes, duration
- */
-function initSchema(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      sid          TEXT PRIMARY KEY,
-      project      TEXT,
-      cwd          TEXT,
-      started_at   INTEGER NOT NULL,
-      ended_at     INTEGER,
-      total_cost_usd REAL,
-      peak_tokens  INTEGER,
-      tool_calls   INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS sessions_project_idx ON sessions(project);
-    CREATE INDEX IF NOT EXISTS sessions_started_idx ON sessions(started_at);
-
-    CREATE TABLE IF NOT EXISTS compacts (
-      id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      sid           TEXT NOT NULL,
-      project       TEXT,
-      cwd           TEXT,
-      t             INTEGER NOT NULL,
-      tokens        INTEGER,
-      cost          REAL,
-      cost_at_compact REAL,
-      hot_dirs      TEXT,
-      warm_dirs     TEXT,
-      dropped_dirs  TEXT,
-      had_shift     INTEGER,
-      trigger       TEXT
-    );
-    CREATE INDEX IF NOT EXISTS compacts_sid_idx ON compacts(sid);
-    CREATE INDEX IF NOT EXISTS compacts_project_idx ON compacts(project);
-    CREATE INDEX IF NOT EXISTS compacts_t_idx ON compacts(t);
-
-    CREATE TABLE IF NOT EXISTS zone_transitions (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      sid          TEXT NOT NULL,
-      project      TEXT,
-      t            INTEGER NOT NULL,
-      from_zone    TEXT,
-      to_zone      TEXT NOT NULL,
-      tokens       INTEGER,
-      cost         REAL,
-      reason       TEXT
-    );
-    CREATE INDEX IF NOT EXISTS zone_transitions_sid_idx ON zone_transitions(sid);
-    CREATE INDEX IF NOT EXISTS zone_transitions_project_idx ON zone_transitions(project);
-
-    CREATE TABLE IF NOT EXISTS tool_archives (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      sid          TEXT NOT NULL,
-      tool_use_id  TEXT NOT NULL,
-      tool         TEXT,
-      chars        INTEGER,
-      t            INTEGER NOT NULL,
-      recalled     INTEGER DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS tool_archives_sid_idx ON tool_archives(sid);
-    CREATE INDEX IF NOT EXISTS tool_archives_tuid_idx ON tool_archives(tool_use_id);
-
-    CREATE TABLE IF NOT EXISTS agent_invocations (
-      id             INTEGER PRIMARY KEY AUTOINCREMENT,
-      sid            TEXT NOT NULL,
-      tool_use_id    TEXT,
-      subagent_type  TEXT,
-      description    TEXT,
-      prompt_chars   INTEGER,
-      response_chars INTEGER,
-      duration_ms    INTEGER,
-      t              INTEGER NOT NULL,
-      is_error       INTEGER DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS agent_invocations_sid_idx ON agent_invocations(sid);
-    CREATE INDEX IF NOT EXISTS agent_invocations_t_idx ON agent_invocations(t);
-    CREATE INDEX IF NOT EXISTS agent_invocations_type_idx ON agent_invocations(subagent_type);
-
-    CREATE TABLE IF NOT EXISTS session_model_costs (
-      sid       TEXT NOT NULL,
-      model     TEXT NOT NULL,
-      cost_usd  REAL,
-      t         INTEGER NOT NULL,
-      PRIMARY KEY (sid, model)
-    );
-    CREATE INDEX IF NOT EXISTS session_model_costs_t_idx ON session_model_costs(t);
-  `);
-
-  // Additive migration: new columns for derived usage/cost on agent_invocations.
-  // Wrapped in try/catch so existing rows aren't disturbed and a half-completed
-  // ALTER doesn't crash the open. Each column is independently added.
-  const addCols = [
-    "ALTER TABLE agent_invocations ADD COLUMN model TEXT",
-    "ALTER TABLE agent_invocations ADD COLUMN input_tokens INTEGER",
-    "ALTER TABLE agent_invocations ADD COLUMN output_tokens INTEGER",
-    "ALTER TABLE agent_invocations ADD COLUMN cache_creation_tokens INTEGER",
-    "ALTER TABLE agent_invocations ADD COLUMN cache_read_tokens INTEGER",
-    "ALTER TABLE agent_invocations ADD COLUMN cost_usd REAL",
-  ];
-  for (const sql of addCols) {
-    try { db.exec(sql); } catch { /* column already exists — expected */ }
-  }
-
-  // One-time project-key normalization (user_version 0 → 1).
-  // Writers historically disagreed on the `project` value: sessions stored
-  // the repo-root basename (CSM), compacts stored the encoded projects-dir
-  // slug (-Users-0xd-DWS-CSM), and zone_transitions stored the cwd leaf
-  // (mm/e2e/providers). That broke `/si stats --project=<name>` and any raw
-  // per-project query. Backfill compacts + zone_transitions from the
-  // authoritative sessions.project via sid so existing rows become usable.
-  // Rows whose sid has no session (e.g. subagent `agent-*` ids) are left as-is.
-  try {
-    const ver = db.pragma('user_version', { simple: true });
-    if (!ver || ver < 1) {
-      db.exec(`
-        UPDATE compacts SET project = (
-          SELECT s.project FROM sessions s WHERE s.sid = compacts.sid
-        ) WHERE EXISTS (
-          SELECT 1 FROM sessions s WHERE s.sid = compacts.sid AND s.project IS NOT NULL
-        );
-        UPDATE zone_transitions SET project = (
-          SELECT s.project FROM sessions s WHERE s.sid = zone_transitions.sid
-        ) WHERE EXISTS (
-          SELECT 1 FROM sessions s WHERE s.sid = zone_transitions.sid AND s.project IS NOT NULL
-        );
-      `);
-      db.pragma('user_version = 1');
-    }
-  } catch { /* backfill is best-effort — the sid-join read path still works */ }
-
-  // One-time cost reprice (user_version 1 → 2). The pricing table shipped
-  // with only opus/sonnet/haiku family entries at legacy Opus 4.1-era rates;
-  // Opus 4.5+ actually bills at $5/$25 (rows were ~3x overstated) and the
-  // Claude 5 family (Fable/Mythos) fell through to the Opus default.
-  // Token counts on the rows are authoritative, so recompute cost_usd from
-  // the current per-model table. Rows without a model or tokens are skipped.
-  try {
-    const ver = db.pragma('user_version', { simple: true });
-    if (ver < 2) {
-      const { priceForModel, costFromUsage } = require('./cost-estimation');
-      const rows = db.prepare(`
-        SELECT id, model, t, input_tokens, output_tokens,
-               cache_creation_tokens, cache_read_tokens
-        FROM agent_invocations
-        WHERE model IS NOT NULL AND model != ''
-          AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
-      `).all();
-      const upd = db.prepare('UPDATE agent_invocations SET cost_usd = ? WHERE id = ?');
-      const reprice = db.transaction((all) => {
-        for (const r of all) {
-          const cost = costFromUsage({
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            cache_creation_input_tokens: r.cache_creation_tokens,
-            cache_read_input_tokens: r.cache_read_tokens,
-          }, priceForModel(r.model, r.t || Date.now()));
-          upd.run(cost, r.id);
-        }
-      });
-      reprice(rows);
-      db.pragma('user_version = 2');
-    }
-  } catch { /* best-effort — unpriced rows are still better than a crash */ }
+/** Driver backing the open DB (`better-sqlite3` | `node:sqlite`), or null when unopened. */
+function driverName() {
+  return _driver;
 }
+
+/** Schema and migrations live in lib/events-migrations.js. */
+const { initSchema } = require('./events-migrations');
 
 // ─── Writers ────────────────────────────────────────────────────────────────
 
@@ -287,20 +114,37 @@ function recordSessionEnd({ sid, endedAt, totalCostUsd, peakTokens, toolCalls })
   } catch { return false; }
 }
 
+/** Canonical project for a row: the sessions row wins, else the caller's key, else the cwd's repo key. */
+function canonicalProject(db, sid, project, cwd) {
+  let fallback = project || null;
+  if (!fallback && cwd) {
+    try { fallback = require('./context-shape').projectKeyOf(cwd); } catch { fallback = null; }
+  }
+  const row = db.prepare('SELECT project FROM sessions WHERE sid = ?').get(sid);
+  return (row && row.project) || fallback;
+}
+
 function recordCompact(entry) {
   const db = openDb();
   if (!db || !entry || !entry.sid) return false;
   try {
+    const t = Number.isFinite(entry.t) ? entry.t : Date.now();
+    const project = canonicalProject(db, entry.sid, entry.project, entry.cwd);
+    // A compact without a session row would vanish from per-project tables.
+    db.prepare('INSERT OR IGNORE INTO sessions (sid, project, cwd, started_at) VALUES (?, ?, ?, ?)')
+      .run(entry.sid, project, entry.cwd || null, t);
+    const tokens = Number.isFinite(entry.tokens) ? entry.tokens : entry.contextTokens;
     db.prepare(`
       INSERT INTO compacts
-        (sid, project, cwd, t, tokens, cost, cost_at_compact, hot_dirs, warm_dirs, dropped_dirs, had_shift, trigger)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (sid, project, cwd, t, tokens, cost, cost_at_compact, hot_dirs, warm_dirs, dropped_dirs, had_shift, trigger,
+         context_cap, fill_pct, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.sid,
-      entry.project || null,
+      project,
       entry.cwd || null,
-      Number.isFinite(entry.t) ? entry.t : Date.now(),
-      Number.isFinite(entry.tokens) ? entry.tokens : null,
+      t,
+      Number.isFinite(tokens) ? tokens : null,
       Number.isFinite(entry.cost) ? entry.cost : null,
       Number.isFinite(entry.costAtCompactUsd) ? entry.costAtCompactUsd : null,
       JSON.stringify(entry.hotDirs || []),
@@ -308,29 +152,125 @@ function recordCompact(entry) {
       JSON.stringify(entry.droppedDirs || []),
       entry.hadShift ? 1 : 0,
       entry.trigger || null,
+      Number.isFinite(entry.contextCap) ? entry.contextCap : null,
+      Number.isFinite(entry.fillPct) ? entry.fillPct : null,
+      entry.model || null,
     );
     return true;
   } catch { return false; }
 }
 
-function recordZoneTransition({ sid, project, t, fromZone, toZone, tokens, cost, reason }) {
+/**
+ * Back-fill compacts rows from compact-history entries whose DB write never
+ * happened (the hook died between the JSONL append and the insert). Keyed on
+ * (sid, t) so it is safe to run every SessionStart. Returns rows inserted.
+ */
+function reconcileCompactHistory(entries) {
+  const db = openDb();
+  if (!db || !Array.isArray(entries)) return 0;
+  let inserted = 0;
+  try {
+    const exists = db.prepare('SELECT 1 FROM compacts WHERE sid = ? AND t = ? LIMIT 1');
+    for (const e of entries) {
+      if (!e || !e.sid || !Number.isFinite(e.t)) continue;
+      if (exists.get(e.sid, e.t)) continue;
+      if (recordCompact(e)) inserted += 1;
+    }
+  } catch { /* best-effort — next session retries */ }
+  return inserted;
+}
+
+function recordZoneTransition({
+  sid, project, t, fromZone, toZone, tokens, cost, reason,
+  contextCap, fillPct, model, trigger,
+}) {
   const db = openDb();
   if (!db || !sid || !toZone) return false;
   try {
+    const canonical = canonicalProject(db, sid, project, null);
     db.prepare(`
       INSERT INTO zone_transitions
-        (sid, project, t, from_zone, to_zone, tokens, cost, reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (sid, project, t, from_zone, to_zone, tokens, cost, reason,
+         context_cap, fill_pct, model, trigger)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      sid, project || null,
+      sid, canonical,
       Number.isFinite(t) ? t : Date.now(),
       fromZone || null, toZone,
       Number.isFinite(tokens) ? tokens : null,
       Number.isFinite(cost) ? cost : null,
       reason || null,
+      Number.isFinite(contextCap) ? contextCap : null,
+      Number.isFinite(fillPct) ? fillPct : null,
+      model || null,
+      trigger || null,
     );
     return true;
   } catch { return false; }
+}
+
+function finiteOrNull(n) { return Number.isFinite(n) ? n : null; }
+
+function recordCompactOutcome({
+  sid, project, t, compactT, trigger, summaryChars, constraintsTotal,
+  constraintsRetained, retention, missing, fillBefore, contextCap, model,
+}) {
+  const db = openDb();
+  if (!db || !sid) return false;
+  try {
+    db.prepare(`
+      INSERT INTO compact_outcomes
+        (sid, project, t, compact_t, trigger, summary_chars, constraints_total,
+         constraints_retained, retention, missing, fill_before, context_cap, model)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, project || null,
+      Number.isFinite(t) ? t : Date.now(),
+      finiteOrNull(compactT), trigger || null, finiteOrNull(summaryChars),
+      finiteOrNull(constraintsTotal), finiteOrNull(constraintsRetained),
+      finiteOrNull(retention),
+      Array.isArray(missing) ? JSON.stringify(missing) : null,
+      finiteOrNull(fillBefore), finiteOrNull(contextCap), model || null,
+    );
+    return true;
+  } catch { return false; }
+}
+
+/** One row per assistant message; a repeat of (sid, messageId) is ignored. */
+function recordCacheHit({ sid, t, model, messageId, ratio, cacheRead, cacheCreation, contextTokens } = {}) {
+  const db = openDb();
+  if (!db || !sid || !messageId) return false;
+  try {
+    const res = db.prepare(`
+      INSERT OR IGNORE INTO cache_hits
+        (sid, t, model, message_id, ratio, cache_read, cache_creation, context_tokens)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, Number.isFinite(t) ? t : Date.now(), model || null, messageId,
+      finiteOrNull(ratio), finiteOrNull(cacheRead), finiteOrNull(cacheCreation), finiteOrNull(contextTokens),
+    );
+    return res.changes > 0;
+  } catch { return false; }
+}
+
+function stampCompactOutcomeAfter({ sid, compactT, fillAfter } = {}) {
+  const db = openDb();
+  if (!db || !sid || !Number.isFinite(compactT) || !Number.isFinite(fillAfter)) return false;
+  try {
+    const res = db.prepare('UPDATE compact_outcomes SET fill_after = ? WHERE sid = ? AND compact_t = ?')
+      .run(fillAfter, sid, compactT);
+    return res.changes > 0;
+  } catch { return false; }
+}
+
+/** Timestamp of the newest compacts row for a session, or null. */
+function latestCompactTime(sid) {
+  const db = openDb();
+  if (!db || !sid) return null;
+  try {
+    const row = db.prepare('SELECT t FROM compacts WHERE sid = ? ORDER BY t DESC LIMIT 1').get(sid);
+    return row && Number.isFinite(row.t) ? row.t : null;
+  } catch { return null; }
 }
 
 function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
@@ -349,6 +289,36 @@ function recordToolArchive({ sid, toolUseId, tool, chars, t }) {
   } catch { return false; }
 }
 
+function recordRerun({ sid, t, tool, inputHash, gapCalls, wasPruned }) {
+  const db = openDb();
+  if (!db || !sid || !inputHash) return false;
+  try {
+    db.prepare(`
+      INSERT INTO tool_reruns (sid, t, tool, input_hash, gap_calls, was_pruned)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      sid, Number.isFinite(t) ? t : Date.now(), tool || null, String(inputHash),
+      Number.isFinite(gapCalls) ? gapCalls : null, wasPruned ? 1 : 0,
+    );
+    return true;
+  } catch { return false; }
+}
+
+/** Price a row from its tokens and model; null while either is still unknown. */
+function costFromTokens({ model, t, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens }) {
+  const hasTokens = [inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens].some(Number.isFinite);
+  if (!model || !hasTokens) return null;
+  try {
+    const { priceForModel, costFromUsage } = require('./cost-estimation');
+    return costFromUsage({
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: cacheCreationTokens,
+      cache_read_input_tokens: cacheReadTokens,
+    }, priceForModel(model, Number.isFinite(t) ? t : Date.now()));
+  } catch { return null; }
+}
+
 function recordAgentInvocation({
   sid, toolUseId, subagentType, description,
   promptChars, responseChars, durationMs, t, isError,
@@ -357,6 +327,9 @@ function recordAgentInvocation({
   const db = openDb();
   if (!db || !sid) return false;
   try {
+    const pricedUsd = Number.isFinite(costUsd) ? costUsd : costFromTokens({
+      model, t, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
+    });
     db.prepare(`
       INSERT INTO agent_invocations
         (sid, tool_use_id, subagent_type, description,
@@ -377,7 +350,7 @@ function recordAgentInvocation({
       Number.isFinite(outputTokens) ? outputTokens : null,
       Number.isFinite(cacheCreationTokens) ? cacheCreationTokens : null,
       Number.isFinite(cacheReadTokens) ? cacheReadTokens : null,
-      Number.isFinite(costUsd) ? costUsd : null,
+      pricedUsd,
     );
     return true;
   } catch { return false; }
@@ -549,8 +522,8 @@ function agentModelCosts(sid) {
 /**
  * Upsert the CURRENT per-model transcript spend for a session — written by
  * the statusline each redraw (cheap: one WAL upsert per model). This is the
- * cross-session record that weeklyModelSpend aggregates; parent-session
- * per-model splits exist nowhere else once the transcript ages out.
+ * cross-session record (read by /si stats); parent-session per-model splits
+ * exist nowhere else once the transcript ages out.
  */
 function upsertSessionModelCosts(sid, byModel) {
   const db = openDb();
@@ -573,26 +546,13 @@ function upsertSessionModelCosts(sid, byModel) {
   } catch { return false; }
 }
 
-/**
- * Per-model tracked spend over the trailing window: parent-session splits
- * (session_model_costs) + subagent runs (agent_invocations). Feeds the
- * statusline's per-model weekly-remaining estimate. [{ model, cost_usd }],
- * highest spend first. Never throws.
- */
-function weeklyModelSpend({ days = 7 } = {}) {
+function markArchivePruned(toolUseId) {
   const db = openDb();
-  if (!db) return [];
+  if (!db || !toolUseId) return false;
   try {
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return db.prepare(`
-      SELECT model, SUM(cost_usd) AS cost_usd FROM (
-        SELECT model, cost_usd FROM session_model_costs WHERE t > ? AND cost_usd > 0
-        UNION ALL
-        SELECT model, cost_usd FROM agent_invocations
-        WHERE t > ? AND model IS NOT NULL AND model != '' AND cost_usd > 0
-      ) GROUP BY model ORDER BY cost_usd DESC
-    `).all(cutoff, cutoff);
-  } catch { return []; }
+    db.prepare('UPDATE tool_archives SET pruned = 1 WHERE tool_use_id = ?').run(toolUseId);
+    return true;
+  } catch { return false; }
 }
 
 function markArchiveRecalled(toolUseId) {
@@ -639,235 +599,14 @@ function deleteToolArchives(ids) {
   } catch { return deleted; }
 }
 
-// ─── Readers ────────────────────────────────────────────────────────────────
+// ─── Readers (bodies in lib/events-stats.js) ───────────────────────────────
 
-function aggregateStats({ sinceDays = 30, project = null } = {}) {
-  const db = openDb();
-  if (!db) return null;
-  try {
-    const cutoff = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
-    const projectClause = project ? 'AND project = ?' : '';
-    const projectArgs = project ? [project] : [];
-
-    const sessions = db.prepare(`
-      SELECT COUNT(*) AS n, SUM(total_cost_usd) AS cost,
-             AVG(peak_tokens) AS avg_peak, MAX(peak_tokens) AS max_peak,
-             AVG(total_cost_usd) AS avg_cost, SUM(tool_calls) AS tool_calls
-      FROM sessions WHERE started_at >= ? ${projectClause}
-    `).get(cutoff, ...projectArgs);
-
-    const compacts = db.prepare(`
-      SELECT COUNT(*) AS n, AVG(tokens) AS avg_tokens, AVG(cost) AS avg_cost,
-             SUM(cost) AS total_cost, SUM(had_shift) AS shifts,
-             MIN(tokens) AS min_tokens, MAX(tokens) AS max_tokens
-      FROM compacts WHERE t >= ? ${projectClause}
-    `).get(cutoff, ...projectArgs);
-
-    // Sorted token list → compute p50/p90 in JS (SQLite has no native percentile).
-    const compactTokens = db.prepare(`
-      SELECT tokens FROM compacts
-      WHERE t >= ? ${projectClause} AND tokens IS NOT NULL
-      ORDER BY tokens ASC
-    `).all(cutoff, ...projectArgs).map((r) => r.tokens);
-    const pct = (arr, p) => {
-      if (!arr.length) return null;
-      const i = Math.min(arr.length - 1, Math.floor(arr.length * p));
-      return arr[i];
-    };
-    const compactPercentiles = {
-      p50: pct(compactTokens, 0.5),
-      p90: pct(compactTokens, 0.9),
-    };
-
-    const zones = db.prepare(`
-      SELECT to_zone AS zone, COUNT(*) AS n
-      FROM zone_transitions WHERE t >= ? ${projectClause}
-      GROUP BY to_zone ORDER BY n DESC
-    `).all(cutoff, ...projectArgs);
-
-    const archives = db.prepare(`
-      SELECT COUNT(*) AS n, SUM(recalled) AS recalled, SUM(chars) AS bytes
-      FROM tool_archives WHERE t >= ?
-        ${project ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : ''}
-    `).get(cutoff, ...projectArgs);
-
-    // Agent (Task tool / subagent) usage. Aggregate totals + top-N by type.
-    const agentProjectClause = project
-      ? 'AND sid IN (SELECT sid FROM sessions WHERE project = ?)' : '';
-    const agents = db.prepare(`
-      SELECT COUNT(*) AS n,
-             SUM(is_error) AS errors,
-             AVG(duration_ms) AS avg_ms,
-             SUM(duration_ms) AS total_ms,
-             SUM(prompt_chars) AS prompt_chars,
-             SUM(response_chars) AS response_chars,
-             SUM(input_tokens) AS input_tokens,
-             SUM(output_tokens) AS output_tokens,
-             SUM(cache_creation_tokens) AS cache_creation_tokens,
-             SUM(cache_read_tokens) AS cache_read_tokens,
-             SUM(cost_usd) AS cost_usd
-      FROM agent_invocations WHERE t >= ? ${agentProjectClause}
-    `).get(cutoff, ...projectArgs);
-    const agentTypes = db.prepare(`
-      SELECT subagent_type AS type, COUNT(*) AS n,
-             AVG(duration_ms) AS avg_ms,
-             SUM(is_error) AS errors,
-             SUM(input_tokens) AS input_tokens,
-             SUM(output_tokens) AS output_tokens,
-             SUM(cost_usd) AS cost_usd
-      FROM agent_invocations
-      WHERE t >= ? ${agentProjectClause} AND subagent_type IS NOT NULL
-      GROUP BY subagent_type ORDER BY cost_usd DESC NULLS LAST, n DESC LIMIT 10
-    `).all(cutoff, ...projectArgs);
-
-    // Per-day series (cost + sessions + compacts). Local-day bucketed.
-    // Day key: "YYYY-MM-DD" — small integer-ish key, easy to sort/render.
-    const dayKey = (ms) => {
-      const d = new Date(ms);
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      return `${y}-${m}-${day}`;
-    };
-    // ISO-ish week key "YYYY-Www" using Monday as week start. Computed by
-    // shifting each date back to its Monday and using that day's date as the
-    // week label (avoids cross-year ISO-week edge-case complexity for our
-    // purposes — we only need stable bucketing within ~1y).
-    const weekKey = (ms) => {
-      const d = new Date(ms);
-      d.setHours(0, 0, 0, 0);
-      const dow = (d.getDay() + 6) % 7; // Mon=0..Sun=6
-      d.setDate(d.getDate() - dow);
-      return dayKey(d.getTime());
-    };
-    const byDay = new Map();
-    const byWeek = new Map();
-    const ensureDay = (k) => {
-      if (!byDay.has(k)) byDay.set(k, { day: k, cost: 0, sessions: 0, compacts: 0 });
-      return byDay.get(k);
-    };
-    const ensureWeek = (k) => {
-      if (!byWeek.has(k)) byWeek.set(k, { week: k, cost: 0, sessions: 0, compacts: 0 });
-      return byWeek.get(k);
-    };
-    const sessionRows = db.prepare(`
-      SELECT started_at AS t, total_cost_usd AS cost
-      FROM sessions WHERE started_at >= ? ${projectClause}
-    `).all(cutoff, ...projectArgs);
-    for (const r of sessionRows) {
-      const d = ensureDay(dayKey(r.t));
-      d.sessions += 1;
-      if (Number.isFinite(r.cost)) d.cost += r.cost;
-      const w = ensureWeek(weekKey(r.t));
-      w.sessions += 1;
-      if (Number.isFinite(r.cost)) w.cost += r.cost;
-    }
-    const compactRows = db.prepare(`
-      SELECT t, cost FROM compacts WHERE t >= ? ${projectClause}
-    `).all(cutoff, ...projectArgs);
-    for (const r of compactRows) {
-      const d = ensureDay(dayKey(r.t));
-      d.compacts += 1;
-      const w = ensureWeek(weekKey(r.t));
-      w.compacts += 1;
-      // compact cost is already counted in session totals — don't double-add
-    }
-    // Fill day calendar gaps so the sparkline is honest about idle days.
-    // Each entry also carries its share of the window's total spend.
-    const totalCostInWindow = sessionRows.reduce(
-      (s, r) => s + (Number.isFinite(r.cost) ? r.cost : 0), 0);
-    const dailySeries = [];
-    const now = new Date();
-    for (let i = sinceDays - 1; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-      const k = dayKey(d.getTime());
-      const entry = byDay.get(k) || { day: k, cost: 0, sessions: 0, compacts: 0 };
-      entry.pct = totalCostInWindow > 0 ? entry.cost / totalCostInWindow : 0;
-      dailySeries.push(entry);
-    }
-    // Fill week gaps for the same window. Iterate forward from the Monday on
-    // or before the cutoff so the bucket alignment is stable across runs.
-    const weeklySeries = [];
-    const cutoffMonday = (() => {
-      const d = new Date(cutoff);
-      d.setHours(0, 0, 0, 0);
-      const dow = (d.getDay() + 6) % 7;
-      d.setDate(d.getDate() - dow);
-      return d;
-    })();
-    for (let cursor = new Date(cutoffMonday); cursor.getTime() <= now.getTime(); cursor.setDate(cursor.getDate() + 7)) {
-      const k = weekKey(cursor.getTime());
-      const entry = byWeek.get(k) || { week: k, cost: 0, sessions: 0, compacts: 0 };
-      entry.pct = totalCostInWindow > 0 ? entry.cost / totalCostInWindow : 0;
-      weeklySeries.push(entry);
-    }
-    // Week-over-week delta on cost (current vs prior). Prior of the very
-    // first bucket is undefined → null, rendered as "—".
-    for (let i = 0; i < weeklySeries.length; i++) {
-      const prev = i > 0 ? weeklySeries[i - 1].cost : null;
-      const cur = weeklySeries[i].cost;
-      weeklySeries[i].wow = (prev === null || prev <= 0)
-        ? null
-        : (cur - prev) / prev;
-    }
-
-    // Per-project enrichment: sessions, cost, compacts, red-zone count, archive stats.
-    // Joins through sid (not project name) because compacts/zone_transitions
-    // historically stored the encoded directory slug while sessions store the
-    // basename — direct project=project comparisons never matched.
-    const perProject = project ? null : db.prepare(`
-      SELECT s.project AS project,
-             COUNT(DISTINCT s.sid) AS sessions,
-             SUM(s.total_cost_usd) AS cost,
-             AVG(s.peak_tokens)    AS avg_peak,
-             (SELECT COUNT(*) FROM compacts c
-                WHERE c.sid IN (SELECT sid FROM sessions WHERE project = s.project)
-                  AND c.t >= ?) AS compacts,
-             (SELECT COUNT(*) FROM zone_transitions z
-                WHERE z.sid IN (SELECT sid FROM sessions WHERE project = s.project)
-                  AND z.t >= ? AND z.to_zone = 'red') AS reds,
-             (SELECT COUNT(*) FROM zone_transitions z
-                WHERE z.sid IN (SELECT sid FROM sessions WHERE project = s.project)
-                  AND z.t >= ?) AS crossings,
-             (SELECT COUNT(*) FROM tool_archives ta
-                WHERE ta.sid IN (SELECT sid FROM sessions WHERE project = s.project)
-                  AND ta.t >= ?) AS archives,
-             (SELECT SUM(recalled) FROM tool_archives ta
-                WHERE ta.sid IN (SELECT sid FROM sessions WHERE project = s.project)
-                  AND ta.t >= ?) AS archives_recalled
-      FROM sessions s
-      WHERE s.started_at >= ? AND s.project IS NOT NULL
-      GROUP BY s.project ORDER BY cost DESC NULLS LAST, sessions DESC LIMIT 10
-    `).all(cutoff, cutoff, cutoff, cutoff, cutoff, cutoff);
-
-    // Recent compacts — same shape as listRecentCompacts but capped + project-scoped.
-    const recentCompacts = db.prepare(`
-      SELECT sid, project, t, tokens, cost, had_shift, trigger
-      FROM compacts WHERE t >= ? ${projectClause}
-      ORDER BY t DESC LIMIT 8
-    `).all(cutoff, ...projectArgs);
-
-    return {
-      sessions, compacts, compactPercentiles, zones, archives,
-      agents, agentTypes,
-      topProjects: perProject, perProject, dailySeries, weeklySeries, recentCompacts,
-      sinceDays, project,
-    };
-  } catch { return null; }
+function aggregateStats(opts) {
+  return require('./events-stats').aggregateStats(openDb(), opts);
 }
 
-function listRecentCompacts({ limit = 20, project = null } = {}) {
-  const db = openDb();
-  if (!db) return [];
-  try {
-    const projectClause = project ? 'WHERE project = ?' : '';
-    const args = project ? [project, limit] : [limit];
-    return db.prepare(`
-      SELECT sid, project, t, tokens, cost, cost_at_compact, had_shift, trigger
-      FROM compacts ${projectClause}
-      ORDER BY t DESC LIMIT ?
-    `).all(...args);
-  } catch { return []; }
+function listRecentCompacts(opts) {
+  return require('./events-stats').listRecentCompacts(openDb(), opts);
 }
 
 // Test seam — only used by tests to point the DB at a temp file.
@@ -887,13 +626,21 @@ function _resetForTest() {
 
 module.exports = {
   isAvailable,
+  driverName,
   getEventsDbPath,
   recordSessionStart,
   recordSessionEnd,
   recordCompact,
+  reconcileCompactHistory,
   recordZoneTransition,
+  recordCompactOutcome,
+  recordCacheHit,
+  stampCompactOutcomeAfter,
+  latestCompactTime,
   recordToolArchive,
+  recordRerun,
   markArchiveRecalled,
+  markArchivePruned,
   allToolArchiveKeys,
   deleteToolArchives,
   recordAgentInvocation,
@@ -901,7 +648,6 @@ module.exports = {
   reconcileSubagentUsage,
   agentModelCosts,
   upsertSessionModelCosts,
-  weeklyModelSpend,
   aggregateStats,
   listRecentCompacts,
   _setDbPathForTest,

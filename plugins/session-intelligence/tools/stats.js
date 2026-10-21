@@ -234,6 +234,11 @@ function renderHeadline(stats, sinceDays, project) {
     ['Peak tokens (max / avg)',
       `${fmtTokens(stats.sessions.max_peak)} / ${fmtTokens(stats.sessions.avg_peak)}`],
   ];
+  const cacheHits = Array.isArray(stats.cacheHits) ? stats.cacheHits : [];
+  if (cacheHits.length) {
+    rows.push(['Cache hit (mean per model)',
+      cacheHits.map((h) => `${h.model || 'unknown'} ${Math.round(h.avg_ratio * 100)}% (${h.n})`).join(', ')]);
+  }
   // Budget rows render whenever tracking is enabled (number cap OR "unlimited").
   // Unlimited prints "spend / unlimited (∞)" so the user sees the row but no alert.
   if (isBudgetEnabled(budget.daily) && today) {
@@ -374,7 +379,7 @@ function renderCompacts(stats) {
   const shiftPct = fmtPct(c0.shifts, c0.n);
   const rows = [
     ['Count',           String(c0.n)],
-    ['Total cost',      fmtUsd(totalCost)],
+    ['Session cost at last compact (sum)', fmtUsd(totalCost)],
     ['Avg cost',        fmtUsd(c0.avg_cost)],
     ['Tokens (avg)',    fmtTokens(c0.avg_tokens)],
     ['Tokens (p50/p90)',
@@ -383,7 +388,31 @@ function renderCompacts(stats) {
       `${fmtTokens(c0.min_tokens)} / ${fmtTokens(c0.max_tokens)}`],
     ['With domain shift', `${c0.shifts || 0} (${shiftPct})`],
   ];
+  const fill = stats.compactFill;
+  if (fill && (fill.auto.n || fill.manual.n)) {
+    const fmtFill = (f) => (f.n ? `${f.p50}%` : '-');
+    rows.push(['Fill at compact (auto p50 / manual p50)', `${fmtFill(fill.auto)} / ${fmtFill(fill.manual)}`]);
+  }
   const w = Math.max(...rows.map((r) => r[0].length));
+  for (const [k, v] of rows) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
+  return lines.join('\n');
+}
+
+function renderOutcomes(stats) {
+  const o = stats.outcomes;
+  if (!o || !o.n) return null;
+  const num = (v, fmt) => (Number.isFinite(v) ? fmt(v) : '-');
+  const pct1 = (v) => `${Math.round(v * 10) / 10}%`;
+  const rows = [
+    ['Count',              String(o.n)],
+    ['Retention (mean)',   num(o.avg_retention, (v) => `${Math.round(v * 100)}%`)],
+    ['Summary chars (mean)', num(o.avg_summary_chars, (v) => String(Math.round(v)))],
+    ['Fill before (auto / manual)',
+      `${num(o.avg_fill_before_auto, pct1)} / ${num(o.avg_fill_before_manual, pct1)}`],
+    ['Fill after (mean)',  num(o.avg_fill_after, pct1)],
+  ];
+  const w = Math.max(...rows.map((r) => r[0].length));
+  const lines = [header('COMPACT OUTCOMES', 'PostCompact telemetry'), ''];
   for (const [k, v] of rows) lines.push(`  ${c('dim', k.padEnd(w))}   ${v}`);
   return lines.join('\n');
 }
@@ -415,12 +444,14 @@ function renderZones(stats) {
   return lines.join('\n');
 }
 
-function renderArchives(a) {
+function renderArchives(a, r = {}) {
   const lines = [header('TOOL-RESPONSE ARCHIVE', 'snapshots for post-compact recall'), ''];
   const recallPct = fmtPct(a.recalled, a.n);
   const rows = [
     ['Snapshots',  String(a.n || 0)],
     ['Recalled',   `${a.recalled || 0} (${recallPct})`],
+    ['Pruned',     String(a.pruned || 0)],
+    ['Re-runs (same tool+input ≤20 calls)', String(r.n || 0)],
     ['Total size', fmtBytes(a.bytes)],
   ];
   const w = Math.max(...rows.map((r) => r[0].length));
@@ -453,7 +484,7 @@ function renderAgents(stats) {
   const summary = [
     ['Invocations', String(a.n)],
     ['Errors',      `${a.errors || 0} (${errPct})`],
-    ['Cost',        fmtUsd(a.cost_usd)],
+    ['Cost',        a.unpriced ? `${fmtUsd(a.cost_usd)}  (${a.unpriced} unpriced)` : fmtUsd(a.cost_usd)],
     ['Tokens',      `${fmtTokens(totalTokens)}  (in ${fmtTokens(a.input_tokens)} · out ${fmtTokens(a.output_tokens)} · cache_r ${fmtTokens(a.cache_read_tokens)})`],
     ['Duration',    `${fmtDuration(a.total_ms)} total · avg ${fmtDuration(a.avg_ms)}`],
     ['Prompt I/O',  `${fmtBytes(a.prompt_chars)} in / ${fmtBytes(a.response_chars)} out`],
@@ -524,7 +555,7 @@ function main() {
   const project = flags.project || null;
 
   if (!events.isAvailable()) {
-    console.error('[si stats] events DB unavailable (better-sqlite3 not installed?).');
+    console.error('[si stats] events DB unavailable (neither better-sqlite3 nor node:sqlite loaded; see ~/.claude/logs/session-intel-*.log).');
     console.error(`           expected at: ${events.getEventsDbPath()}`);
     process.exit(1);
   }
@@ -561,8 +592,9 @@ function main() {
     renderDailyTrend(stats.dailySeries, sinceDays),
     renderWeeklyRollup(stats.weeklySeries),
     renderCompacts(stats),
+    renderOutcomes(stats),
     renderZones(stats),
-    renderArchives(stats.archives),
+    renderArchives(stats.archives, stats.reruns || {}),
     renderAgents(stats),
     renderProjects(stats.perProject),
     renderRecentCompacts(stats.recentCompacts),

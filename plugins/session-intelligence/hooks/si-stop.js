@@ -140,8 +140,8 @@ function main() {
     let totalCostUsd = null;
     if (safeSid) {
       try {
-        const tok = parseInt(fs.readFileSync(path.join(getStateDir(), `claude-token-budget-${safeSid}`), 'utf8'), 10);
-        if (Number.isFinite(tok)) peakTokens = tok;
+        const peak = require(path.join(SI_LIB, 'transcript-usage')).readPeak(safeSid);
+        if (Number.isFinite(peak)) peakTokens = peak;
       } catch { /* missing — leave null */ }
       try {
         const snap = JSON.parse(fs.readFileSync(path.join(getStateDir(), `claude-cost-snapshot-${safeSid}.json`), 'utf8'));

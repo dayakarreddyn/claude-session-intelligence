@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { DEFAULT_INPUT_RULES } = require('./prune');
 
 // Preset shapes for `statusline.preset`. Using a preset is a shortcut that
 // sets `fields` without losing the ability to override individual fields —
@@ -32,18 +33,18 @@ const STATUSLINE_PRESETS = {
   oneline: [
     'tokens', 'compactAge', 'compactCost', 'model', 'project', 'branch', 'task',
   ],
-  // 4-line layout:
-  //   Line 1: zone bar · compactAge · compactCost · contextPct — colour-
-  //           escalating warning row. contextPct replaces the ccstatusline
-  //           `93.0%` signal so we can retire the 1.5s npx spend.
-  //   Line 2: session activity + token economics — live "what's happening
-  //           right now" row at eye level, just below the warning bar.
-  //   Line 3: git + working dir delta.
-  //   Line 4: identity / repo / task — dim reference context.
-  //   Line 5: usage & models row — 5h/7d quota as used/available, per-model
-  //           quota (dormant until plans have per-model limits), and the
-  //           per-model spend split. All the "how much have I used / what
-  //           did it go to" signals in one bottom line.
+  // 5-line layout (five groups, one per line):
+  //   Line 1: zone bar · compactAge · compactCost · cacheHit · siHealth —
+  //           colour-escalating warning row (siHealth is silent when healthy).
+  //   Line 2: session activity + token economics — blockUsage · session ·
+  //           sessionId · costSaved · tools · tokenFlow · tokenSpeed. Live
+  //           "what's happening right now" row just below the warning bar.
+  //   Line 3: git + working dir delta — branch · diffstat · cwd · activeRoot.
+  //   Line 4: identity / task — model · outputStyle · thinking · task, dim
+  //           reference context.
+  //   Line 5: usage & models row — weekUsage · spendLimit · modelQuota ·
+  //           modelSplit: weekly quota, gateway spend budget, per-model quota
+  //           (dormant until plans have per-model limits), per-model spend.
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
@@ -53,7 +54,7 @@ const STATUSLINE_PRESETS = {
     'newline',
     'model', 'outputStyle', 'thinking', 'task',
     'newline',
-    'weekUsage', 'modelQuota', 'modelSplit',
+    'weekUsage', 'spendLimit', 'modelQuota', 'modelSplit',
   ],
   // Token-economics focus — same skeleton, adds cacheTokens.
   'verbose-cache':  [
@@ -65,7 +66,7 @@ const STATUSLINE_PRESETS = {
     'newline',
     'model', 'project', 'task',
     'newline',
-    'weekUsage', 'modelQuota', 'modelSplit',
+    'weekUsage', 'spendLimit', 'modelQuota', 'modelSplit',
   ],
 };
 
@@ -77,7 +78,13 @@ const DEFAULTS = {
     preset: 'verbose',
     fields: STATUSLINE_PRESETS.verbose.slice(),
     tokenSource: 'auto',
-    zones: { yellow: 200000, orange: 300000, red: 400000 },
+    // Zones are fractions of the effective context window (heuristic: no
+    // official degradation point exists for Claude 5). 'absolute' restores the
+    // fixed `zones` token thresholds below.
+    zoneMode: 'fraction',
+    zoneFractions: { yellow: 0.20, orange: 0.30, red: 0.40 },
+    zones: { yellow: 200000, orange: 300000, red: 400000 }, // honoured only when zoneMode === 'absolute'
+    contextCap: 0, // explicit window override; 0 = auto (resolveContextCap)
     maxTaskLength: 40,
     // Middle-truncate the `branch` field at this length so long names like
     // `feat/some-very-long-feature-slug` don't push the last status row past
@@ -132,11 +139,14 @@ const DEFAULTS = {
     // per-compact-volatile values (call counts, stale-token estimates,
     // dated filenames, dollar amounts, live token counts). Trades UX
     // detail for a byte-stable prefix that survives as a cache hit for
-    // the rest of the post-compact session. On by default — the cache
-    // win (read cost −90% for the post-compact prefix) outweighs losing
-    // exact counts in the compaction guidance. Set to false or export
-    // CLAUDE_COMPACT_STABLE_PREFIX=0 to see the verbose metrics inline.
-    stablePrefix: true,
+    // the rest of the post-compact session. Off by default: the zone callout
+    // is the model's only budget instrument, so it carries bucketed numbers.
+    // Set to true or export CLAUDE_COMPACT_STABLE_PREFIX=1 for the cache-
+    // stable variant without them.
+    stablePrefix: false,
+    // Fill % in the model-visible callout is floored to this step so the
+    // text stays byte-stable across many calls.
+    calloutBucketPct: 5,
   },
   stopHook: {
     // End-of-session memory-write nudge. Mirrors Anthropic's official
@@ -289,6 +299,19 @@ const DEFAULTS = {
     // Lazy GC: sweep archives older than this many days on each hook fire.
     ttlDays: 7,
   },
+  prune: {
+    // Replace oversized string tool results with a head/tail excerpt (full
+    // body stays in the tool archive; `/si expand <id>` replays it). Floor
+    // sits above Claude Code's own caps so only the long tail is touched.
+    enabled: true,
+    outputFloorChars: 50000,
+    headChars: 2000,
+    tailChars: 1500,
+    tools: ['Read', 'Bash', 'Grep', 'Glob', 'WebFetch'],
+    // PreToolUse Bash rewrite, opt-in (R15) (test runners, .log cats) via inputRules.
+    rewriteInput: false,
+    inputRules: DEFAULT_INPUT_RULES,
+  },
   learn: {
     // When true and adaptive zones (compact-history derived) materially
     // differ from the last time they were shown to the user, the next
@@ -363,6 +386,9 @@ function applyEnvOverrides(cfg) {
   if (env.NO_COLOR === '1' || env.CLAUDE_STATUSLINE_NO_COLOR === '1') {
     cfg.statusline.colors = false;
   }
+  if (env.CLAUDE_SI_ZONE_MODE === 'fraction' || env.CLAUDE_SI_ZONE_MODE === 'absolute') {
+    cfg.statusline.zoneMode = env.CLAUDE_SI_ZONE_MODE;
+  }
   if (env.CLAUDE_STATUSLINE_COMPACT === '1') {
     cfg.statusline.fields = cfg.statusline.fields.filter((f) => f !== 'task');
   }
@@ -419,6 +445,15 @@ function applyEnvOverrides(cfg) {
   if (env.CLAUDE_TOOL_ARCHIVE_THRESHOLD) {
     const n = parseInt(env.CLAUDE_TOOL_ARCHIVE_THRESHOLD, 10);
     if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.toolArchive.thresholdChars = n;
+  }
+
+  if (env.CLAUDE_SI_PRUNE === '0') cfg.prune.enabled = false;
+  if (env.CLAUDE_SI_PRUNE === '1') cfg.prune.enabled = true;
+  if (env.CLAUDE_SI_PRUNE_REWRITE === '0') cfg.prune.rewriteInput = false;
+  if (env.CLAUDE_SI_PRUNE_REWRITE === '1') cfg.prune.rewriteInput = true;
+  if (env.CLAUDE_SI_PRUNE_FLOOR) {
+    const n = parseInt(env.CLAUDE_SI_PRUNE_FLOOR, 10);
+    if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.prune.outputFloorChars = n;
   }
 
   if (env.CLAUDE_INTEL_DEBUG === '1') cfg.debug.enabled = true;
@@ -543,6 +578,11 @@ function resolveStatuslineForCwd(cfg, cwd) {
   if (overrides.zones && typeof overrides.zones === 'object') {
     merged.zones = { ...(base.zones || {}), ...overrides.zones };
   }
+  // A per-project `zones` block is absolute thresholds: it implies zoneMode
+  // 'absolute' for that project unless the override sets zoneMode itself.
+  if (overrides.zones && typeof overrides.zones === 'object' && overrides.zoneMode === undefined) {
+    merged.zoneMode = 'absolute';
+  }
   if (overrides.prices && typeof overrides.prices === 'object') {
     merged.prices = { ...(base.prices || {}), ...overrides.prices };
   }
@@ -550,21 +590,42 @@ function resolveStatuslineForCwd(cfg, cwd) {
   return merged;
 }
 
+const ONE_M_TOKENS = 1000000;
+const FRACTION_FALLBACK = { yellow: 0.20, orange: 0.30, red: 0.40 };
+const ABSOLUTE_FALLBACK = { yellow: 200000, orange: 300000, red: 400000 };
+
+function pickFinite(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
 /**
  * Single source of truth for the {yellow, orange, red} token thresholds.
- * Reads `statusline.zones` (the user-facing knob) and falls back to the
- * built-in defaults. Suggest-compact and the statusline both call this so
- * the bar's colour and the hook's escalation gate stay aligned — without
- * it, customising one didn't move the other and you'd see orange in the
- * bar while the hook still sat at yellow.
+ * Default mode 'fraction': each threshold is a fraction of the effective
+ * window `cap` (omitted cap assumes 1M, which reproduces 200k/300k/400k; a
+ * 200K window gives 40k/60k/80k). Mode 'absolute' returns `statusline.zones`
+ * verbatim. Suggest-compact and the statusline both call this so the bar's
+ * colour and the hook's escalation gate stay aligned. Returns a new object.
  */
-function getZoneThresholds(cfg) {
-  const fallback = { yellow: 200000, orange: 300000, red: 400000 };
-  const z = (cfg && cfg.statusline && cfg.statusline.zones) || {};
+function getZoneThresholds(cfg, opts) {
+  const sl = (cfg && cfg.statusline) || {};
+  const cap = opts && Number.isFinite(opts.cap) && opts.cap > 0 ? opts.cap : ONE_M_TOKENS;
+  if (sl.zoneMode === 'absolute') {
+    const z = sl.zones || {};
+    return {
+      yellow: pickFinite(z.yellow, ABSOLUTE_FALLBACK.yellow),
+      orange: pickFinite(z.orange, ABSOLUTE_FALLBACK.orange),
+      red: pickFinite(z.red, ABSOLUTE_FALLBACK.red),
+      mode: 'absolute',
+      cap,
+    };
+  }
+  const f = sl.zoneFractions || {};
   return {
-    yellow: Number.isFinite(z.yellow) ? z.yellow : fallback.yellow,
-    orange: Number.isFinite(z.orange) ? z.orange : fallback.orange,
-    red:    Number.isFinite(z.red)    ? z.red    : fallback.red,
+    yellow: Math.round(pickFinite(f.yellow, FRACTION_FALLBACK.yellow) * cap),
+    orange: Math.round(pickFinite(f.orange, FRACTION_FALLBACK.orange) * cap),
+    red: Math.round(pickFinite(f.red, FRACTION_FALLBACK.red) * cap),
+    mode: 'fraction',
+    cap,
   };
 }
 

@@ -12,6 +12,7 @@ const path = require('path');
 const os = require('os');
 
 const events = require('../lib/events');
+const { openDatabase } = require('../lib/sqlite-driver');
 
 function mkSandboxDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-events-'));
@@ -93,7 +94,6 @@ test('recordZoneTransition stores from/to/tokens/reason', () => {
 test('user_version migration backfills compacts/zone project from sessions via sid', () => {
   const sb = mkSandboxDb();
   try {
-    const Sqlite = require('better-sqlite3');
     // First open creates the schema + sets user_version=1 (no rows to backfill).
     assert.equal(events.isAvailable(), true);
     events._resetForTest();
@@ -101,7 +101,7 @@ test('user_version migration backfills compacts/zone project from sessions via s
     // Hand-seed rows the way the OLD, disagreeing writers would have: the
     // session has the canonical basename, but compacts/zone have the encoded
     // slug and the cwd leaf respectively. Then force the migration to re-run.
-    const raw = new Sqlite(sb.dbPath);
+    const raw = openDatabase(sb.dbPath).db;
     const now = Date.now();
     raw.prepare('INSERT INTO sessions (sid, project, cwd, started_at) VALUES (?,?,?,?)')
       .run('s1', 'CSM', '/Users/x/DWS/CSM', now);
@@ -126,7 +126,7 @@ test('user_version migration backfills compacts/zone project from sessions via s
     assert.ok(red && red.n === 1, 'zone transition now filters under project=CSM');
 
     // Orphan (no session) row keeps its original key.
-    const verify = new Sqlite(sb.dbPath);
+    const verify = openDatabase(sb.dbPath).db;
     const orphan = verify.prepare("SELECT project FROM zone_transitions WHERE sid='agent-xyz'").get();
     verify.close();
     assert.equal(orphan.project, 'orphan', 'sid without a session is left untouched');
@@ -396,14 +396,13 @@ test('reconcileSubagentUsage backfills blind tracker rows by parentToolUseId', (
 test('user_version 2 migration reprices agent costs from the per-model table', () => {
   const sb = mkSandboxDb();
   try {
-    const Sqlite = require('better-sqlite3');
     // First open creates schema and lands on the current user_version.
     assert.equal(events.isAvailable(), true);
     events._resetForTest();
 
     // Seed a row costed at the old flat Opus table ($15/MTok input), then
     // rewind user_version so the reprice migration re-runs on next open.
-    const raw = new Sqlite(sb.dbPath);
+    const raw = openDatabase(sb.dbPath).db;
     raw.prepare(`
       INSERT INTO agent_invocations
         (sid, tool_use_id, subagent_type, t, model, input_tokens, output_tokens,
@@ -421,7 +420,7 @@ test('user_version 2 migration reprices agent costs from the per-model table', (
     events._setDbPathForTest(sb.dbPath);
     assert.equal(events.isAvailable(), true);
 
-    const verify = new Sqlite(sb.dbPath);
+    const verify = openDatabase(sb.dbPath).db;
     const repriced = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_1'").get();
     const untouched = verify.prepare("SELECT cost_usd FROM agent_invocations WHERE tool_use_id='toolu_rp_2'").get();
     const ver = verify.pragma('user_version', { simple: true });
@@ -498,29 +497,300 @@ test('agentModelCosts aggregates per-model subagent spend for one session', () =
   } finally { cleanup(sb); }
 });
 
-test('upsertSessionModelCosts + weeklyModelSpend aggregate parent and agent spend', () => {
+test('upsertSessionModelCosts replaces (not accumulates) per-model rows for a session', () => {
+  const sb = mkSandboxDb();
+  try {
+    events.recordSessionStart({ sid: 's1', project: 'p', startedAt: Date.now() });
+    assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 50 }));
+    assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 78, 'claude-opus-4-8': 2 }));
+    const raw = openDatabase(sb.dbPath).db;
+    const rows = raw.prepare('SELECT model, cost_usd FROM session_model_costs WHERE sid = ?').all('s1');
+    raw.close();
+    const byModel = Object.fromEntries(rows.map((r) => [r.model, r.cost_usd]));
+    assert.deepEqual(byModel, { 'claude-fable-5': 78, 'claude-opus-4-8': 2 });
+  } finally { cleanup(sb); }
+});
+
+// --- Schema v3: fill columns ------------------------------------------------
+
+const V3_COMPACT_COLS = ['context_cap', 'fill_pct', 'model'];
+const V3_ZONE_COLS = ['context_cap', 'fill_pct', 'model', 'trigger'];
+
+function tableCols(db, table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+// Rewind a freshly created DB to its pre-v3 shape (v3 columns dropped) so the
+// next open exercises the real ALTER TABLE path, with legacy rows seeded.
+function seedPreV3Db(sb, userVersion) {
+  assert.equal(events.isAvailable(), true);
+  events._resetForTest();
+  const raw = openDatabase(sb.dbPath).db;
+  for (const c of V3_COMPACT_COLS) raw.exec(`ALTER TABLE compacts DROP COLUMN ${c}`);
+  for (const c of V3_ZONE_COLS) raw.exec(`ALTER TABLE zone_transitions DROP COLUMN ${c}`);
+  const now = Date.now();
+  raw.prepare('INSERT INTO sessions (sid, project, cwd, started_at) VALUES (?,?,?,?)')
+    .run('s1', 'CSM', '/x/CSM', now);
+  raw.prepare('INSERT INTO compacts (sid, project, t, tokens) VALUES (?,?,?,?)')
+    .run('s1', '-x-CSM', now, 100000);
+  raw.prepare('INSERT INTO zone_transitions (sid, project, t, to_zone) VALUES (?,?,?,?)')
+    .run('s1', 'mm', now, 'red');
+  raw.pragma(`user_version = ${userVersion}`);
+  raw.close();
+  events._setDbPathForTest(sb.dbPath);
+}
+
+test('v3 migration adds fill columns to a user_version 2 DB and leaves old rows NULL', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 2);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      const compactCols = tableCols(verify, 'compacts');
+      const zoneCols = tableCols(verify, 'zone_transitions');
+      for (const c of V3_COMPACT_COLS) assert.equal(compactCols.filter((n) => n === c).length, 1, `compacts.${c} once`);
+      for (const c of V3_ZONE_COLS) assert.equal(zoneCols.filter((n) => n === c).length, 1, `zone_transitions.${c} once`);
+      assert.equal(verify.prepare('SELECT fill_pct FROM compacts').get().fill_pct, null);
+      assert.equal(verify.prepare('SELECT fill_pct FROM zone_transitions').get().fill_pct, null);
+      assert.ok(verify.pragma('user_version', { simple: true }) >= 3);
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('v3 migration from user_version 0 runs v1, v2 and v3 in one open', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 0);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      // v1: disagreeing project keys backfilled from sessions.
+      assert.equal(verify.prepare('SELECT project FROM compacts').get().project, 'CSM');
+      assert.equal(verify.prepare('SELECT project FROM zone_transitions').get().project, 'CSM');
+      // v3: fill columns present, old rows NULL.
+      assert.ok(V3_COMPACT_COLS.every((c) => tableCols(verify, 'compacts').includes(c)));
+      assert.ok(V3_ZONE_COLS.every((c) => tableCols(verify, 'zone_transitions').includes(c)));
+      assert.equal(verify.prepare('SELECT fill_pct FROM compacts').get().fill_pct, null);
+      assert.equal(verify.pragma('user_version', { simple: true }), require('../lib/events-migrations').SCHEMA_VERSION);
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('v3 migration is a no-op on a second open (no duplicate columns, rows kept)', () => {
+  const sb = mkSandboxDb();
+  try {
+    seedPreV3Db(sb, 2);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const first = openDatabase(sb.dbPath).db;
+    const before = { c: tableCols(first, 'compacts'), z: tableCols(first, 'zone_transitions') };
+    first.close();
+    events._setDbPathForTest(sb.dbPath);
+    assert.equal(events.isAvailable(), true);
+    events._resetForTest();
+    const second = openDatabase(sb.dbPath).db;
+    try {
+      assert.deepEqual(tableCols(second, 'compacts'), before.c);
+      assert.deepEqual(tableCols(second, 'zone_transitions'), before.z);
+      assert.equal(second.prepare('SELECT COUNT(*) AS n FROM compacts').get().n, 1);
+    } finally { second.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact stores contextCap/fillPct/model; aggregateStats splits fill p50 by trigger', () => {
   const sb = mkSandboxDb();
   try {
     const now = Date.now();
     events.recordSessionStart({ sid: 's1', project: 'p', startedAt: now });
-    // Parent-session splits — second upsert replaces, not accumulates.
-    assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 50 }));
-    assert.ok(events.upsertSessionModelCosts('s1', { 'claude-fable-5': 78, 'claude-opus-4-8': 2 }));
-    // Agent spend joins the weekly view.
-    events.recordAgentInvocation({ sid: 's1', toolUseId: 'a1', subagentType: 'Explore', t: now,
-      model: 'claude-opus-4-8', costUsd: 0.5 });
-    const week = events.weeklyModelSpend();
-    const byModel = Object.fromEntries(week.map((r) => [r.model, r.cost_usd]));
-    assert.ok(Math.abs(byModel['claude-fable-5'] - 78) < 1e-9, `fable=${byModel['claude-fable-5']}`);
-    assert.ok(Math.abs(byModel['claude-opus-4-8'] - 2.5) < 1e-9, `opus=${byModel['claude-opus-4-8']}`);
-    assert.equal(week[0].model, 'claude-fable-5', 'sorted by spend desc');
-    // Old rows age out of the window.
-    const Sqlite = require('better-sqlite3');
-    const raw = new Sqlite(sb.dbPath);
-    raw.prepare('UPDATE session_model_costs SET t = ? WHERE model = ?')
-      .run(now - 10 * 24 * 60 * 60 * 1000, 'claude-fable-5');
-    raw.close();
-    const week2 = events.weeklyModelSpend();
-    assert.ok(!week2.find((r) => r.model === 'claude-fable-5'), 'aged-out row excluded');
+    events.recordCompact({ sid: 's1', project: 'p', t: now, tokens: 480000, contextCap: 1000000, fillPct: 48, model: 'claude-opus-5-5', trigger: 'auto' });
+    events.recordCompact({ sid: 's1', project: 'p', t: now + 1, tokens: 300000, contextCap: 1000000, fillPct: 30, model: 'claude-opus-5-5', trigger: 'manual' });
+    const s = events.aggregateStats({ sinceDays: 30 });
+    assert.deepEqual(s.compactFill, { auto: { n: 1, p50: 48 }, manual: { n: 1, p50: 30 } });
+    const latest = events.listRecentCompacts({ limit: 1 })[0];
+    assert.equal(latest.fill_pct, 30);
+    assert.equal(latest.context_cap, 1000000);
+    assert.equal(latest.model, 'claude-opus-5-5');
+    assert.equal(s.recentCompacts[0].fill_pct, 30);
   } finally { cleanup(sb); }
+});
+
+test('compactFill is empty-safe and ignores rows without fill_pct', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 's1', project: 'p', t: now, tokens: 1, trigger: 'auto' });
+    events.recordCompact({ sid: 's1', project: 'p', t: now + 1, tokens: 2, fillPct: Number.NaN, trigger: 'manual' });
+    const s = events.aggregateStats({ sinceDays: 30 });
+    assert.deepEqual(s.compactFill, { auto: { n: 0, p50: null }, manual: { n: 0, p50: null } });
+    assert.equal(events.listRecentCompacts({ limit: 1 })[0].fill_pct, null);
+  } finally { cleanup(sb); }
+});
+
+test('recordZoneTransition stores contextCap/fillPct/model/trigger', () => {
+  const sb = mkSandboxDb();
+  try {
+    events.recordZoneTransition({ sid: 's1', project: 'p', fromZone: 'green', toZone: 'yellow', tokens: 210000, reason: 'crossing', contextCap: 1000000, fillPct: 21, model: 'claude-fable-5-1', trigger: 'Read' });
+    events._resetForTest();
+    const verify = openDatabase(sb.dbPath).db;
+    try {
+      const row = verify.prepare('SELECT context_cap, fill_pct, model, trigger, reason FROM zone_transitions').get();
+      assert.deepEqual({ ...row }, { context_cap: 1000000, fill_pct: 21, model: 'claude-fable-5-1', trigger: 'Read', reason: 'crossing' });
+    } finally { verify.close(); }
+  } finally { cleanup(sb); }
+});
+
+test('markArchivePruned flags the archive and aggregateStats reports archives.pruned', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordToolArchive({ sid: 's1', toolUseId: 'toolu_p1', tool: 'Read', chars: 60000, t: Date.now() }));
+    assert.ok(events.recordToolArchive({ sid: 's1', toolUseId: 'toolu_p2', tool: 'Read', chars: 5000, t: Date.now() }));
+    assert.equal(events.aggregateStats({ sinceDays: 365 }).archives.pruned || 0, 0);
+    assert.ok(events.markArchivePruned('toolu_p1'));
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.equal(stats.archives.pruned, 1);
+    assert.equal(stats.archives.n, 2);
+  } finally { cleanup(sb); }
+});
+
+test('recordRerun stores a re-run and aggregateStats reports reruns.n', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordRerun({ sid: 's1', t: Date.now(), tool: 'Bash', inputHash: 'x', gapCalls: 11, wasPruned: false }));
+    assert.ok(events.recordRerun({ sid: 's1', t: Date.now(), tool: 'Bash', inputHash: 'x', gapCalls: 3, wasPruned: true }));
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.equal(stats.reruns.n, 2);
+    assert.equal(stats.reruns.pruned, 1);
+    assert.equal(events.recordRerun({}), false);
+  } finally { cleanup(sb); }
+});
+
+test('stampCompactOutcomeAfter fills fill_after on the matching compact_t', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordCompactOutcome({ sid: 's', t: 2000, compactT: 1000, trigger: 'manual', summaryChars: 10, fillBefore: 48 }));
+    assert.equal(events.aggregateStats({ sinceDays: 36500 }).outcomes.avg_fill_after, null);
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 's', compactT: 999, fillAfter: 1 }), false, 'non-matching key updates nothing');
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 's', compactT: 1000, fillAfter: 9.5 }), true);
+    const o = events.aggregateStats({ sinceDays: 36500 }).outcomes;
+    assert.equal(o.avg_fill_after, 9.5);
+    assert.equal(o.n, 1);
+    assert.equal(o.avg_summary_chars, 10);
+    assert.equal(o.avg_fill_before_manual, 48);
+    assert.equal(o.avg_fill_before_auto, null);
+  } finally { cleanup(sb); }
+});
+
+test('aggregateStats outcomes averages retention and splits fill_before by trigger', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompactOutcome({ sid: 'a', t: now, compactT: 1, trigger: 'auto', summaryChars: 100, retention: 1, fillBefore: 40 });
+    events.recordCompactOutcome({ sid: 'b', t: now, compactT: 2, trigger: 'auto', summaryChars: 300, retention: 0.5, fillBefore: 60 });
+    events.recordCompactOutcome({ sid: 'c', t: now, compactT: 3, trigger: 'manual', summaryChars: 200, fillBefore: 20 });
+    const o = events.aggregateStats({ sinceDays: 30 }).outcomes;
+    assert.equal(o.n, 3);
+    assert.equal(o.avg_retention, 0.75);
+    assert.equal(o.avg_summary_chars, 200);
+    assert.equal(o.avg_fill_before_auto, 50);
+    assert.equal(o.avg_fill_before_manual, 20);
+    assert.equal(events.recordCompactOutcome({}), false);
+    assert.equal(events.stampCompactOutcomeAfter({ sid: 'a' }), false);
+  } finally { cleanup(sb); }
+});
+
+test('recordCacheHit ignores duplicates and aggregateStats averages per model', () => {
+  const sb = mkSandboxDb();
+  try {
+    const base = { sid: 's1', t: Date.now(), model: 'claude-opus-5-5', cacheRead: 1, cacheCreation: 1, contextTokens: 2 };
+    events.recordCacheHit({ ...base, messageId: 'm1', ratio: 0.5 });
+    events.recordCacheHit({ ...base, messageId: 'm1', ratio: 0.9 });
+    events.recordCacheHit({ ...base, messageId: 'm2', ratio: 1 });
+    const stats = events.aggregateStats({ sinceDays: 365 });
+    assert.deepEqual(stats.cacheHits, [{ model: 'claude-opus-5-5', n: 2, avg_ratio: 0.75 }]);
+  } finally { cleanup(sb); }
+});
+
+test('reconcileCompactHistory inserts missing (sid, t) rows and is idempotent', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 'a', project: 'P', startedAt: now });
+    events.recordCompact({ sid: 'a', t: now - 2000, tokens: 100000 });
+    const entries = [
+      { sid: 'a', t: now - 2000, tokens: 100000 },
+      { sid: 'a', t: now - 1000, contextTokens: 300000, fillPct: 30, contextCap: 1000000, trigger: 'manual', cwd: '/r' },
+    ];
+    assert.equal(events.reconcileCompactHistory(entries), 1);
+    assert.equal(events.reconcileCompactHistory(entries), 0);
+    assert.equal(events.aggregateStats({ sinceDays: 3650 }).compacts.n, 2);
+  } finally { cleanup(sb); }
+});
+
+test('compacts total_cost sums each session\'s last cumulative cost, not every row', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 'a', t: now - 2000, tokens: 1, cost: 10 });
+    events.recordCompact({ sid: 'a', t: now - 1000, tokens: 1, cost: 25 });
+    events.recordCompact({ sid: 'b', t: now - 500, tokens: 1, cost: 5 });
+    assert.equal(events.aggregateStats({ sinceDays: 30 }).compacts.total_cost, 30);
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact and recordZoneTransition take the canonical project from the sessions row', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's', project: 'CSM', cwd: '/x/CSM', startedAt: now });
+    events.recordCompact({ sid: 's', project: 'dashboard', t: now, tokens: 1 });
+    events.recordZoneTransition({ sid: 's', project: 'mm', toZone: 'red', tokens: 1 });
+    const stats = events.aggregateStats({ sinceDays: 30, project: 'CSM' });
+    assert.equal(stats.compacts.n, 1);
+    assert.equal(stats.zones.find((z) => z.zone === 'red').n, 1);
+  } finally { cleanup(sb); }
+});
+
+test('recordCompact for an unknown sid creates a minimal sessions row so per-project tables see it', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordCompact({ sid: 'orphan', project: 'ReelCuts', cwd: '/r', t: now, tokens: 1 });
+    const row = events.aggregateStats({ sinceDays: 30 }).perProject.find((p) => p.project === 'ReelCuts');
+    assert.equal(row.compacts, 1);
+  } finally { cleanup(sb); }
+});
+
+test('recordAgentInvocation prices a row from tokens when costUsd is absent; unpriced rows are counted', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordAgentInvocation({ sid: 's', toolUseId: 't', subagentType: 'x', t: now, model: 'claude-opus-5-5', inputTokens: 1000000 });
+    events.recordAgentInvocation({ sid: 's', toolUseId: 'u', subagentType: 'x', t: now });
+    const agents = events.aggregateStats({ sinceDays: 30 }).agents;
+    assert.ok(Math.abs(agents.cost_usd - 4.0) < 1e-9);
+    assert.equal(agents.unpriced, 1);
+  } finally { cleanup(sb); }
+});
+
+test('events.js alone never logs the sqlite driver (bootstrap logs it once per session)', () => {
+  const { spawnSync } = require('node:child_process');
+  const script = `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:'drv',project:'p',cwd:'/x',startedAt:1})`;
+  const run = (extra) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-drv-'));
+    try {
+      const r = spawnSync(process.execPath, ['-e', script], {
+        env: { HOME: home, USERPROFILE: home, TMPDIR: home, CLAUDE_INTEL_DEBUG: '1', ...extra },
+        encoding: 'utf8', timeout: 30000,
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const logDir = path.join(home, '.claude', 'logs');
+      const files = fs.existsSync(logDir) ? fs.readdirSync(logDir) : [];
+      return files.map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  };
+  assert.doesNotMatch(run({}), /sqlite driver/);
+  if (Number(process.versions.node.split('.')[0]) >= 22) assert.doesNotMatch(run({ SI_SQLITE_DRIVER: 'node:sqlite' }), /sqlite driver/);
 });

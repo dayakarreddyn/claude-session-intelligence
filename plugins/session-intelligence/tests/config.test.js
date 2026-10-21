@@ -10,14 +10,19 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const {
   resolveShapeForCwd,
   resolveStatuslineForCwd,
   getZoneThresholds,
+  loadConfig,
   clampMaxEntries,
   DEFAULTS,
 } = require('../lib/config');
+const { resolveContextCap } = require('../lib/context-cap');
 
 test('resolveShapeForCwd merges perProject override on matching cwd', () => {
   const cfg = {
@@ -83,28 +88,68 @@ test('resolveShapeForCwd preserves nested gitNexus block from base', () => {
     'nested config blocks survive the merge');
 });
 
-test('getZoneThresholds reads statusline.zones with defaults', () => {
-  assert.deepEqual(
-    getZoneThresholds({}),
-    { yellow: 200000, orange: 300000, red: 400000 },
-    'empty config falls back to built-in defaults',
-  );
-  assert.deepEqual(
-    getZoneThresholds({ statusline: { zones: { yellow: 150000, orange: 250000, red: 350000 } } }),
-    { yellow: 150000, orange: 250000, red: 350000 },
-    'fully customised zones take precedence',
-  );
-  assert.deepEqual(
-    getZoneThresholds({ statusline: { zones: { orange: 250000 } } }),
-    { yellow: 200000, orange: 250000, red: 400000 },
-    'partial customisation only overrides specified keys',
-  );
+test('DEFAULTS ship zoneMode fraction with 0.20/0.30/0.40 and contextCap 0', () => {
+  assert.equal(DEFAULTS.statusline.zoneMode, 'fraction');
+  assert.deepEqual(DEFAULTS.statusline.zoneFractions, { yellow: 0.20, orange: 0.30, red: 0.40 });
+  assert.equal(DEFAULTS.statusline.contextCap, 0);
 });
 
-test('getZoneThresholds ignores non-numeric inputs safely', () => {
-  const out = getZoneThresholds({ statusline: { zones: { yellow: 'oops', orange: null, red: NaN } } });
-  assert.deepEqual(out, { yellow: 200000, orange: 300000, red: 400000 },
-    'invalid values fall through to defaults rather than poisoning the gate');
+test("getZoneThresholds: fractions x cap give today's absolutes on 1M and scale on 200K", () => {
+  assert.deepEqual(getZoneThresholds({}, { cap: 1000000 }),
+    { yellow: 200000, orange: 300000, red: 400000, mode: 'fraction', cap: 1000000 });
+  const cap200 = resolveContextCap({ model: 'claude-opus-5-5', env: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } }).cap;
+  assert.equal(cap200, 200000);
+  assert.deepEqual(getZoneThresholds({}, { cap: cap200 }),
+    { yellow: 40000, orange: 60000, red: 80000, mode: 'fraction', cap: 200000 });
+});
+
+test('getZoneThresholds: absolute mode honours statusline.zones verbatim', () => {
+  const cfg = { statusline: { zoneMode: 'absolute', zones: { yellow: 150000, orange: 250000, red: 350000 } } };
+  assert.deepEqual(getZoneThresholds(cfg, { cap: 200000 }),
+    { yellow: 150000, orange: 250000, red: 350000, mode: 'absolute', cap: 200000 });
+});
+
+test('getZoneThresholds: absolute mode falls back per-key and ignores non-numeric values', () => {
+  const out = getZoneThresholds({ statusline: { zoneMode: 'absolute', zones: { yellow: 'oops', orange: 250000, red: NaN } } });
+  assert.deepEqual(out, { yellow: 200000, orange: 250000, red: 400000, mode: 'absolute', cap: 1000000 });
+});
+
+test('getZoneThresholds: custom fractions apply; zones are ignored in fraction mode', () => {
+  const cfg = { statusline: { zoneFractions: { yellow: 0.5 }, zones: { yellow: 1, orange: 2, red: 3 } } };
+  assert.deepEqual(getZoneThresholds(cfg, { cap: 200000 }),
+    { yellow: 100000, orange: 60000, red: 80000, mode: 'fraction', cap: 200000 });
+});
+
+test('getZoneThresholds assumes 1M when cap is omitted, zero or invalid', () => {
+  assert.equal(getZoneThresholds({}).cap, 1000000);
+  assert.equal(getZoneThresholds({}, { cap: 0 }).cap, 1000000);
+  assert.equal(getZoneThresholds({}, { cap: null }).red, 400000);
+});
+
+test('getZoneThresholds does not mutate DEFAULTS or the input config', () => {
+  const before = JSON.stringify(DEFAULTS.statusline);
+  const cfg = { statusline: { zoneMode: 'absolute', zones: { yellow: 1, orange: 2, red: 3 } } };
+  const snapshot = JSON.stringify(cfg);
+  const a = getZoneThresholds(cfg); a.yellow = 999;
+  getZoneThresholds({}, { cap: 200000 });
+  assert.equal(JSON.stringify(DEFAULTS.statusline), before);
+  assert.equal(JSON.stringify(cfg), snapshot);
+});
+
+test('CLAUDE_SI_ZONE_MODE=absolute overrides config; invalid value is ignored', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-zm-'));
+  const saved = { HOME: process.env.HOME, M: process.env.CLAUDE_SI_ZONE_MODE };
+  process.env.HOME = home;
+  try {
+    process.env.CLAUDE_SI_ZONE_MODE = 'absolute';
+    assert.equal(loadConfig().statusline.zoneMode, 'absolute');
+    process.env.CLAUDE_SI_ZONE_MODE = 'bogus';
+    assert.equal(loadConfig().statusline.zoneMode, 'fraction');
+  } finally {
+    process.env.HOME = saved.HOME;
+    if (saved.M === undefined) delete process.env.CLAUDE_SI_ZONE_MODE; else process.env.CLAUDE_SI_ZONE_MODE = saved.M;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('clampMaxEntries enforces [50, 5000] band', () => {
@@ -182,4 +227,31 @@ test('resolveStatuslineForCwd falls through to base on miss', () => {
 test('resolveStatuslineForCwd handles missing statusline block gracefully', () => {
   const out = resolveStatuslineForCwd({}, '/anywhere');
   assert.deepEqual(out, {});
+});
+
+test('DEFAULTS.compact.stablePrefix is false and calloutBucketPct is 5', () => {
+  assert.equal(DEFAULTS.compact.stablePrefix, false);
+  assert.equal(DEFAULTS.compact.calloutBucketPct, 5);
+});
+
+test('verbose presets carry spendLimit after weekUsage', () => {
+  const { STATUSLINE_PRESETS } = require('../lib/config');
+  for (const name of ['verbose', 'verbose-cache']) {
+    const f = STATUSLINE_PRESETS[name];
+    const i = f.indexOf('weekUsage');
+    assert.deepEqual(f.slice(i, i + 4), ['weekUsage', 'spendLimit', 'modelQuota', 'modelSplit']);
+  }
+  assert.deepEqual(DEFAULTS.statusline.fields, STATUSLINE_PRESETS.verbose);
+});
+
+test('per-project zones override implies absolute zoneMode unless the override sets zoneMode', () => {
+  const { resolveStatuslineForCwd } = require('../lib/config');
+  const cfg = { statusline: { zoneMode: 'fraction', perProject: {
+    '/p': { zones: { red: 500000 } },
+    '/q': { zones: { red: 500000 }, zoneMode: 'fraction' },
+    '/r': { maxCwdLength: 50 },
+  } } };
+  assert.equal(resolveStatuslineForCwd(cfg, '/p').zoneMode, 'absolute');
+  assert.equal(resolveStatuslineForCwd(cfg, '/q').zoneMode, 'fraction');
+  assert.equal(resolveStatuslineForCwd(cfg, '/r').zoneMode, 'fraction');
 });

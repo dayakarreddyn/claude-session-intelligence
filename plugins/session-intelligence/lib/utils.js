@@ -179,36 +179,16 @@ function resolveProjectDir(cwd) {
 }
 
 /**
- * Read token count from the latest assistant-message usage block in a Claude
- * transcript JSONL file. Scans only the tail (512 KB) so multi-MB transcripts
- * stay cheap. Returns 0 when the file is missing, empty, or has no usage yet.
- * Shared across statusline / suggest-compact / task-change-detector so they
- * all see the same number.
+ * Context tokens of the latest assistant usage block (input + cache creation
+ * + cache read), via the offset-cached reader in lib/transcript-usage.js.
+ * Returns 0 when the file is missing or carries no usage line.
  */
-function readTranscriptTokens(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return 0;
+function readTranscriptTokens(transcriptPath, opts) {
   try {
-    const stat = fs.statSync(transcriptPath);
-    const scanBytes = Math.min(stat.size, 512 * 1024);
-    const fd = fs.openSync(transcriptPath, 'r');
-    try {
-      const buf = Buffer.alloc(scanBytes);
-      fs.readSync(fd, buf, 0, scanBytes, stat.size - scanBytes);
-      const lines = buf.toString('utf8').split('\n').filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const d = JSON.parse(lines[i]);
-          const u = d && d.message && d.message.usage;
-          if (u) {
-            return (u.input_tokens || 0)
-                 + (u.cache_creation_input_tokens || 0)
-                 + (u.cache_read_input_tokens || 0);
-          }
-        } catch { /* partial line at tail boundary — fine */ }
-      }
-    } finally { fs.closeSync(fd); }
-  } catch { /* silent — callers fall back to other sources */ }
-  return 0;
+    const { readLatestUsage } = require('./transcript-usage');
+    const latest = readLatestUsage(transcriptPath, opts || {});
+    return (latest && latest.contextTokens) || 0;
+  } catch { return 0; }
 }
 
 module.exports = {

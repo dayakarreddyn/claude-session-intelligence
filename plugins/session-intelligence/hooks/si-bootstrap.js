@@ -614,7 +614,7 @@ function showFirstRunTips(state) {
 // — cheap (one readdir, lstat per match), best-effort (any failure logged at
 // debug and moved past), bounded (only matches our own filename prefix).
 const STALE_TEMP_MAX_AGE_DAYS = 7;
-const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot)-/;
+const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot|cost|usage-cache|context-peak|constraints|compact-prefix|compact-snapshot|health|usage-lock)-/;
 // Sweep both ~/.claude/state/ (current home, per-session state moved here so
 // macOS tmpdir cleanup can't strand stale-but-valid files) AND os.tmpdir()
 // (legacy home — clean up leftovers from pre-migration installs). pruneStateDir
@@ -802,9 +802,13 @@ function buildNexusAdditionalContext(cwd) {
 // resume banner only lands via systemMessage. additionalContext still
 // carries the model-facing copy.
 function emitAdditionalContext(textParts, systemMessage) {
-  const combined = (Array.isArray(textParts) ? textParts : [textParts])
-    .filter((s) => typeof s === 'string' && s.length > 0)
-    .join('\n\n');
+  const parts = Array.isArray(textParts) ? textParts : [textParts];
+  let combined;
+  try { combined = require(path.join(SI_LIB, 'hook-output')).renderBootstrapContext(parts); }
+  catch (err) {
+    intelLog('bootstrap', 'warn', 'hook-output unavailable — plain join', { err: err.message });
+    combined = parts.filter((s) => typeof s === 'string' && s).join('\n\n');
+  }
   if (!combined && !systemMessage) return;
   const out = {
     hookSpecificOutput: {
@@ -893,6 +897,7 @@ function main() {
         cwd,
         startedAt: Date.now(),
       });
+      intelLog('events', 'debug', 'sqlite driver', { driver: events.driverName() });
     } catch { /* events lib optional */ }
   }
 
@@ -907,6 +912,13 @@ function main() {
   try {
     const pruned = require(path.join(SI_LIB, 'tool-archive')).reconcileDb();
     if (pruned > 0) intelLog('bootstrap', 'info', 'archive DB reconciled', { pruned });
+  } catch { /* best effort */ }
+  // Back-fill compacts rows whose DB write never happened (hook died after the
+  // JSONL append) so history and DB agree on the compact count.
+  try {
+    const recovered = require(path.join(SI_LIB, 'events'))
+      .reconcileCompactHistory(require(path.join(SI_LIB, 'compact-history')).readHistory(200));
+    if (recovered > 0) intelLog('bootstrap', 'info', 'compact history reconciled', { recovered });
   } catch { /* best effort */ }
   // Backfill workflow-spawned agents — the `Workflow` tool fires no PostToolUse
   // hook, so si-agent-tracker can't see them; reconcile from transcripts here.
@@ -985,7 +997,10 @@ function main() {
     } catch { /* rendering failure shouldn't block the hook */ }
   }
 
-  emitAdditionalContext([continuation, nexus, hygiene], systemMessage);
+  let resume = '';
+  try { resume = require(path.join(SI_LIB, 'resume-advice')).buildResumeCacheContext(input); }
+  catch (err) { intelLog('bootstrap', 'warn', 'resume advice failed', { err: err.message }); }
+  emitAdditionalContext([continuation, nexus, hygiene, resume], systemMessage);
 
   process.exit(0);
 }

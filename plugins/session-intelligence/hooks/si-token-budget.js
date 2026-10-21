@@ -5,15 +5,21 @@
  * Cross-platform (Windows, macOS, Linux)
  *
  * Tracks approximate token usage per session by measuring tool output sizes.
- * Writes cumulative estimate to a temp file that si-suggest-compact.js reads
- * to provide token-aware compaction suggestions.
+ * Writes a cumulative TOOL-I/O ESTIMATE (a share diagnostic, NOT the context
+ * size: real context comes from the transcript's per-call usage) to the state
+ * file read by session-end peak stats and shape tracking.
  *
- * Token estimation (rough but directionally correct):
- *   - 1 token ≈ 4 characters of English text
+ * Token estimation (rough, code/JSON-heavy):
+ *   - 1 token ≈ 3 characters
  *   - Each tool call adds ~100 tokens overhead (schema, framing)
  *   - User/assistant messages add ~200-500 tokens each
  *
  * We only track tool I/O since that's the majority of context growth.
+ *
+ * The response body for both the estimate and the shape `chars` comes from one
+ * shared extraction (lib/prune.js responseText: Read file.content, Bash stdout,
+ * plain string). Since the estimate is diagnostic-only, counting the real body
+ * (rather than missing tool_response entirely) shifts it upward; that is accepted.
  */
 
 const fs = require('fs');
@@ -34,17 +40,42 @@ function resolveSiLibDir() {
 const SI_LIB = resolveSiLibDir();
 
 const {
-  getStateDir,
-  log
+  getStateDir
 } = require(path.join(SI_LIB, 'utils'));
 const { intelLog } = require(path.join(SI_LIB, 'intel-debug'));
 const {
   rootDirOf,
   appendShape,
+  readShape,
   resolveSessionCwd,
   writeSessionState,
   readSessionState,
 } = require(path.join(SI_LIB, 'context-shape'));
+const SHAPE_MIN_CHARS = 4096;
+
+function safeInputHash(toolName, toolInput) {
+  try { return require(path.join(SI_LIB, 'prune')).inputHash(toolName, toolInput); } catch { return null; }
+}
+
+// Record a same-input re-run (within RERUN_GAP_CALLS) of the call just appended.
+// wasPruned approximates "the earlier result was over the prune floor"; the
+// archive table is keyed by tool_use_id which the shape log does not carry.
+function recordRerunSignal(sessionId, cfg, chars) {
+  try {
+    const signals = require(path.join(SI_LIB, 'shape-signals'));
+    const entries = readShape(sessionId, signals.SIGNAL_WINDOW);
+    const rerun = signals.newestRerun(entries);
+    if (!rerun) return;
+    const floor = cfg && cfg.prune && cfg.prune.outputFloorChars;
+    require(path.join(SI_LIB, 'events')).recordRerun({
+      sid: sessionId, t: Date.now(), tool: rerun.tool, inputHash: rerun.inputHash,
+      gapCalls: rerun.gapCalls, wasPruned: Number.isFinite(floor) && chars >= floor,
+    });
+  } catch (err) {
+    intelLog('token-budget', 'debug', 'rerun signal failed', { err: String(err && err.message) });
+  }
+}
+
 // Phase-event detection is optional — fall back to the legacy inline regex
 // if the module is not on disk yet (mixed-version install, e.g. during a
 // plugin upgrade).
@@ -56,6 +87,25 @@ catch { /* optional */ }
 let compactHistory = null;
 try { compactHistory = require(path.join(SI_LIB, 'compact-history')); } catch { /* optional */ }
 
+/**
+ * First usage after a compact = the window the compaction actually left.
+ * Stamps fill_after on the matching compact_outcomes row (no-op when the
+ * snapshot has no cap or PostCompact recorded nothing for this compact_t).
+ */
+function stampOutcomeFill(sessionId, snap, usage) {
+  try {
+    if (!snap || !(snap.contextCap > 0)) return;
+    const { contextTokensOf } = require(path.join(SI_LIB, 'transcript-usage'));
+    const { fillPctOf } = require(path.join(SI_LIB, 'context-cap'));
+    require(path.join(SI_LIB, 'events')).stampCompactOutcomeAfter({
+      sid: sessionId, compactT: snap.t,
+      fillAfter: fillPctOf(contextTokensOf(usage), snap.contextCap),
+    });
+  } catch (err) {
+    intelLog('token-budget', 'debug', 'outcome fill stamp failed', { err: err && err.message });
+  }
+}
+
 // Unified config — gives us shape.rootDirDepth (monorepo knob) with env
 // overrides already applied. Failure here just means we fall back to depth 2.
 function loadSiConfig() {
@@ -63,8 +113,18 @@ function loadSiConfig() {
   catch { return {}; }
 }
 
-const CHARS_PER_TOKEN = 4;
+const CHARS_PER_TOKEN = 3; // calibrated for code/JSON-heavy tool I/O
 const TOOL_OVERHEAD_TOKENS = 100;
+
+/** One extraction of the response body shared by the estimate and the shape chars. */
+function responseBodyOf(payload) {
+  const { responseText } = require(path.join(SI_LIB, 'prune'));
+  return responseText({
+    toolName: payload.tool_name,
+    toolResponse: payload.tool_response,
+    fallbackFields: payload,
+  });
+}
 
 async function main() {
   // Read stdin FIRST so we can pick up session_id from the hook payload.
@@ -110,8 +170,7 @@ async function main() {
   // Estimate tokens from this tool call (stdin was already read above).
   let callTokens = TOOL_OVERHEAD_TOKENS;
   if (parsedInput) {
-    const output = parsedInput.tool_output || parsedInput.output || parsedInput.result || '';
-    const outputStr = typeof output === 'string' ? output : JSON.stringify(output);
+    const outputStr = responseBodyOf(parsedInput);
     callTokens += Math.ceil(outputStr.length / CHARS_PER_TOKEN);
 
     const toolIn = parsedInput.tool_input || parsedInput.input || '';
@@ -148,10 +207,8 @@ async function main() {
   // touched, so suggest-compact and pre-compact can generate grounded
   // preserve/drop hints instead of generic "consider /compact". Observation
   // only — decisions happen elsewhere. Never fails the hook.
-  // Load config once — used both for shape tracking (rootDirDepth, maxEntries)
-  // and for zone-crossover messages below (statusline.zones). Loading outside
-  // the shape-tracking try so a shape error doesn't leave `cfg` unbound when
-  // getZone() runs.
+  // Load config once for shape tracking (rootDirDepth, maxEntries). Loaded
+  // outside the shape-tracking try so a shape error can't leave `cfg` unbound.
   const cfg = loadSiConfig();
   try {
     const toolName = (parsedInput && parsedInput.tool_name) || '';
@@ -206,7 +263,7 @@ async function main() {
       } catch { /* best-effort — never break the hook */ }
     }
     const cmd = toolInput.command || '';
-    const toolOutput = (parsedInput && (parsedInput.tool_output || parsedInput.output || parsedInput.result)) || '';
+    const toolOutput = parsedInput ? responseBodyOf(parsedInput) : '';
     let event = null;
     if (detectPhaseEvent) {
       event = detectPhaseEvent(toolName, toolInput, toolOutput);
@@ -218,8 +275,11 @@ async function main() {
       else if (/^\s*gh\s+pr\s+(create|merge)\b/.test(cmd))       event = 'pr';
     }
     // Only append entries that carry a signal — a pure Bash echo with no file
-    // and no event adds noise without informing the analyzer.
-    if (root || event) {
+    // and no event adds noise unless its result is large enough to matter.
+    const outStr = toolOutput;
+    const chars = outStr.length;
+    const isAgent = toolName === 'Agent' || toolName === 'Task';
+    if (root || event || isAgent || chars >= SHAPE_MIN_CHARS) {
       // clampMaxEntries enforces [50, 5000] so a perProject typo can't
       // either starve the analyzer or balloon the shape file.
       let maxEntries;
@@ -234,11 +294,14 @@ async function main() {
       appendShape(sessionId, {
         t: Date.now(),
         tok: cumulative,
-        tool: toolName || null,
+        tool: (toolName === 'Task' ? 'Agent' : toolName) || null,
         root: root || null,
         file: filePath ? String(filePath) : null,
         event,
+        chars,
+        inputHash: safeInputHash(toolName, toolInput),
       }, { maxEntries });
+      recordRerunSignal(sessionId, cfg, chars);
     }
 
     // Post-compact regret monitoring: if there's a live snapshot (written by
@@ -290,6 +353,7 @@ async function main() {
               snap.postCompactCacheCreation = u.cache_creation_input_tokens || 0;
             }
             compactHistory.writeSnapshot(sessionId, snap);
+            stampOutcomeFill(sessionId, snap, u);
             intelLog('token-budget', 'info', 'post-compact cache-hit measured',
               { ratio: snap.postCompactCacheHitRatio,
                 read: snap.postCompactCacheRead,
@@ -305,56 +369,12 @@ async function main() {
     intelLog('token-budget', 'debug', 'shape append failed', { err: err && err.message });
   }
 
-  // Log at zone boundaries (only when crossing, not every call). Zones come
-  // from statusline.zones so token-budget, statusline, and suggest-compact
-  // report the SAME zone for a given token count — mismatched thresholds
-  // produce incoherent "orange at 300k in log, 350k in statusline" UX.
-  const zones = resolveZones(cfg);
-  const prevZone = getZone(cumulative - callTokens, zones);
-  const newZone = getZone(cumulative, zones);
-
-  if (newZone !== prevZone && newZone !== 'green') {
-    const messages = {
-      yellow: `[TokenBudget] ~${formatTokens(cumulative)} tokens used — good time to /compact after current task`,
-      orange: `[TokenBudget] ~${formatTokens(cumulative)} tokens — context rot zone. Consider /compact now`,
-      red:    `[TokenBudget] ~${formatTokens(cumulative)} tokens — compact immediately to prevent degraded output`
-    };
-    log(messages[newZone] || '');
-    intelLog('token-budget', 'info', `zone transition ${prevZone} → ${newZone}`, { cumulative, callTokens });
-  } else {
-    intelLog('token-budget', 'debug', `tick ${newZone}`, { cumulative, callTokens });
-  }
+  // The cumulative chars/4 tool-I/O estimate is written for diagnostics only.
+  // Zone decisions and messages belong to si-suggest-compact, which reads the
+  // transcript's real usage against the resolved window.
+  intelLog('token-budget', 'debug', 'tick', { toolIoEstimate: cumulative, callTokens });
 
   process.exit(0);
-}
-
-function getZone(tokens, zones) {
-  const z = zones || DEFAULT_ZONES;
-  if (tokens >= z.red) return 'red';
-  if (tokens >= z.orange) return 'orange';
-  if (tokens >= z.yellow) return 'yellow';
-  return 'green';
-}
-
-// Same defaults as lib/config.js DEFAULTS.statusline.zones. Duplicated with
-// intent — if the config module is missing, we still want reasonable zones
-// rather than throwing.
-const DEFAULT_ZONES = { yellow: 200000, orange: 300000, red: 400000 };
-
-function resolveZones(cfg) {
-  const fromCfg = cfg && cfg.statusline && cfg.statusline.zones;
-  if (!fromCfg) return DEFAULT_ZONES;
-  return {
-    yellow: Number.isFinite(fromCfg.yellow) ? fromCfg.yellow : DEFAULT_ZONES.yellow,
-    orange: Number.isFinite(fromCfg.orange) ? fromCfg.orange : DEFAULT_ZONES.orange,
-    red:    Number.isFinite(fromCfg.red)    ? fromCfg.red    : DEFAULT_ZONES.red,
-  };
-}
-
-function formatTokens(n) {
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${Math.round(n / 1000)}k`;
-  return String(n);
 }
 
 main().catch(err => {
