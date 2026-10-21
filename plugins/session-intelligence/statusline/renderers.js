@@ -501,8 +501,7 @@ function buildRenderers(C, deps = {}) {
     /** Output-token generation speed, `tps:235` (tokens/sec). Median of
      *  the last few streamed turns — per-message chunk-timestamp spans are
      *  pure generation time, so this tracks the model's real throughput
-     *  (fast mode, load, long-output turns all show up). Falls back to the
-     *  whole-session average (total output / total API time from stdin)
+     *  (fast mode, load, long-output turns all show up). Renders nothing
      *  when no streamed turn in the tail is usable. */
     tokenSpeed: (input, ctx) => {
       let tps = null;
@@ -511,15 +510,7 @@ function buildRenderers(C, deps = {}) {
         try {
           const est = lib.estimateTokenSpeed(input.transcript_path || input.transcriptPath);
           if (est && Number.isFinite(est.tps) && est.tps > 0) tps = est.tps;
-        } catch { /* degrade to fallback */ }
-      }
-      if (tps === null) {
-        const apiMs = input && input.cost && input.cost.total_api_duration_ms;
-        const outTok = (ctx.tokenTotals && ctx.tokenTotals.output)
-          || (input && input.context_window && input.context_window.total_output_tokens);
-        if (Number.isFinite(apiMs) && apiMs > 0 && Number.isFinite(outTok) && outTok > 0) {
-          tps = outTok / (apiMs / 1000);
-        }
+        } catch { /* no sample: render nothing */ }
       }
       if (tps === null || !(tps > 0)) return '';
       const v = tps >= 10 ? String(Math.round(tps)) : tps.toFixed(1);
