@@ -308,8 +308,8 @@ const DEFAULTS = {
     headChars: 2000,
     tailChars: 1500,
     tools: ['Read', 'Bash', 'Grep', 'Glob', 'WebFetch'],
-    // PreToolUse Bash rewrite (test runners, .log cats) via inputRules.
-    rewriteInput: true,
+    // PreToolUse Bash rewrite, opt-in (R15) (test runners, .log cats) via inputRules.
+    rewriteInput: false,
     inputRules: DEFAULT_INPUT_RULES,
   },
   learn: {
@@ -449,6 +449,8 @@ function applyEnvOverrides(cfg) {
 
   if (env.CLAUDE_SI_PRUNE === '0') cfg.prune.enabled = false;
   if (env.CLAUDE_SI_PRUNE === '1') cfg.prune.enabled = true;
+  if (env.CLAUDE_SI_PRUNE_REWRITE === '0') cfg.prune.rewriteInput = false;
+  if (env.CLAUDE_SI_PRUNE_REWRITE === '1') cfg.prune.rewriteInput = true;
   if (env.CLAUDE_SI_PRUNE_FLOOR) {
     const n = parseInt(env.CLAUDE_SI_PRUNE_FLOOR, 10);
     if (Number.isFinite(n) && n > 0 && n <= 10 * 1024 * 1024) cfg.prune.outputFloorChars = n;

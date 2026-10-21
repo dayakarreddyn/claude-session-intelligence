@@ -19,7 +19,7 @@ test('DEFAULTS.prune floor is 50000 chars with 2000/1500 head/tail', () => {
   assert.equal(cfg.tailChars, 1500);
   assert.deepEqual(cfg.tools, ['Read', 'Bash', 'Grep', 'Glob', 'WebFetch']);
   assert.equal(cfg.enabled, true);
-  assert.equal(cfg.rewriteInput, true);
+  assert.equal(cfg.rewriteInput, false);
 });
 
 test('decidePrune prunes a 60000-char Read and leaves 49999 chars alone', () => {
@@ -67,8 +67,8 @@ test('buildExcerpt carries head, tail, omitted count and the /si expand hint', (
 });
 
 const WRAP = (cmd, pattern) =>
-  `( set -o pipefail; ( ${cmd}\n rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | grep -E -A 5 '${pattern}|\\[exit=' | head -100 )`;
-const TEST_PATTERN = '(FAIL|ERROR|error:|not ok|# fail|# pass|passed|failed|^ok\\b)';
+  `( set -o pipefail; ( ${cmd}\n rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | grep -E -A 5 '${pattern}|\\[exit=' | tail -n 100 )`;
+const TEST_PATTERN = '(FAIL|ERROR|error:|not ok|# fail|# pass|passed|failed)';
 
 test('rewriteCommand wraps test runners with exit-preserving grep/head shape and names the rule', () => {
   const r = rewriteCommand('npm test');
@@ -183,4 +183,31 @@ test('extractPrunableText: string, Bash, Read shapes rebuild in place; others re
   for (const v of [null, undefined, 5, [], {}, { content: [{ type: 'text', text: 'z' }] }, { type: 'text', file: {} }]) {
     assert.equal(extractPrunableText({ toolName: 'mcp__x', toolResponse: v }), null);
   }
+});
+
+test('wrapper: 2,000 matching lines then exit 0 -> status 0, [exit=0] visible (no SIGPIPE 141)', () => {
+  const cmd = "seq 1 2000 | sed 's/^/passed /'";
+  const r = spawnSync('bash', ['-c', WRAP(cmd, TEST_PATTERN)], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /\[exit=0\]/);
+});
+
+test('wrapper: 2,000 matching lines then exit 3 -> status 3, [exit=3] visible', () => {
+  const cmd = "seq 1 2000 | sed 's/^/passed /'; sh -c 'exit 3'";
+  const r = spawnSync('bash', ['-c', WRAP(cmd, TEST_PATTERN)], { encoding: 'utf8' });
+  assert.equal(r.status, 3);
+  assert.match(r.stdout, /\[exit=3\]/);
+});
+
+test('wrapper: real node --test of a passing file -> status 0 and "# pass" visible', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-wrap-'));
+  const file = path.join(dir, 'tiny.test.js');
+  fs.writeFileSync(file, "require('node:test')('t', () => {});\n");
+  try {
+    const r = spawnSync('bash', ['-c', rewriteCommand(`node --test --test-reporter=tap ${file}`).command],
+      { encoding: 'utf8', env: (({ NODE_TEST_CONTEXT, ...rest }) => rest)(process.env) });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /# pass/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

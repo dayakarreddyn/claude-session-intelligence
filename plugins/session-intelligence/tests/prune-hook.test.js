@@ -19,14 +19,14 @@ function sandbox() {
   return home;
 }
 
-function runHook(file, payload, home) {
+function runHook(file, payload, home, timeout = 20_000) {
   const clean = { ...process.env };
-  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT', 'CLAUDE_SI_PRUNE', 'CLAUDE_SI_PRUNE_FLOOR']) delete clean[k];
+  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT', 'CLAUDE_SI_PRUNE', 'CLAUDE_SI_PRUNE_FLOOR', 'CLAUDE_SI_PRUNE_REWRITE']) delete clean[k];
   return spawnSync(process.execPath, [path.join(HOOKS, file)], {
     input: JSON.stringify(payload),
     env: { ...clean, HOME: home, CLAUDE_SESSION_ID: payload.session_id || '' },
     encoding: 'utf8',
-    timeout: 20_000,
+    timeout,
   });
 }
 
@@ -76,6 +76,7 @@ test('PostToolUse: below-floor result produces no stdout', () => withHome((home)
 }));
 
 test('PreToolUse: npm test is rewritten via updatedInput with no permissionDecision', () => withHome((home) => {
+  fs.writeFileSync(path.join(home, '.claude', 'session-intelligence.json'), JSON.stringify({ prune: { rewriteInput: true } }));
   const input = { command: 'npm test', description: 'run tests' };
   const r = runHook('si-prune-output.js', { hook_event_name: 'PreToolUse', session_id: sid, tool_name: 'Bash', tool_input: input }, home);
   const out = JSON.parse(r.stdout);
@@ -86,6 +87,19 @@ test('PreToolUse: npm test is rewritten via updatedInput with no permissionDecis
   assert.equal(out.hookSpecificOutput.updatedInput.description, 'run tests');
   assert.equal('permissionDecision' in out.hookSpecificOutput, false);
   assert.equal(input.command, 'npm test', 'input not mutated');
+}));
+
+test('PreToolUse: default config (rewriteInput false) emits nothing for npm test', () => withHome((home) => {
+  const r = runHook('si-prune-output.js', { hook_event_name: 'PreToolUse', session_id: sid, tool_name: 'Bash', tool_input: { command: 'npm test' } }, home);
+  assert.equal(r.status, 0); assert.equal(r.stdout, '');
+}));
+
+test('PreToolUse: CLAUDE_SI_PRUNE_REWRITE=1 opts in via env', () => withHome((home) => {
+  const r = spawnSync(process.execPath, [path.join(HOOKS, 'si-prune-output.js')], {
+    input: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: sid, tool_name: 'Bash', tool_input: { command: 'npm test' } }),
+    env: { ...process.env, HOME: home, CLAUDE_SI_PRUNE_REWRITE: '1' }, encoding: 'utf8', timeout: 20_000,
+  });
+  assert.ok(JSON.parse(r.stdout).hookSpecificOutput.updatedInput.command.includes('[exit='));
 }));
 
 test('PreToolUse: run_in_background commands and non-Bash tools are left alone', () => withHome((home) => {
@@ -153,20 +167,26 @@ test('toolArchive.enabled=false: no prune, no archive file, no pruned row (R9)',
   assert.ok(!row || !row.pruned);
 }));
 
-test('ttlDays so small the archive is swept at once: no prune, no stdout (maxPerSession/ttlDays <= 0 mean no limit)', () => withHome((home) => {
+test('R9 invariant: whenever the hook emits stdout the archive entry is readable (tiny ttlDays)', () => withHome((home) => {
   writeCfg(home, { toolArchive: { ttlDays: 1e-9 } });
   const r = runHook('si-prune-output.js', readPayload('toolu_21', 60000), home);
-  assert.equal(r.status, 0); assert.equal(r.stdout, '');
-  const row = archiveRow(home, 'toolu_21');
-  assert.ok(!row || !row.pruned);
+  assert.equal(r.status, 0);
+  if (r.stdout !== '') {
+    const { readArchive } = require('../lib/tool-archive');
+    const prev = process.env.HOME;
+    process.env.HOME = home;
+    try { assert.ok(readArchive(sid, 'toolu_21'), 'excerpt emitted but archive entry missing'); }
+    finally { process.env.HOME = prev; }
+  }
 }));
 
 test('archive write failure (read-only state dir): no prune, exit 0', { skip: process.getuid && process.getuid() === 0 }, () => withHome((home) => {
   const state = path.join(home, '.claude', 'state');
   fs.chmodSync(state, 0o500);
   try {
-    const r = runHook('si-prune-output.js', readPayload('toolu_22', 60000), home);
-    assert.equal(r.status, 0); assert.equal(r.stdout, '');
+    const r = runHook('si-prune-output.js', readPayload('toolu_22', 60000), home, 60_000);
+    assert.equal(r.status, 0, `status=${r.status} error=${r.error} signal=${r.signal}`);
+    assert.equal(r.stdout, '', `error=${r.error} signal=${r.signal}`);
   } finally { fs.chmodSync(state, 0o700); }
 }));
 

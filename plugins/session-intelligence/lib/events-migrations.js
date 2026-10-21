@@ -274,19 +274,20 @@ const MIGRATIONS = Object.freeze([
 
 /**
  * Run guarded ADD COLUMNs, then each pending migration in order. Each
- * migration is best-effort in its own try/catch: a failure leaves the version
- * unadvanced so it retries on the next open. Returns { from, to }.
+ * migration runs in its own try/catch: the first failure stops the loop (later
+ * migrations may depend on it) and leaves user_version unadvanced past it, so
+ * it retries on the next open. Returns { from, to }.
  */
-function runMigrations(db) {
+function runMigrations(db, migrations = MIGRATIONS) {
   addGuardedColumns(db);
   const from = getUserVersion(db);
-  for (const m of MIGRATIONS) {
+  for (const m of migrations) {
     try {
       if (getUserVersion(db) < m.version) {
         m.run(db);
         db.pragma(`user_version = ${m.version}`);
       }
-    } catch { /* best-effort — the sid-join read path / unpriced rows still work */ }
+    } catch { break; /* leave user_version at the last good migration; retry next open */ }
   }
   return { from, to: getUserVersion(db) };
 }

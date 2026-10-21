@@ -47,3 +47,18 @@ test('contextPct is empty without a usage line', () => {
   const out = render(setup(0));
   assert.doesNotMatch(out, /cmp:/);
 });
+
+test('no usage line + large chars/3 estimate file: tokens field renders idle, uncoloured by zone', () => {
+  const ctx = setup(0);
+  fs.writeFileSync(path.join(ctx.home, '.claude', 'session-intelligence.json'),
+    JSON.stringify({ statusline: { fields: ['tokens'] } }));
+  fs.writeFileSync(path.join(ctx.home, 'claude-token-budget-cmp1'), '3000000');
+  const input = { session_id: 'cmp1', cwd: ctx.home, model: { id: 'claude-opus-5-5', display_name: 'Opus 5.5' } };
+  const r = spawnSync(process.execPath, [STATUSLINE], {
+    input: JSON.stringify(input), encoding: 'utf8',
+    env: { ...process.env, HOME: ctx.home, USERPROFILE: ctx.home, TMPDIR: ctx.home },
+  });
+  assert.match(r.stdout, /idle/);
+  assert.doesNotMatch(r.stdout, /3\.0M|3000k|\d+%/);
+  assert.doesNotMatch(r.stdout, /\x1b\[(?:31|33|91|38;5;\d+)m[^\x1b]*idle/);
+});

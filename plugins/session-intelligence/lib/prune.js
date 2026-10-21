@@ -22,7 +22,7 @@ const DEFAULT_INPUT_RULES = Object.freeze([
   Object.freeze({
     name: 'test-runner',
     match: '^\\s*(npm|pnpm|yarn)\\s+(run\\s+)?test\\b|^\\s*(pytest|go\\s+test|cargo\\s+test)\\b|^\\s*node\\s+--test\\b',
-    pattern: '(FAIL|ERROR|error:|not ok|# fail|# pass|passed|failed|^ok\\b)',
+    pattern: '(FAIL|ERROR|error:|not ok|# fail|# pass|passed|failed)',
   }),
   Object.freeze({
     name: 'log-cat',
@@ -111,7 +111,7 @@ function applyRule(command, rule) {
     // (comment, `&`) cannot swallow or break `rc=$?`.
     const pattern = String(rule.pattern).replace(/'/g, "'\\''");
     return `( set -o pipefail; ( ${command}\n rc=$?; echo "[exit=$rc]"; exit $rc ) 2>&1 | ` +
-      `grep -E -A 5 '${pattern}|${EXIT_MARKER_PATTERN}' | head -100 )`;
+      `grep -E -A 5 '${pattern}|${EXIT_MARKER_PATTERN}' | tail -n 100 )`;
   }
   return `${command}${rule.suffix || ''}`;
 }

@@ -49,7 +49,7 @@ function loadArchiveConfig() {
 
 function handlePre(payload, cfg) {
   if (payload.tool_name !== 'Bash') return;
-  if (cfg.rewriteInput === false || cfg.enabled === false) return;
+  if (cfg.rewriteInput !== true || cfg.enabled === false) return;
   const input = payload.tool_input;
   if (!input || typeof input.command !== 'string' || input.run_in_background) return;
   const { command, rule } = require(path.join(SI_LIB, 'prune')).rewriteCommand(input.command, cfg.inputRules);

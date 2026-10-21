@@ -614,7 +614,7 @@ function showFirstRunTips(state) {
 // — cheap (one readdir, lstat per match), best-effort (any failure logged at
 // debug and moved past), bounded (only matches our own filename prefix).
 const STALE_TEMP_MAX_AGE_DAYS = 7;
-const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot)-/;
+const STALE_TEMP_PREFIX_RE = /^claude-(compact-state|token-budget|tool-count|ctx-shape|tool-archive|cost-snapshot|usage-cache|context-peak|constraints)-/;
 // Sweep both ~/.claude/state/ (current home, per-session state moved here so
 // macOS tmpdir cleanup can't strand stale-but-valid files) AND os.tmpdir()
 // (legacy home — clean up leftovers from pre-migration installs). pruneStateDir
@@ -802,7 +802,13 @@ function buildNexusAdditionalContext(cwd) {
 // resume banner only lands via systemMessage. additionalContext still
 // carries the model-facing copy.
 function emitAdditionalContext(textParts, systemMessage) {
-  const combined = require(path.join(SI_LIB, 'hook-output')).renderBootstrapContext(Array.isArray(textParts) ? textParts : [textParts]);
+  const parts = Array.isArray(textParts) ? textParts : [textParts];
+  let combined;
+  try { combined = require(path.join(SI_LIB, 'hook-output')).renderBootstrapContext(parts); }
+  catch (err) {
+    intelLog('bootstrap', 'warn', 'hook-output unavailable — plain join', { err: err.message });
+    combined = parts.filter((s) => typeof s === 'string' && s).join('\n\n');
+  }
   if (!combined && !systemMessage) return;
   const out = {
     hookSpecificOutput: {
@@ -990,7 +996,10 @@ function main() {
     } catch { /* rendering failure shouldn't block the hook */ }
   }
 
-  emitAdditionalContext([continuation, nexus, hygiene, require(path.join(SI_LIB, 'resume-advice')).buildResumeCacheContext(input)], systemMessage);
+  let resume = '';
+  try { resume = require(path.join(SI_LIB, 'resume-advice')).buildResumeCacheContext(input); }
+  catch (err) { intelLog('bootstrap', 'warn', 'resume advice failed', { err: err.message }); }
+  emitAdditionalContext([continuation, nexus, hygiene, resume], systemMessage);
 
   process.exit(0);
 }

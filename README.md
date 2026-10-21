@@ -58,7 +58,7 @@ Without session intelligence:
 | Orange | 30-40% | 300-400k | 60-80k | Context rot — compact now |
 | Red | >40% | >400k | >80k | Urgent — compact immediately |
 
-No official degradation point exists for Claude 5; these fractions are calibrated to the Opus 4.6 evidence and Claude Code's own API defaults of 100K for clearing and 150K for compaction. Set `statusline.zoneMode: "absolute"` to keep fixed token thresholds (`statusline.zones`), or export `CLAUDE_SI_ZONE_MODE=absolute`.
+No official degradation point exists for Claude 5; these fractions are calibrated to the Opus 4.6 evidence and Claude Code's own API defaults of 100K for clearing and 150K for compaction. Set `statusline.zoneMode: "absolute"` to keep fixed token thresholds (`statusline.zones`), or export `CLAUDE_SI_ZONE_MODE=absolute`. In the default `zoneMode: "fraction"` the thresholds are `statusline.zoneFractions` (default `{ "yellow": 0.20, "orange": 0.30, "red": 0.40 }`) of the resolved context window.
 
 After **≥5 compacts** land in `~/.claude/logs/compact-history.jsonl`, the zones adapt to your own pattern: `orange` anchors to P50 of your historical compact-at-tokens, `red` to P90. Bounded ±30% from defaults so a noisy history can't silence the warnings. See [Learning Loop](#learning-loop) below.
 
@@ -281,7 +281,9 @@ Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — status
 
 By default we read `transcript_path` from the stdin payload Claude Code provides and extract the most recent assistant message's `usage` block. That gives the **authoritative Anthropic API count** — `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. This is what Claude actually sees.
 
-When a transcript isn't available (first redraw of a new session, or `tokenSource: "estimate"` in config), we fall back to the tool-I/O estimate maintained by the PostToolUse hook. Estimate values are prefixed with `~` so you can tell which source is active.
+When the transcript has no usage line yet (first redraw of a new session), the `tokens` field renders an uncoloured `idle` cell and the zone gate stays idle: the chars/3 tool-I/O estimate is never used to colour the bar on its own. Set `tokenSource: "estimate"` to opt into the estimate explicitly; its values are prefixed with `~`.
+
+The transcript usage reader scans backwards from the end of the file, bounded to about 4 MB of non-usage tail (8 chunks of 512 KB). If no usage line appears within that window, no usage is reported and the zone gate stays idle rather than guessing.
 
 ### Available fields
 
@@ -573,6 +575,10 @@ Sections, in order:
 - **Tool-response archive** — snapshot count, recall %, total bytes; nudge if you're accumulating without recalling.
 - **Projects** — top 10 by spend, with sessions, cost, compacts, red-rate %, archive count, recall %.
 - **Recent compacts** — last 8 with when, project, tokens, cost, shift flag, trigger.
+
+### Telemetry tables: `compact_outcomes` and `cache_hits`
+
+`~/.claude/state/si-events.db` also holds `compact_outcomes` (one row per compact from the PostCompact hook: trigger, summary size, `constraints_total` / `constraints_retained` / `retention`, the missing items, and context fill before/after) and `cache_hits` (one row per assistant message: `cache_read`, `cache_creation`, `context_tokens` and the hit `ratio`; repeats of the same message are ignored). `/si stats` reads both for retention and per-turn cache-hit series.
 
 #### Usage budgets (`usageBudget`)
 
@@ -957,6 +963,34 @@ grep "pre-compact" ~/.claude/logs/session-intel-$(date +%F).log | tail -5
 grep "ERROR" ~/.claude/logs/session-intel-*.log
 ```
 
+## Output Pruner (PostToolUse `updatedToolOutput`)
+
+Very large tool results are replaced, before they enter the context window, by a head + tail excerpt. The full body is always archived first (see [Tool-Response Archive](#tool-response-archive)) and the excerpt carries the id to replay it:
+
+```
+[SI pruned: Read result 100,000 chars → 3,612-char excerpt. Run `/si expand toolu_01ABC` to replay it verbatim.]
+<head>
+…[96,500 chars omitted]…
+<tail>
+```
+
+If the archive entry cannot be written or does not survive the eviction/TTL sweep, nothing is pruned.
+
+| Key | Default | Effect |
+|---|---|---|
+| `prune.enabled` | `true` | Master switch (also needs `toolArchive.enabled`) |
+| `prune.outputFloorChars` | `50000` | Results shorter than this are left untouched |
+| `prune.headChars` / `prune.tailChars` | `2000` / `1500` | Excerpt sizes |
+| `prune.tools` | `["Read","Bash","Grep","Glob","WebFetch"]` | Tools eligible for pruning |
+| `prune.rewriteInput` | `false` | Opt-in PreToolUse rewrite of Bash commands (see below) |
+| `prune.inputRules` | test-runner and `.log` cat rules | Rules used when `rewriteInput` is on |
+
+Env overrides: `CLAUDE_SI_PRUNE=0|1`, `CLAUDE_SI_PRUNE_FLOOR=<chars>`, `CLAUDE_SI_PRUNE_REWRITE=0|1`.
+
+**Do not set the floor below Claude Code's own caps** (Read: 25K tokens, Bash: 30K chars). Claude Code already truncates results at those sizes, so a lower floor makes the pruner and the built-in limits fight over the same output and hides content the model could otherwise see.
+
+**`rewriteInput` is off by default.** When enabled, a PreToolUse hook rewrites matching Bash commands via `updatedInput`: test runners (`npm test`, `pytest`, `go test`, `cargo test`, `node --test`) get an exit-status-preserving wrapper that keeps only failure/summary lines (and prints `[exit=N]`), and `cat *.log` gets `| tail -n 200`. It is opt-in because it changes the command the user approved and can hide output the model needs.
+
 ## Hooks Installed
 
 | Hook | Event | Purpose |
@@ -967,9 +1001,13 @@ grep "ERROR" ~/.claude/logs/session-intel-*.log
 | `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
 | `si-tool-archive.js` | PostToolUse | Archives tool responses above `toolArchive.thresholdChars` so `/si expand <tool_use_id>` can replay them after `/compact` |
 | `si-suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
+| `si-prune-output.js` | PreToolUse, PostToolUse | Replaces oversized tool results with an archived head/tail excerpt; optional Bash command rewrite (`prune.rewriteInput`, default off) |
+| `si-post-compact.js` | PostCompact | Telemetry only: scores how many registered constraints survive in the compact summary and records a `compact_outcomes` row (retention, fill before/after) |
 | `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; writes a one-line stderr hint (never blocks) when the task looks like it just shifted |
 
 All emit structured entries to the debug log (see above).
+
+**New hook registrations need a new session.** The `PreToolUse` and `PostCompact` entries in `hooks/hooks.json` only take effect in a NEW Claude Code session; already-running sessions keep the hook set they started with. After updating the plugin, run `npm run sync` (plugin directory) to refresh the plugin cache, then start a new session.
 
 ## Files Installed
 

@@ -1111,7 +1111,7 @@ function buildRenderers(C) {
         ? `${C.dim}~${C.reset}` : '';
       // Idle bar: skip the fill bar entirely, just show the zone icon.
       if (t <= 0) {
-        return `${color}${sourceTag}${zone.icon} idle${C.reset}`;
+        return `${C.dim}${sourceTag}${zone.icon} idle${C.reset}`;
       }
       const cap = contextCap(input, ctx.cfg);
       const segs = Number.isFinite(ctx.cfg.maxBarSegments) ? ctx.cfg.maxBarSegments : 14;
@@ -1968,9 +1968,9 @@ function main() {
       usedTranscript = true;
     }
   }
-  // Estimate tool count always; tokens fall through to estimate when transcript absent or disabled.
+  // Estimate tool count always; tokens use the chars/3 estimate only on explicit tokenSource 'estimate'.
   const estimate = loadEstimate(sessionId);
-  if (!usedTranscript && cfg.tokenSource !== 'transcript') {
+  if (!usedTranscript && cfg.tokenSource === 'estimate') {
     tokens = estimate.tokens;
   }
 

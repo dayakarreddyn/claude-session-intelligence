@@ -125,3 +125,22 @@ test('v4 migration reprices an Opus 5.5 agent row from the generic Opus rate', (
     assert.ok(Math.abs(row.cost_usd - 4.0) < 1e-9, `cost=${row.cost_usd}`);
   } finally { cleanup(sb); }
 });
+
+test('runMigrations stops at the first failing migration: version stays below it and later ones do not run', () => {
+  const box = mkSandboxDb();
+  try {
+    const { db } = openDatabase(path.join(box.dir, 'inj.db'));
+    try {
+      db.pragma('user_version = 5');
+      let laterRan = false;
+      const injected = [
+        { version: 6, run: () => { throw new Error('boom'); } },
+        { version: 7, run: () => { laterRan = true; } },
+      ];
+      const r = runMigrations(db, injected);
+      assert.equal(r.to, 5);
+      assert.equal(laterRan, false);
+      assert.equal(Number(db.pragma('user_version', { simple: true })), 5);
+    } finally { db.close(); }
+  } finally { cleanup(box); }
+});
