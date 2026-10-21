@@ -217,7 +217,7 @@ suggested — skip either if there's nothing new to record:
 
   1. project_session_YYYY-MM-DD_<sid8>.md (type: project) — decisions, files
      touched, follow-ups, any non-obvious context that took >3 attempts to
-     discover. Filename is deterministic: date + first 8 chars of session id,
+     discover. Filename is deterministic: date + first eight characters of the session id,
      so repeated compacts in the same session extend one file while distinct
      sessions never collide.
   2. reference_<pattern>.md — ONLY if a reusable recipe/layout/rule was
@@ -262,20 +262,24 @@ Read-only — never modifies files. Override thresholds via `--stale-days <N>` a
 
 ## Status Line
 
-Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw. Default `verbose` preset emits four lines:
+Configurable, multi-line status bar rendered at the bottom of Claude Code on every redraw. The default `verbose` preset renders five groups (one per line); this is the exact render of the `a_fable_1m_48pct` test fixture (a Fable 5.1 session on a 1M window at 48% context, dim colours stripped):
 
+<!-- statusline-example -->
 ```
-▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%) · compact:1hr 22m ago · c$12.34 / s$68.20
-2d 19hr · sid:82cc15b9 · 612 tools · c$491.56 / s$1114.78 · 85.66M ↓7.4k ↑503.0k c85.15M · cache:99%
-b:36% r:1hr 22m · w:95% r:1d 5hr · ~/DWS/claude-session-intelligence
-Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — statusline v2
+▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48% · cache:98%
+b:77% · 2h40m · sid:golden · c$119/~s$2244 · t1.4M ↓6k ↑384 c1.4M
+~/work
+Fable 5.1
+w:20% r:<dur> · fable-5-1:$0.73·100%
 ```
 
-**Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim. Line 3's usage fields (`b:`, `w:`) escalate yellow → orange → red as quota utilization crosses 60 / 85 / 95%. `compactAge` goes **red** when the last /compact was ≥2h ago. Field separators render in near-invisible dark grey (`\x1b[38;5;237m`) so content stays the visual focus. Emojis are off by default — opt-in via the `emoji` / `emoji2` fields if you want them back.
+`<dur>` stands in for a live reset countdown (for example `r:4d12hr`). Cells with no data are skipped, so a quiet session renders fewer cells than the full field list below (the example has no tool count, tokens/sec, branch, or diffstat, so those cells are absent).
 
-### Quota & reset timers (line 3)
+**Colour policy — one colour, one signal.** The whole bar exists to warn about context pressure, so `tokens` on line 1 stays zone-coloured (green → yellow → orange → red) and every other field is `dim`. Line 2 is entirely dim. The usage fields (`b:` on line 2, `w:` on line 5) escalate yellow → orange → red as quota utilization crosses 60 / 85 / 95%. `compactAge` goes **red** when the last /compact was ≥2h ago, and `spendLimit` goes red once the budget is exhausted. Field separators render in near-invisible dark grey (`\x1b[38;5;237m`) so content stays the visual focus. Emojis are off by default — opt-in via the `emoji` / `emoji2` fields if you want them back.
 
-`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns. On Claude Code ≥2.1.90 stdin is authoritative: the data comes straight from the statusline JSON (`rate_limits.five_hour` / `.seven_day`), fresh every redraw, and no poller runs whenever `rate_limits` is present (a window absent from it simply renders nothing). Only older builds without `rate_limits` use the `api.anthropic.com/api/oauth/usage` poller: a detached background worker (`lib/usage-refresh.js`) refreshes a disk cache (180 s TTL, honoring 429 `Retry-After` with a 5-minute error backoff), and a stale-by-age or errored cache is rendered with a `~` marker. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any hard failure silently renders an empty cell — never blocks.
+### Quota & reset timers (lines 2 and 5)
+
+`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns. On Claude Code ≥2.1.90 stdin is authoritative: the data comes straight from the statusline JSON (`rate_limits.five_hour` / `.seven_day`), fresh every redraw, with no API request and no poller whenever `rate_limits` is present (a window absent from it simply renders nothing). Only older builds without `rate_limits` use the `api.anthropic.com/api/oauth/usage` poller: a detached background worker (`lib/usage-refresh.js`) refreshes a disk cache (180 s TTL, honoring 429 `Retry-After` with a 5-minute error backoff), and a stale-by-age or errored cache is rendered with a `~` marker. That poller is the only part of the statusline that can make a network request, and only on those older builds. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any hard failure silently renders an empty cell — never blocks.
 
 ### Real token count
 
@@ -297,28 +301,28 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `dirty` | `±3` | Simple count of dirty files (dim) |
 | `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
 | `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
-| `tokens` | `▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%)` | **Full context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap, colored green → yellow → orange → red by current zone. Cap auto-detects: `[1m]` / `-1m` tag in `model.id` → 1M, Opus 4.x / Sonnet 4.x family → 1M (newer Claude Code builds drop the `[1m]` marker once 1M is the default), else 200k. Override with `statusline.contextCap`. Prefixed with `~` when using the estimate fallback. Zones are adaptive (fall back to defaults when history < 5 compacts) |
+| `tokens` | `▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48%` | **Context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap (14 segments by default), coloured green → yellow → orange → red by current zone. Cap auto-detects: `[1m]` / `-1m` tag in `model.id` → 1M, Opus 4.x / Sonnet 4.x / Fable family → 1M (newer Claude Code builds drop the `[1m]` marker once 1M is the default), else 200k. Override with `statusline.contextCap`. When the window is unknown (a guessed fallback) the cell is just `used/?` with no bar, percent or zone colour. Prefixed with `~` when using the estimate fallback; `idle` before the first usage line. Zones are adaptive (fall back to defaults when history < 5 compacts) unless `zoneMode` is `absolute` |
 | `contextPct` | `cmp:43%` | **% to compaction.** Context tokens divided by the resolved auto-compaction point (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then `modelSettings.<model>.autoCompactWindow`, then `autoCompactWindow`, else the model default: ~967K on 1M models). 100% means Claude Code is about to compact; this is not a window percentage. Zone-coloured (<60% green, 60-85% yellow, 85-95% orange, 95%+ red). Silent until the transcript has a real usage line. Not in any default preset |
 | `zone` | `orange` | Zone name only, coloured |
-| `tools` | `70 tools` | Unified tool count — every PostToolUse hook fire (dim) |
+| `tools` | `70 tools` | Tool-call count for the session — every PostToolUse hook fire, read from the token-budget estimate in the SI state dir (`~/.claude/state/`; a legacy copy in the temp dir is the fallback). Hidden at 0 (dim) |
 | `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
-| `thinking` | `think:32k` | Estimated extended-thinking tokens in recent assistant turns. Residual of `output_tokens` after subtracting visible text + tool_use content on turns with `thinking` blocks. Rendered only when the recent-window estimate crosses `statusline.thinkingMinDisplay` (default 5k). Opt-in — add to `fields` to enable (dim) |
-| `sessionId` | `sid:1b672dad` | Short session id (first 8 chars) — useful when multiple Claude Code windows are open (dim) |
+| `thinking` | `think:32k` | Extended-thinking tokens in recent assistant turns. Exact where Claude Code reports `message.usage.output_tokens_details.thinking_tokens`; when a turn lacks it, the estimate falls back to the residual of `output_tokens` after subtracting visible text + `tool_use` content, and the cell is marked `think:~32k`. Rendered only when the recent-window figure crosses `statusline.thinkingMinDisplay` (default 5k). Opt-in — add to `fields` to enable (dim) |
+| `sessionId` | `sid:1b672d` | Short session id (first six characters) — useful when multiple Claude Code windows are open (dim) |
 | `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (dim; prices configurable) |
-| `tokenFlow` | `75.3M ↓60.4k ↑600.2k c74.9M` | **Cumulative** token breakdown across the session. `total` sums all four usage fields; `↓ in` = `input_tokens + cache_creation_input_tokens` (everything ingressed); `↑ out` = `output_tokens`; `c` = `cache_read_input_tokens` (served from cache). One incremental transcript pass shared with `cost` / `cacheSaved` (dim) |
-| `cacheHit` | `cache:92%` | Live prompt-cache hit ratio on the latest assistant turn: `cache_read / (cache_read + cache_creation)`. Dim green ≥70%, dim yellow 30–70%, dim red <30%. Hidden on turns with no cacheable prefix (first turn of a session). The one coloured field on line 3 — colour escalates when `compact.stablePrefix` isn't paying off (low cache-hit on a stable working set) |
+| `tokenFlow` | `t75M ↓60k ↑600k c74M` | **Cumulative** token breakdown across the session. `t` = total of all four usage fields; `↓` = `input_tokens`; `↑` = `output_tokens`; `c` = `cache_read_input_tokens + cache_creation_input_tokens` (all cache activity). The three parts sum to the total (`↓ + ↑ + c = t`). One incremental transcript pass shared with `cost` / `cacheSaved` (dim) |
+| `cacheHit` | `cache:92%` | Live prompt-cache hit ratio on the latest assistant turn: `cache_read / (cache_read + cache_creation)`. Dim green ≥70%, dim yellow 30–70%, dim red <30%. Hidden on turns with no cacheable prefix (first turn of a session). Colour escalates when `compact.stablePrefix` isn't paying off (low cache-hit on a stable working set) |
 | `cacheTokens` | `prefix:120k/3k` | Latest turn's prefix breakdown — `<cache_read>/<cache_creation>` tokens. Low read + high creation on a stable working set is the warning sign that `stablePrefix` is leaking a volatile value somewhere. Dim |
 | `cacheSaved` | `saved:$2.83` | **Cumulative** USD saved across the session by cache hits vs. paying the uncached input rate for the same tokens. Hidden when savings are under $0.10 (not worth the field) (dim) |
-| `compactAge` | `compact:2hr 13m ago` | Time since last `/compact` event. Dim when <2h, **red** when ≥2h — the only line-2 field that escalates, because it's the one line-2 signal that says "you should act" |
-| `compactCost` | `c$12.34 / s$68.20` | Cost + cache-savings accrued **since last /compact**; `s$` is list-price cache savings scaled by the official/transcript cost ratio, and `~` marks it as an SI estimate. Incrementally cached at `/tmp/claude-cost-sincecompact-<sid>`, auto-invalidated when compact mtime advances. Shows `c$` only when ≥$0.01, `~s$` only when ≥$0.10; hidden when both trivial (dim) |
-| `costSaved` | `c$119 / ~s$661` | Session cost + cache-savings; `~s$` is list-price cache savings scaled by the official/transcript cost ratio, and `~` marks it as an SI estimate (dim) |
-| `blockUsage` | `b:47% r:1hr 12m` | Claude's 5-hour block quota used + reset countdown; leads line 2 next to session duration + time until reset. Sourced from statusline stdin `rate_limits` (CC ≥2.1.90); cached `/api/oauth/usage` fallback for older builds, rendering last-good values with a `~` marker during API outages |
-| `weekUsage` | `w:31% r:4d 12hr` | Weekly (7-day) quota used + time until reset. Same sourcing as `blockUsage`; % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95% |
-| `modelSplit` | `fable-5:$1.7k·61% opus-4-8:$938·33%` | Per model: session spend (`$`, abbreviated to `k` past $1000) and share of session spend (`%`). Merges parent-conversation turns with subagent runs from the events DB; top 4 models, ones rounding to 0% dropped. No per-model quota is shown — Anthropic exposes only the account-wide weekly window (the `w:` cell), so a per-model "weekly remaining" would be fabricated. Per-model session spend is still recorded to `session_model_costs` for `/si stats` |
-| `tokenSpeed` | `tps:238` | Output-token generation speed (tokens/sec) — median of the last few streamed turns, measured from per-message chunk-timestamp spans (pure generation time). Renders nothing when the tail has no streamed turn |
-| `modelQuota` | `opus:12/88%` | Per-model QUOTA used/available from the poller cache's `seven_day_<model>` buckets — only on older builds that send no stdin `rate_limits` (stdin carries no per-model buckets); `~` marks a stale or errored cache. Dormant on plans without per-model limits |
-| `spendLimit` | `sl:$21/$50w r:2d4hr` | Gateway-account spend budget from stdin `rate_limits.spend_limit` (Claude Code ≥2.1.251): used/limit USD plus period letter (`d`/`w`/`m`), or `sl:42%` without USD fields; red at ≥100%; empty when absent (dim) |
-| `cwd` | `~/DWS/claude-session-intelligence` | Full working directory, ccstatusline-style. `$HOME` collapses to `~`; middle-ellipsis when longer than 60 chars (keeps the leaf) (dim) |
+| `compactAge` | `cpt:2h13m ago` | Time since this session's last `/compact`. Dim when <2h, **red** when ≥2h — the one line-1 signal that says "you should act". Hidden until the session has compacted |
+| `compactCost` | `c$12/~s$68` | Cost + cache savings accrued **since last /compact**; `~s$` is list-price cache savings scaled by the official/transcript cost ratio, and `~` marks it as an SI estimate. Incrementally cached at `~/.claude/state/claude-cost-sincecompact-<sid>.v4.json`, auto-invalidated when the compact mtime advances (the whole-session totals cache is `claude-cost-<sid>.v5.json` in the same directory). Shows `c$` only when ≥$0.01, `~s$` only when ≥$0.10; hidden when both are trivial (dim) |
+| `costSaved` | `c$119/~s$2244` | Session cost + cache savings; `~s$` is list-price cache savings scaled by the official/transcript cost ratio, and `~` marks it as an SI estimate. `c$` is hidden at zero, `~s$` below $0.10 (dim) |
+| `blockUsage` | `b:47% r:1hr12m` | Claude's 5-hour block quota used + reset countdown. Sourced from statusline stdin `rate_limits` (CC ≥2.1.90); the cached `/api/oauth/usage` poller is used only on older builds that send no `rate_limits`, and a stale or errored cache renders with a `~` marker. A window absent from `rate_limits` renders nothing |
+| `weekUsage` | `w:31% r:4d12hr` | Weekly (7-day) quota used + time until reset. Same sourcing as `blockUsage`; % zone-coloured: green <60%, yellow 60-85%, orange 85-95%, red ≥95% |
+| `modelSplit` | `fable-5:$1.7k·61% opus-4-8:$938·33%` | Per model: session spend (`$`, abbreviated to `k` past $1000) and share of session spend (`%`). Merges parent-conversation turns with subagent runs from the events DB; top 4 models, ones rounding to 0% dropped. No per-model quota is shown here — Anthropic exposes only the account-wide weekly window (the `w:` cell), so a per-model "weekly remaining" would be fabricated. Per-model session spend is still recorded to `session_model_costs` for `/si stats` |
+| `tokenSpeed` | `tps:238` | Output-token generation speed (tokens/sec) — median of the last few streamed turns, measured from per-message chunk-timestamp spans (pure generation time). Renders nothing when the tail has no streamed turn (no session-average fallback) |
+| `modelQuota` | `opus:12/88%` | Per-model QUOTA used/available from the poller cache's `seven_day_<model>` buckets, or any extra `rate_limits` key on stdin with a `used_percentage`. Dormant on plans without per-model limits (today's stdin carries none); `~` marks a stale or errored cache (dim) |
+| `spendLimit` | `sl:$21/$50w r:2d4hr` | Gateway-account spend budget from stdin `rate_limits.spend_limit` (Claude Code ≥2.1.251): used/limit USD plus period letter (`d`/`w`/`m`) and reset countdown, or `sl:42%` without USD fields; red at ≥100%; empty when absent (dim) |
+| `cwd` | `~/work` | Full working directory, ccstatusline-style. `$HOME` collapses to `~`; middle-ellipsis when longer than `statusline.maxCwdLength` (default 36 chars; keeps the leaf) (dim) |
 | `activeRoot` | `→plugins/session-intelligence` | "Where Claude is touching files now" — latest non-blank `root` from the per-session shape log, complements `cwd`. Hidden when the latest root collapses to `.` (Claude is parked at cwd root) or matches `basename(cwd)` — those add no signal beyond `cwd`. To force a `→.` "still alive" indicator on flat-layout repos where everything is at the root, set `statusline.perProject["<abs cwd>"].activeRootShowAtRoot: true` (dim) |
 | `siHealth` | `⚠ si-off (run /si doctor)` | **Self-diagnosis tag.** Empty when SI is healthy on this project (silence = success), red warning when the project's `enabledPlugins` whitelist is suppressing SI. Without this the dark state is invisible — the bar still renders (statusline is wired separately) but every SI-fed field stays blank forever and there's no way to distinguish "nothing happened yet" from "hooks are off." The tag points users at `/si doctor` for the verbose remediation block |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (dim) |
@@ -337,8 +341,8 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 5 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `blockUsage`, `session`, `sessionId`, `costSaved`, `tools`, `tokenFlow`, `tokenSpeed` — live activity · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `outputStyle`, `thinking`, `task` — dim reference context · L5: `weekUsage`, `modelQuota`, `modelSplit` — weekly quota, per-model quota (dormant until plans have per-model limits), per-model spend |
-| `verbose-cache` | 4 lines, token-economics-focused. Same shape as `verbose` with `cacheTokens` appended to L2; L4 trimmed to model/project/task |
+| `verbose` (default) | 5 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `blockUsage`, `session`, `sessionId`, `costSaved`, `tools`, `tokenFlow`, `tokenSpeed` — live activity and token economics · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `outputStyle`, `thinking`, `task` — dim reference context · L5: `weekUsage`, `spendLimit`, `modelQuota`, `modelSplit` — weekly quota, gateway spend budget, per-model quota (dormant until plans have per-model limits), per-model spend |
+| `verbose-cache` | 5 lines, token-economics-focused. L1: `tokens`, `compactAge`, `compactCost` · L2: `blockUsage`, `session`, `sessionId`, `tools`, `costSaved`, `tokenFlow`, `cacheHit`, `cacheTokens`, `tokenSpeed` · L3: `cwd` · L4: `model`, `project`, `task` · L5: `weekUsage`, `spendLimit`, `modelQuota`, `modelSplit` |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
 
@@ -399,16 +403,19 @@ The installer drops this file at `~/.claude/session-intelligence.json` on first 
 Most users already have a statusLine — ccstatusline, starship, a custom script. The installer detects it and wires a chain wrapper (`statusline-chain.sh`) that preserves your previous command alongside the intel lines:
 
 ```
-▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱ 425k/1M (43%) · compact:1hr 22m ago · c$12.34 / s$68.20   ← intel line 1
-2d 19hr · sid:82cc15b9 · 612 tools · c$491.56 / s$1114.78 · cache:99%            ← intel line 2
-b:36% r:1hr 22m · w:95% r:1d 5hr · ~/DWS/claude-session-intelligence             ← intel line 3
-Opus 4.7 · claude-session-intelligence · main · (+235,-16) · feat — statusline v2  ← intel line 4
-🌴 main · ⎇ dev · /Users/you/project                                             ← your previous statusLine
+▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48% · cache:98%
+b:77% · 2h40m · sid:golden · c$119/~s$2244 · t1.4M ↓6k ↑384 c1.4M
+~/work
+Fable 5.1
+w:20% r:<dur> · fable-5-1:$0.73·100%
+🌴 main · ⎇ dev · /Users/you/project
 ```
+
+The first five lines are the intel groups; the last is your previous statusLine.
 
 **Intel-first by default.** The zone bar and quota row need to live closest to the prompt, so intel renders on top and your previous command falls below. Set `CLAUDE_STATUSLINE_PREV_FIRST=1` to flip the order if you prefer your old bar on top.
 
-**Performance note.** If your previous statusLine is `ccstatusline` via `npx -y`, expect ~1.2-1.5 s per redraw — `npx` alone is ~1 s even with a warm local cache. The intel line is self-contained (~60 ms warm, ~70 ms cold with a 48 MB transcript). To reclaim that latency, replicate ccstatusline's signals via intel fields (`cwd`, `tokens`, `session`, `project`, `branch`, `blockUsage`, `weekUsage`) and either leave `PREV_STATUSLINE=__PREV_STATUSLINE__` in `statusline-chain.sh` or set `CLAUDE_STATUSLINE_NO_PREV=1` in your shell.
+**Performance note.** If your previous statusLine is `ccstatusline` via `npx -y`, expect ~1.2-1.5 s per redraw — `npx` alone is ~1 s even with a warm local cache. The intel render is self-contained: median ~72 ms per render (20 consecutive renders of the `a_fable_1m_48pct` fixture through `statusline/statusline-intel.js` on a warm cache, Node 20, including process spawn; measured 2026-10-21). To reclaim that latency, replicate ccstatusline's signals via intel fields (`cwd`, `tokens`, `session`, `project`, `branch`, `blockUsage`, `weekUsage`) and either leave `PREV_STATUSLINE=__PREV_STATUSLINE__` in `statusline-chain.sh` or set `CLAUDE_STATUSLINE_NO_PREV=1` in your shell.
 
 If you had no statusLine configured, you get just the intel lines.
 

@@ -33,18 +33,18 @@ const STATUSLINE_PRESETS = {
   oneline: [
     'tokens', 'compactAge', 'compactCost', 'model', 'project', 'branch', 'task',
   ],
-  // 4-line layout:
-  //   Line 1: zone bar · compactAge · compactCost · contextPct — colour-
-  //           escalating warning row. contextPct replaces the ccstatusline
-  //           `93.0%` signal so we can retire the 1.5s npx spend.
-  //   Line 2: session activity + token economics — live "what's happening
-  //           right now" row at eye level, just below the warning bar.
-  //   Line 3: git + working dir delta.
-  //   Line 4: identity / repo / task — dim reference context.
-  //   Line 5: usage & models row — 5h/7d quota as used/available, per-model
-  //           quota (dormant until plans have per-model limits), and the
-  //           per-model spend split. All the "how much have I used / what
-  //           did it go to" signals in one bottom line.
+  // 5-line layout (five groups, one per line):
+  //   Line 1: zone bar · compactAge · compactCost · cacheHit · siHealth —
+  //           colour-escalating warning row (siHealth is silent when healthy).
+  //   Line 2: session activity + token economics — blockUsage · session ·
+  //           sessionId · costSaved · tools · tokenFlow · tokenSpeed. Live
+  //           "what's happening right now" row just below the warning bar.
+  //   Line 3: git + working dir delta — branch · diffstat · cwd · activeRoot.
+  //   Line 4: identity / task — model · outputStyle · thinking · task, dim
+  //           reference context.
+  //   Line 5: usage & models row — weekUsage · spendLimit · modelQuota ·
+  //           modelSplit: weekly quota, gateway spend budget, per-model quota
+  //           (dormant until plans have per-model limits), per-model spend.
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
