@@ -115,7 +115,7 @@ The install script copies files from `plugins/session-intelligence/` into `~/.cl
 - Hooks → `~/.claude/scripts/hooks/` (plugin path: `${CLAUDE_PLUGIN_ROOT}/hooks/`)
 - `/si` slash command → `~/.claude/commands/si.md`
 - Unified config → `~/.claude/session-intelligence.json` (only if missing — never clobbered)
-- Statusline → `~/.claude/scripts/statusline-{intel.js,chain.sh}` wired into `settings.json`
+- Statusline → `~/.claude/scripts/statusline-chain.sh` plus the seven modules `statusline-intel.js`, `renderers.js`, `format.js`, `economics.js`, `git-info.js`, `lib-loader.js`, `zones.js` wired into `settings.json`
 - Debug logs → `~/.claude/logs/session-intel-YYYY-MM-DD.log`
 
 ### Requirements
@@ -279,7 +279,14 @@ w:20% r:<dur> · fable-5-1:$0.73·100%
 
 ### Quota & reset timers (lines 2 and 5)
 
-`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns. On Claude Code ≥2.1.90 stdin is authoritative: the data comes straight from the statusline JSON (`rate_limits.five_hour` / `.seven_day`), fresh every redraw, with no API request and no poller whenever `rate_limits` is present (a window absent from it simply renders nothing). Only older builds without `rate_limits` use the `api.anthropic.com/api/oauth/usage` poller: a detached background worker (`lib/usage-refresh.js`) refreshes a disk cache (180 s TTL, honoring 429 `Retry-After` with a 5-minute error backoff), and a stale-by-age or errored cache is rendered with a `~` marker. That poller is the only part of the statusline that can make a network request, and only on those older builds. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any hard failure silently renders an empty cell — never blocks.
+`blockUsage` and `weekUsage` surface Claude's 5-hour block and 7-day rolling quota with reset countdowns. On Claude Code ≥2.1.90 stdin is authoritative: the data comes straight from the statusline JSON (`rate_limits.five_hour` / `.seven_day`), fresh every redraw, with no API request and no poller whenever `rate_limits` is present (a window absent from it simply renders nothing). On any build reporting a version of 2.1.90 or newer the poller is never started, even before the first assistant response (stdin carries no `rate_limits` until then, so the cells are simply empty for that first moment). Only older builds (or an unparseable version) without `rate_limits` use the `api.anthropic.com/api/oauth/usage` poller: a detached background worker (`lib/usage-refresh.js`) refreshes a disk cache (180 s TTL, honoring 429 `Retry-After` with a 5-minute error backoff), and a stale-by-age or errored cache is rendered with a `~` marker. That poller is the only part of the statusline that can make a network request, and only on those older builds. On macOS the OAuth token is read from the `Claude Code-credentials` keychain service; elsewhere (or as fallback) from `~/.claude/.credentials.json`. Any hard failure silently renders an empty cell — never blocks.
+
+### Upgrading
+
+- `thinking` now shows exact counts from `output_tokens_details.thinking_tokens`; numbers drop versus the old residual estimate, which rendered about 5x too high.
+- Economics caches moved to `~/.claude/state` (`claude-cost-<sid>.v5.json`, `claude-cost-sincecompact-<sid>.v4.json`); old temp-dir files are ignored and swept after 7 days.
+- The `wr:` cell is gone.
+- `spendLimit` is new.
 
 ### Real token count
 
@@ -295,21 +302,21 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 
 | Field | Example | Description |
 |---|---|---|
-| `model` | `Opus 4.7 (1M)` or `Opus 4.7 · explanatory` | Model display name. When `output_style` is non-default it's suffixed with ` · <style>` (e.g. `explanatory`, `concise`). This is the *output style mode*, not reasoning effort — Claude Code doesn't expose thinking-budget on stdin (dim) |
+| `model` | `Fable 5.1` | Model display name only (a trailing parenthetical such as `(1M context)` is trimmed, and there is no style suffix; the output style has its own `outputStyle` cell) (dim) |
 | `project` | `CSM` | Basename of the working directory (dim) |
 | `branch` | `dev` | Current git branch (dim) |
 | `dirty` | `±3` | Simple count of dirty files (dim) |
 | `diffstat` | `(+120,-5)` | Git `--numstat` aggregated add/delete counts across the working tree (dim) |
 | `issue` | `#164` | GH issue number parsed from branch name or current task (dim) |
-| `tokens` | `▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48%` | **Context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap (14 segments by default), coloured green → yellow → orange → red by current zone. Cap auto-detects: `[1m]` / `-1m` tag in `model.id` → 1M, Opus 4.x / Sonnet 4.x / Fable family → 1M (newer Claude Code builds drop the `[1m]` marker once 1M is the default), else 200k. Override with `statusline.contextCap`. When the window is unknown (a guessed fallback) the cell is just `used/?` with no bar, percent or zone colour. Prefixed with `~` when using the estimate fallback; `idle` before the first usage line. Zones are adaptive (fall back to defaults when history < 5 compacts) unless `zoneMode` is `absolute` |
+| `tokens` | `▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48%` | **Context bar + used/cap + percent** — the ONE coloured field. Fill proportional to used/cap (14 segments by default), coloured green → yellow → orange → red by current zone. Cap auto-detects: a stdin `context_window_size` wins; otherwise a `[1m]` / `-1m` tag in `model.id`, or a native-1M family (`lib/context-cap.js` `isNative1M`: Fable, Mythos, Opus 4.7+ and 5+, Sonnet 5+, Haiku 5.5) → 1M, else 200k. Override with `statusline.contextCap`. When the window is unknown (a guessed fallback) the cell is just `used/?` with no bar, percent or zone colour. Prefixed with `~` when using the estimate fallback; `idle` before the first usage line. Zones are adaptive (fall back to defaults when history < 5 compacts) unless `zoneMode` is `absolute` |
 | `contextPct` | `cmp:43%` | **% to compaction.** Context tokens divided by the resolved auto-compaction point (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then `modelSettings.<model>.autoCompactWindow`, then `autoCompactWindow`, else the model default: ~967K on 1M models). 100% means Claude Code is about to compact; this is not a window percentage. Zone-coloured (<60% green, 60-85% yellow, 85-95% orange, 95%+ red). Silent until the transcript has a real usage line. Not in any default preset |
 | `zone` | `orange` | Zone name only, coloured |
 | `tools` | `70 tools` | Tool-call count for the session — every PostToolUse hook fire, read from the token-budget estimate in the SI state dir (`~/.claude/state/`; a legacy copy in the temp dir is the fallback). Hidden at 0 (dim) |
 | `session` | `3h42m` | Session wall-clock duration. Reads `cost.total_duration_ms` from stdin when Claude Code provides it (authoritative, survives resumes); falls back to scanning the transcript for the earliest event timestamp (dim) |
 | `thinking` | `think:32k` | Extended-thinking tokens in recent assistant turns. Exact where Claude Code reports `message.usage.output_tokens_details.thinking_tokens`; when a turn lacks it, the estimate falls back to the residual of `output_tokens` after subtracting visible text + `tool_use` content, and the cell is marked `think:~32k`. Rendered only when the recent-window figure crosses `statusline.thinkingMinDisplay` (default 5k). Opt-in — add to `fields` to enable (dim) |
 | `sessionId` | `sid:1b672d` | Short session id (first six characters) — useful when multiple Claude Code windows are open (dim) |
-| `cost` | `$7.56` | **Cumulative** session cost summed across every assistant turn in the transcript (dim; prices configurable) |
-| `tokenFlow` | `t75M ↓60k ↑600k c74M` | **Cumulative** token breakdown across the session. `t` = total of all four usage fields; `↓` = `input_tokens`; `↑` = `output_tokens`; `c` = `cache_read_input_tokens + cache_creation_input_tokens` (all cache activity). The three parts sum to the total (`↓ + ↑ + c = t`). One incremental transcript pass shared with `cost` / `cacheSaved` (dim) |
+| `cost` | `$7.56` | Session cost. Claude Code's official stdin `cost.total_cost_usd` is preferred; the transcript sum (priced from `statusline.prices`) is used only when stdin lacks it (dim) |
+| `tokenFlow` | `t75M ↓60k ↑600k c74M` | **Cumulative** token breakdown across the session. `t` = total of all four usage fields; `↓` = `input_tokens`; `↑` = `output_tokens`; `c` = `cache_read_input_tokens + cache_creation_input_tokens` (all cache activity). The three parts sum to the total (`↓ + ↑ + c = t`). Prefixed with `~` while the totals are still partial (not yet authoritative). One incremental transcript pass shared with `cost` / `cacheSaved` (dim) |
 | `cacheHit` | `cache:92%` | Live prompt-cache hit ratio on the latest assistant turn: `cache_read / (cache_read + cache_creation)`. Dim green ≥70%, dim yellow 30–70%, dim red <30%. Hidden on turns with no cacheable prefix (first turn of a session). Colour escalates when `compact.stablePrefix` isn't paying off (low cache-hit on a stable working set) |
 | `cacheTokens` | `prefix:120k/3k` | Latest turn's prefix breakdown — `<cache_read>/<cache_creation>` tokens. Low read + high creation on a stable working set is the warning sign that `stablePrefix` is leaking a volatile value somewhere. Dim |
 | `cacheSaved` | `saved:$2.83` | **Cumulative** USD saved across the session by cache hits vs. paying the uncached input rate for the same tokens. Hidden when savings are under $0.10 (not worth the field) (dim) |
@@ -354,8 +361,8 @@ First matching signal wins. Add `emoji` / `emoji2` to your `fields` array to ena
 
 | | When |
 |---|---|
-| 🔥 | Red zone (≥400k tokens) |
-| ⚠️  | Orange zone (300–400k) |
+| 🔥 | Red zone (fraction mode: ≥40% of the window; absolute mode: the configured `zones.red`) |
+| ⚠️  | Orange zone (30–40% of the window; absolute mode: `zones.orange` up to `zones.red`) |
 | 🚀 | Deploy breadcrumb written less than 15 min ago |
 | 🐛 | Task mentions `bug`, `fix`, `issue`, `error`, `crash` |
 | 🏗️ | Task mentions `build`, `feat`, `add`, `implement`, `create` |
@@ -364,11 +371,11 @@ First matching signal wins. Add `emoji` / `emoji2` to your `fields` array to ena
 | 🚀 | Task mentions `deploy`, `ship`, `release` |
 | 📝 | Task mentions `doc`, `readme` |
 | ✏️  | Dirty working tree (any uncommitted change) |
-| 🟡 | Yellow zone (200–300k) |
+| 🟡 | Yellow zone (20–30% of the window; absolute mode: `zones.yellow` up to `zones.orange`) |
 | ✨ | Task looks idle/done/clean and we're in green zone |
 | 🟢 | Default fallback |
 
-Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your workflow.
+Zones are fractions of the context window by default (0.20 / 0.30 / 0.40); the token values above apply only with `"zoneMode": "absolute"`. Tweak the regex list in `statusline/renderers.js` → `pickEmoji()` (zones come from `zoneFor()`) to fit your workflow.
 
 ### Example config: `~/.claude/session-intelligence.json`
 
@@ -382,6 +389,7 @@ Tweak the regex list in `statusline-intel.js` → `pickEmoji()` to fit your work
       "session", "tools", "cost", "deploy", "task", "compactAge"
     ],
     "tokenSource": "auto",
+    "zoneMode": "absolute",
     "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
     "maxTaskLength": 70,
     "separator": " · ",
@@ -549,6 +557,7 @@ Defaults live in `lib/config.js` → `DEFAULTS`. The loader merges: **built-ins 
 /si get compact.threshold           # read a single dotted key
 /si set compact.autoblock false     # stage + diff + confirm + write
 /si set taskChange.minTokens 150000
+/si set statusline.zoneMode absolute   # required for statusline.zones to take effect
 /si set statusline.zones.orange 350000
 /si reset taskChange                # restore one section to defaults
 /si reset *                         # restore everything
@@ -1034,10 +1043,10 @@ All emit structured entries to the debug log (see above).
 | `~/.claude/scripts/hooks/session-intelligence/lib/config.js` | `lib/config.js` | Unified config loader + presets |
 | `~/.claude/scripts/hooks/session-intelligence/lib/context-shape.js` | `lib/context-shape.js` | Shape observer: appendShape / analyzeShape / formatCompactInjection |
 | `~/.claude/scripts/hooks/session-intelligence/lib/compact-history.js` | `lib/compact-history.js` | History log + adaptive zones + post-compact regret tracking |
-| `~/.claude/scripts/hooks/session-intelligence/lib/cost-estimation.js` | `lib/cost-estimation.js` | Incremental cost-from-transcript + cost-band classification |
+| `~/.claude/scripts/hooks/session-intelligence/lib/cost-estimation.js` | `lib/cost-estimation.js` | Incremental cost-from-transcript |
 | `~/.claude/scripts/hooks/session-intelligence/lib/utils.js` | `lib/utils.js` | Minimal shared utils |
 | `~/.claude/scripts/hooks/session-intelligence/lib/intel-debug.js` | `lib/intel-debug.js` | Debug logger |
-| `~/.claude/scripts/statusline-intel.js` | `statusline/statusline-intel.js` | Intel status-line renderer |
+| `~/.claude/scripts/statusline-intel.js` (+ `renderers.js`, `format.js`, `economics.js`, `git-info.js`, `lib-loader.js`, `zones.js`) | `statusline/*.js` (all seven modules) | Intel status-line renderer and its sibling modules |
 | `~/.claude/scripts/si-statusline-chain.sh` | `statusline/statusline-chain.sh` | Chain wrapper (preserves your existing statusLine) |
 | `~/.claude/commands/si.md` | `commands/si.md` | `/si` slash command (config manager) |
 | `~/.claude/session-intelligence.json` | `templates/session-intelligence.json` | Unified config (shipped on first install only) |
@@ -1068,13 +1077,14 @@ Prefer **`/si set <key> <value>`** over env vars — it's Claude-native, diffed,
 Three paths, from preferred to least:
 
 1. **Adaptive (recommended)** — after you've run 5+ `/compact`s they're derived automatically from your pattern. No configuration.
-2. **`/si set statusline.zones.<name> <value>`** — override for the status line:
+2. **Fixed thresholds** — by default zones are *fractions of the context window* (`statusline.zoneFractions`, 0.20 / 0.30 / 0.40), so `statusline.zones` is ignored unless you also set `"zoneMode": "absolute"`. To pin absolute token values, set the mode first, then the thresholds:
    ```
+   /si set statusline.zoneMode absolute
    /si set statusline.zones.yellow 250000
    /si set statusline.zones.orange 350000
    /si set statusline.zones.red 450000
    ```
-3. **Hardcoded edit** — only if you want to change the fallback defaults used when history is empty. Edit the `getZone()` function in `si-suggest-compact.js`, `si-token-budget.js`, and `statusline-intel.js`:
+3. **Hardcoded edit** — only if you want to change the fallback defaults used when history is empty. Edit `getZone` in `hooks/si-suggest-compact.js` and `zoneFor` in `statusline/renderers.js` (the shape below):
 
 ```js
 function getZone(tokens, zones) {
