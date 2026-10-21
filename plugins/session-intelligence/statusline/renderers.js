@@ -209,7 +209,8 @@ function buildRenderers(C, deps = {}) {
       const minDisplay = Number.isFinite(ctx.cfg.thinkingMinDisplay)
         ? ctx.cfg.thinkingMinDisplay : 5000;
       if (recent < minDisplay) return '';
-      return `${C.dim}think:${fmtTokens(recent)}${C.reset}`;
+      const prefix = ctx.thinking.exact === false ? '~' : '';
+      return `${C.dim}think:${prefix}${fmtTokens(recent)}${C.reset}`;
     },
 
     task: (_input, ctx) => {
