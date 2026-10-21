@@ -1,5 +1,5 @@
 ▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48% · cache:98%
-b:36% · 2h40m · sid:golden · c$119/s$2244 · t1.4M ↓6k ↑384 c1.4M
+b:36% · 2h40m · sid:golden · c$119/~s$2244 · t1.4M ↓6k ↑384 c1.4M
 ~/work
 Fable 5.1
 w:95% · fable-5-1:$0.73·100%

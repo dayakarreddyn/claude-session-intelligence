@@ -105,3 +105,20 @@ test('tokens cell keeps bar and percent when the cap is known', (t) => {
   assert.match(out, /100k\/200k/);
   assert.match(out, /50%/);
 });
+
+test('costSaved marks the calibrated saved cell as an SI estimate', (t) => {
+  withTempHome(t);
+  const R = buildRenderers(makeColors(false), {});
+  const out = R.costSaved({}, { costUsd: 119, officialCostUsd: 119, tokenTotals: { cost: 45 }, cacheSavedUsd: 250 });
+  assert.match(out, /~s\$/);
+  assert.equal(out, 'c$119/~s$661');
+});
+
+test('savedCell label is shared by costSaved and compactCost', () => {
+  const { savedCell } = require('../statusline/renderers');
+  assert.equal(savedCell(661.1), '~s$661');
+  assert.equal(savedCell(1.234), '~s$1.23');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'statusline', 'renderers.js'), 'utf8');
+  assert.equal((src.match(/push\(savedCell\(saved\)\)/g) || []).length, 2);
+  assert.doesNotMatch(src, /`s\$\{fmtUsd/);
+});

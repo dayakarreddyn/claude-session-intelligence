@@ -111,6 +111,12 @@ function pickEmojiSecond(ctx) {
   return '📊';
 }
 
+// Saved cell: the amount is list-price cache savings scaled by the
+// official/transcript cost ratio, an SI estimate, so `~` marks it.
+function savedCell(saved) {
+  return `~s${fmtUsd(saved)}`;
+}
+
 // ─── Field renderers ─────────────────────────────────────────────────────────
 // Each renderer returns a string (possibly with ANSI) or '' to skip.
 
@@ -267,7 +273,7 @@ function buildRenderers(C, deps = {}) {
       const saved = (ctx.cacheSavedUsd || 0) * calibration;
       const parts = [];
       if (cost > 0) parts.push(`c${fmtUsd(cost)}`);
-      if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
+      if (saved >= 0.1) parts.push(savedCell(saved));
       if (!parts.length) return '';
       return `${C.dim}${parts.join('/')}${C.reset}`;
     },
@@ -436,7 +442,7 @@ function buildRenderers(C, deps = {}) {
       const saved = tc.saved * calibration;
       const parts = [];
       if (costSource !== 'none' && cost >= 0.01) parts.push(`c${fmtUsd(cost)}`);
-      if (saved >= 0.1) parts.push(`s${fmtUsd(saved)}`);
+      if (saved >= 0.1) parts.push(savedCell(saved));
       if (!parts.length) return '';
       // Tight `c$20/s$94` instead of `c$20.31 / s$94.59` — saves ~8 cols
       // per cell. The `c`/`s` prefixes carry the labelling so the slash
@@ -731,4 +737,5 @@ module.exports = {
   pickEmoji,
   pickEmojiSecond,
   buildRenderers,
+  savedCell,
 };
