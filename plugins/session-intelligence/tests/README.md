@@ -30,9 +30,13 @@ node --test tests/session-context.test.js
 
 ## What's intentionally NOT covered
 
-- **Statusline rendering** — integration/visual; covered ad-hoc by running
-  `plugins/session-intelligence/statusline/statusline-intel.js` against a
-  fixture stdin JSON.
+- **Statusline layout beyond the goldens** — `statusline-golden.test.js`
+  renders every payload in `fixtures/statusline/payloads/` and diffs against
+  `fixtures/statusline/golden/`. Renders run with the wall clock pinned to
+  2026-10-21 09:01 UTC (`helpers/freeze-clock.js`, preloaded via `node -r`),
+  so the captured `resets_at` epochs stay in the future and `r:<dur>` cells
+  never rot. Regenerate after an intentional layout change with
+  `UPDATE_GOLDEN=1 node --test tests/statusline-golden.test.js`.
 - **Hook entry points** (`hooks/si-*.js`) — those are CLI scripts. Tests
   would need to fork + pipe, which adds runtime + flakiness. Their
   business logic is already covered via the modules they import.

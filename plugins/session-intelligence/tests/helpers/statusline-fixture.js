@@ -11,6 +11,14 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const STATUSLINE = path.join(__dirname, '..', '..', 'statusline', 'statusline-intel.js');
+const FREEZE_CLOCK = path.join(__dirname, 'freeze-clock.js');
+// Wall clock every spawned render sees (see freeze-clock.js). Pinned to the
+// morning the golden payloads were captured so their resets_at epochs stay
+// in the future and the default transcript rows (09:00 UTC) stay in the past.
+// Files the test writes carry real mtimes, which post-date this instant, so
+// every mtime-based age the render computes is negative and reads as fresh.
+// A test that needs a stale file must fs.utimesSync it relative to this value.
+const FROZEN_NOW_MS = Date.UTC(2026, 9, 21, 9, 1, 0);
 const TRANSCRIPT_MODEL = 'claude-fable-5-1';
 const ROW_SPACING_MS = 10_000;
 const ASSISTANT_ROWS = 3;
@@ -77,9 +85,8 @@ function writeTranscript(home, rows) {
   return file;
 }
 
-/** Fresh usage cache so readAndRefreshIfStale returns without spawning a worker. */
-function writeFreshUsageCache(tmpdir) {
-  const now = Date.now();
+/** Fresh usage cache so readAndRefreshIfStale returns without spawning a worker. `now` must match the clock the reader will see. */
+function writeFreshUsageCache(tmpdir, now = Date.now()) {
   fs.writeFileSync(path.join(tmpdir, `claude-usage-cache-${uid()}.json`),
     JSON.stringify({ fetchedAt: now, goodAt: now, sessionUsage: 36, weeklyUsage: 95, error: false }));
 }
@@ -110,7 +117,7 @@ function render(payload, opts = {}) {
   let transcriptPath;
   if (typeof opts.transcript === 'string') transcriptPath = opts.transcript;
   else if (opts.transcript !== false) transcriptPath = writeTranscript(home);
-  if (opts.usageCache !== false) writeFreshUsageCache(home);
+  if (opts.usageCache !== false) writeFreshUsageCache(home, FROZEN_NOW_MS);
   const input = {
     ...payload,
     cwd: path.join(home, 'work'),
@@ -120,10 +127,10 @@ function render(payload, opts = {}) {
   const base = { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: home, NO_COLOR: '1' };
   for (const k of ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE',
     'CLAUDE_STATUSLINE_FIELDS', 'CLAUDE_STATUSLINE_PRESET', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS']) delete base[k];
-  const r = spawnSync(process.execPath, [STATUSLINE], {
-    input: JSON.stringify(input), env: { ...base, ...env }, encoding: 'utf8',
+  const r = spawnSync(process.execPath, ['-r', FREEZE_CLOCK, STATUSLINE], {
+    input: JSON.stringify(input), env: { ...base, SI_TEST_FROZEN_NOW_MS: String(FROZEN_NOW_MS), ...env }, encoding: 'utf8',
   });
   return { stdout: r.stdout, stderr: r.stderr, status: r.status, lines: r.stdout.split('\n') };
 }
 
-module.exports = { STATUSLINE, makeHome, withTempHome, writeTranscript, writeFreshUsageCache, writeConfig, render, stripAnsi, normalise, uid };
+module.exports = { STATUSLINE, FROZEN_NOW_MS, makeHome, withTempHome, writeTranscript, writeFreshUsageCache, writeConfig, render, stripAnsi, normalise, uid };
