@@ -37,6 +37,12 @@ function classifyConstraint(text) {
 const LIST_MARKER_RE = /^\s*(?:[-*]|\d+[.)])\s+(.+?)\s*$/;
 const KEY_LINE_RE = /^([A-Za-z][A-Za-z _-]{0,30}):\s+(.+?)\s*$/;
 const DROP_KEY_RE = /^(safe to )?drop$/i;
+// "PRESERVE:" / "DROP:" on a line of their own label the lines that follow;
+// the label itself is not a constraint, and a DROP block's lines are the
+// opposite of one.
+const BARE_LABEL_RE = /^([A-Za-z][A-Za-z _-]{0,30}):$/;
+// `issue: none` and friends carry no information worth checking after compaction.
+const NOISE_VALUE_RE = /^(none|n\/a|na|tbd|todo|-|—)$/i;
 
 function extractCompactInstructions(claudeMdText) {
   const out = [];
@@ -60,14 +66,20 @@ function extractCompactInstructions(claudeMdText) {
  */
 function linesOfSection(body) {
   const out = [];
+  let dropping = false;
   for (const raw of String(body || '').split('\n')) {
     const line = raw.trim();
     if (!line || line.startsWith('#') || line.startsWith('<!--')) continue;
+    const bare = line.match(BARE_LABEL_RE);
+    if (bare) { dropping = DROP_KEY_RE.test(bare[1].trim()); continue; }
+    if (dropping) continue;
     const listed = line.match(LIST_MARKER_RE);
     const content = listed ? listed[1] : line;
     const key = content.match(KEY_LINE_RE);
     if (key && DROP_KEY_RE.test(key[1].trim())) continue;
-    out.push(key && !listed ? key[2] : content);
+    const text = key && !listed ? key[2] : content;
+    if (NOISE_VALUE_RE.test(text.trim())) continue;
+    out.push(text);
   }
   return out;
 }
@@ -84,6 +96,9 @@ function buildRegistry({ sections, claudeMdText } = {}) {
     ...extractCompactInstructions(claudeMdText).map((text) => ({ text, source: 'compact-instructions' })),
     ...linesOfSection(sectionByTitle(s, 'On Compact')).map((text) => ({ text, source: 'on-compact' })),
     ...linesOfSection(sectionByTitle(s, 'Key Decisions')).map((text) => ({ text, source: 'key-decisions' })),
+    // Autofilled every session, so the registry is never empty on a project
+    // whose user-owned sections are still the seeded template.
+    ...linesOfSection(sectionByTitle(s, 'Current Task')).map((text) => ({ text, source: 'current-task' })),
   ];
   const seen = new Set();
   const unique = [];
@@ -205,7 +220,8 @@ function retentionOf(items, summary) {
   const missing = list.filter((i) => !isRetained(i.text, normSummary, summaryTokens)).map((i) => i.text);
   const total = list.length;
   const retained = total - missing.length;
-  return { total, retained, ratio: total ? Math.round((retained / total) * 100) / 100 : 0, missing };
+  // No constraints means nothing was measured: null, never a 0% that drags the mean down.
+  return { total, retained, ratio: total ? Math.round((retained / total) * 100) / 100 : null, missing };
 }
 
 module.exports = {

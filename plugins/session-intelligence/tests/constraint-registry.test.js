@@ -62,7 +62,7 @@ test('retentionOf matches normalized substrings and >=60% word overlap', () => {
   const items = [{ type: 'Action', text: 'Never rewrite earlier transcript turns' }, { type: 'Process', text: 'Run npm test before every commit' }, { type: 'Information', text: 'Pruner floor is fifty thousand chars' }];
   const summary = 'The plugin must NEVER   rewrite earlier transcript turns. Before each commit the tests (npm test) are run.';
   assert.deepEqual(retentionOf(items, summary), { total: 3, retained: 2, ratio: 0.67, missing: ['Pruner floor is fifty thousand chars'] });
-  assert.deepEqual(retentionOf([], 'x'), { total: 0, retained: 0, ratio: 0, missing: [] });
+  assert.deepEqual(retentionOf([], 'x'), { total: 0, retained: 0, ratio: null, missing: [] });
 });
 
 test('write/readRegistryState round-trips under a sandboxed ~/.claude/state', () => {
@@ -145,4 +145,25 @@ test('HTML sentinel comment lines never become constraints', () => {
   const reg = buildRegistry({ sections, claudeMdText: '' });
   assert.ok(reg.items.length >= 2);
   assert.ok(reg.items.every((i) => !i.text.includes('<!--')), JSON.stringify(reg.items));
+});
+
+test('bare PRESERVE:/DROP: labels are not constraints and DROP-labelled lines are skipped', () => {
+  const sections = parseSessionContext('## On Compact\nPRESERVE:\n- keep the floor at 50000\nDROP:\n- scratch notes\n- old test output\nPRESERVE:\n- also keep me\n');
+  const texts = buildRegistry({ sections }).items.map((i) => i.text);
+  assert.deepEqual(texts, ['keep the floor at 50000', 'also keep me']);
+});
+
+test('buildRegistry reads the Current Task block as its lowest-priority source and skips empty issue values', () => {
+  const sections = parseSessionContext('## Current Task\n<!-- si:autofill sha=abcdef -->\ntype: fix — doctor shape path\ndescription: doctor must read the state dir\nissue: none\n\n## Key Decisions\n- kd\n');
+  const reg = buildRegistry({ sections });
+  assert.deepEqual(reg.items.map((i) => [i.source, i.text]), [
+    ['key-decisions', 'kd'],
+    ['current-task', 'fix — doctor shape path'],
+    ['current-task', 'doctor must read the state dir'],
+  ]);
+  assert.deepEqual(reg.sources, ['key-decisions', 'current-task']);
+});
+
+test('retentionOf reports a null ratio when nothing was registered', () => {
+  assert.deepEqual(retentionOf([], 'any summary'), { total: 0, retained: 0, ratio: null, missing: [] });
 });

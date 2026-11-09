@@ -158,3 +158,20 @@ test('compact_outcomes fill_before/fill_after chain: pre-compact -> post-compact
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('si-post-compact records NULL retention (not 0) when the registry had nothing to retain', () => {
+  const { home, cwd } = sandbox();
+  try {
+    const sid = 'pc-sid-empty';
+    writeRegistryState(home, sid, { t: 1000, items: [], contextTokens: 393455, contextCap: 1000000, fillPct: 39.3, model: 'claude-opus-5-5', trigger: 'auto' });
+    const r = runHook(home, {
+      hook_event_name: 'PostCompact', session_id: sid, cwd, trigger: 'auto', compact_summary: 'a summary with nothing to check',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const rows = outcomeRows(home, sid);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].constraints_total, 0);
+    assert.equal(rows[0].constraints_retained, 0);
+    assert.equal(rows[0].retention, null, 'an empty registry must not count as 0% retention');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
