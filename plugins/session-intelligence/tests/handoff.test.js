@@ -11,6 +11,9 @@
 
 'use strict';
 
+// Corrupt-handoff cases log at WARN; keep that out of the real ~/.claude/logs.
+process.env.CLAUDE_INTEL_QUIET = '1';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
