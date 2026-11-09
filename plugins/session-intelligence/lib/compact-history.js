@@ -33,12 +33,27 @@ const LOG_DIR = path.join(
 );
 const HISTORY_FILE = path.join(LOG_DIR, 'compact-history.jsonl');
 
+/**
+ * History entry shape (built by lib/compact-record.js). `tokens` and
+ * `contextTokens` are the per-call context size of the latest assistant usage
+ * (input + cache creation + cache read); `contextCap`/`fillPct`/`model`/`trigger`
+ * qualify it; `toolIoEstimate` is the cumulative chars/3 tool-I/O share
+ * diagnostic, never context size.
+ * @typedef {{ t: number, sid: string, cwd: string, tokens: number, contextTokens: number,
+ *   contextCap: number, fillPct: number, model: string|null, trigger: string|null,
+ *   toolIoEstimate: number, cost: number, hotDirs: string[], warmDirs: string[],
+ *   droppedDirs: string[], hadShift: boolean, regretCount: number,
+ *   costAtCompactUsd?: number }} CompactHistoryEntry
+ */
+
 const MAX_HISTORY_READ = 50;
 const MAX_HISTORY_KEEP = 200;
 const HISTORY_MAX_BYTES = 256 * 1024;
 
 const MIN_SAMPLES_FOR_ADAPTIVE = 5;
 const ADAPTIVE_BOUND = 0.3; // ±30% from static defaults
+const YELLOW_GAP_FRACTION = 0.08; // yellow sits this fraction of the window below orange
+const RED_GAP_FRACTION = 0.06; // red sits at least this fraction above orange
 const REGRET_WINDOW_CALLS = 30;
 const REGRET_WINDOW_MS = 30 * 60 * 1000; // 30 min
 
@@ -132,6 +147,25 @@ function percentiles(values) {
   return { p50: at(0.5), p75: at(0.75), p90: at(0.9), count: sorted.length };
 }
 
+/** True for entries carrying real usage evidence (finite fillPct > 0 and contextTokens > 0). */
+function isFillSample(h) {
+  return !!h && Number.isFinite(h.fillPct) && h.fillPct > 0
+    && Number.isFinite(h.contextTokens) && h.contextTokens > 0;
+}
+
+/**
+ * Safety net: keep thresholds inside the window and strictly ordered
+ * (yellow < orange < red), with the yellow/red gap fractions of `cap`.
+ * Returns a new object; never mutates `zones`.
+ */
+function fitZonesToCap(zones, cap) {
+  if (!zones || !Number.isFinite(cap) || cap <= 0) return { ...zones };
+  const red = Math.max(2, Math.min(zones.red, cap));
+  const orange = Math.max(1, Math.min(zones.orange, red - Math.round(RED_GAP_FRACTION * cap), red - 1));
+  const yellow = Math.max(0, Math.min(zones.yellow, orange - Math.round(YELLOW_GAP_FRACTION * cap), orange - 1));
+  return { ...zones, yellow, orange, red };
+}
+
 // ── Adaptive zones ───────────────────────────────────────────────────────
 
 /**
@@ -145,8 +179,9 @@ function percentiles(values) {
  * thresholds out rather than pull them in — the signal is "I needed that
  * context", so suggest compaction less eagerly.
  *
- * Per-cwd bucketing: when `opts.cwd` is passed and the cwd has ≥5 entries
- * of its own, derive from that subset instead of mixing repos. Falls back
+ * Learns from `fillPct` (percent of the window) scaled by `opts.cap`; `cap`
+ * is required (reason 'no-cap' otherwise). Per-cwd bucketing: when `opts.cwd`
+ * is passed and the cwd has ≥5 valid fill samples of its own, derive from that subset instead of mixing repos. Falls back
  * to the full history otherwise so a new repo still benefits from global
  * learning. Result carries `bucket: 'cwd' | 'global'` for caller logging.
  */
@@ -154,33 +189,34 @@ function adaptiveZones(history, defaults, opts) {
   const base = defaults || { yellow: 200000, orange: 300000, red: 400000 };
   const cwd = opts && typeof opts.cwd === 'string' ? opts.cwd : null;
 
+  const cap = opts && Number.isFinite(opts.cap) && opts.cap > 0 ? opts.cap : null;
+  if (cap === null) return { ...base, adaptive: false, bucket: 'global', reason: 'no-cap' };
+
+  // Only entries with real usage evidence teach the learner: legacy entries
+  // (cumulative chars/4 `tokens`, no contextTokens) and no-usage compacts
+  // (fillPct null) are ignored. Filter BEFORE choosing the bucket so a repo
+  // full of legacy entries falls back to global learning.
+  const valid = Array.isArray(history) ? history.filter(isFillSample) : [];
   let bucket = 'global';
-  let workingHistory = history;
-  if (cwd && Array.isArray(history)) {
-    const sameCwd = history.filter((h) => h && h.cwd === cwd);
+  let workingHistory = valid;
+  if (cwd) {
+    const sameCwd = valid.filter((h) => h.cwd === cwd);
     if (sameCwd.length >= MIN_SAMPLES_FOR_ADAPTIVE) {
       workingHistory = sameCwd;
       bucket = 'cwd';
     }
   }
 
-  if (!workingHistory || workingHistory.length < MIN_SAMPLES_FOR_ADAPTIVE) {
-    return { ...base, adaptive: false, bucket };
+  if (workingHistory.length < MIN_SAMPLES_FOR_ADAPTIVE) {
+    return { ...fitZonesToCap(base, cap), adaptive: false, bucket, reason: 'insufficient-fill-samples' };
   }
+  const fills = workingHistory.map((h) => h.fillPct);
 
-  const tokensAtCompact = workingHistory
-    .map((h) => h.tokens)
-    .filter((n) => Number.isFinite(n) && n > 0);
-  if (tokensAtCompact.length < MIN_SAMPLES_FOR_ADAPTIVE) {
-    return { ...base, adaptive: false, bucket };
-  }
+  const p = percentiles(fills);
 
-  const p = percentiles(tokensAtCompact);
-
-  // Orange = P50 of user's compact points. This is "where they usually
-  // pull the trigger". Clamp to ±30% from the static default to avoid
-  // runaway drift from a single outlier session.
-  const orangeTarget = Math.round(p.p50 * 0.9);
+  // Orange = P50 of the user's compact fill, applied to the current window.
+  // Clamp to +/-30% from the static default to avoid runaway drift.
+  const orangeTarget = Math.round(p.p50 / 100 * cap * 0.9);
   const orangeMin = Math.round(base.orange * (1 - ADAPTIVE_BOUND));
   const orangeMax = Math.round(base.orange * (1 + ADAPTIVE_BOUND));
   let orange = Math.min(orangeMax, Math.max(orangeMin, orangeTarget));
@@ -201,54 +237,33 @@ function adaptiveZones(history, defaults, opts) {
       const soft = Number.isFinite(h.softRegretCount) ? h.softRegretCount : 0;
       return sum + hard + soft;
     }, 0);
-  const totalCompacts = Math.min(10, workingHistory.length);
+  const totalCompacts = Math.min(10, workingHistory.length); // valid samples only
   const regretRate = totalCompacts > 0 ? recentRegret / totalCompacts : 0;
   if (regretRate >= 1) {
     orange = Math.min(orangeMax, Math.round(orange * 1.1));
   }
 
-  // Cost-band tightening — expensive sessions cost more to re-do than to
-  // compact, so warn earlier when the running cost exceeds the user's own
-  // p75. 12% tightening is empirically ~20-30k tokens on a 200-250k orange,
-  // enough to nudge a /compact one "chunk of work" sooner without being
-  // disruptive. Opposite-direction of regret-rate; both can apply.
-  let costTightened = false;
-  const currentCost = opts && Number.isFinite(opts.currentCost) ? opts.currentCost : null;
-  if (currentCost !== null && currentCost > 0) {
-    const costs = workingHistory
-      .map((h) => h.cost)
-      .filter((c) => Number.isFinite(c) && c > 0);
-    if (costs.length >= MIN_SAMPLES_FOR_ADAPTIVE) {
-      const cp = percentiles(costs);
-      if (cp && currentCost > cp.p75) {
-        orange = Math.max(orangeMin, Math.round(orange * 0.88));
-        costTightened = true;
-      }
-    }
-  }
-
   // Yellow hugs orange; red gives headroom above P90.
   const yellow = Math.max(
     Math.round(base.yellow * (1 - ADAPTIVE_BOUND)),
-    orange - 80000,
+    orange - Math.round(YELLOW_GAP_FRACTION * cap),
   );
   const red = Math.max(
-    orange + 60000,
+    orange + Math.round(RED_GAP_FRACTION * cap),
     Math.min(
       Math.round(base.red * (1 + ADAPTIVE_BOUND)),
-      Math.round(p.p90 * 1.1),
+      Math.round(p.p90 / 100 * cap * 1.1),
     ),
   );
 
   return {
-    yellow, orange, red,
+    ...fitZonesToCap({ yellow, orange, red }, cap),
     adaptive: true,
     bucket,
     sampleCount: p.count,
-    p50: p.p50,
-    p90: p.p90,
+    p50Fill: p.p50,
+    p90Fill: p.p90,
     regretRate: Number(regretRate.toFixed(2)),
-    costTightened,
   };
 }
 
@@ -609,6 +624,8 @@ module.exports = {
   _thresholds: {
     MIN_SAMPLES_FOR_ADAPTIVE,
     ADAPTIVE_BOUND,
+    YELLOW_GAP_FRACTION,
+    RED_GAP_FRACTION,
     REGRET_WINDOW_CALLS,
     REGRET_WINDOW_MS,
     ANNOUNCE_MIN_DELTA,

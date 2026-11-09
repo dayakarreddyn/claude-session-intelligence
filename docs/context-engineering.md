@@ -455,7 +455,7 @@ This is deliberate. Users should know when the thresholds they're reacting to ca
 
 Zones adapt to *when* you compact. But there's a second signal that matters: whether the compact was **good** (flow resumed seamlessly) or **bad** (you had to re-explain / re-read dropped content).
 
-Claude Code doesn't expose a PostCompact hook, so there's no direct way to ask "how did that go?" — but tool calls post-compact are a reliable proxy.
+Claude Code has exposed a PostCompact hook since v2.1.76; `hooks/si-post-compact.js` reads `compact_summary` and records constraint retention — the regret proxy below remains as the behavioural signal.
 
 ### 7.2 The snapshot mechanism
 

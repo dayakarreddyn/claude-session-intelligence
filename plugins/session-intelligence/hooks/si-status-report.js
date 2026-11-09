@@ -68,8 +68,29 @@ function fmtAge(ms) {
   return `${h}h${m % 60}m ago`;
 }
 
+// Real context usage -> zone, from the same source the hooks use: latest
+// transcript usage line, resolved window cap, fraction thresholds. Returns
+// null (no zone) when the session has no usage line.
+function collectContext(stdin, sid) {
+  const transcript = readArg('--transcript') || stdin.transcript_path || stdin.transcriptPath;
+  try {
+    const { readLatestUsage } = require('../lib/transcript-usage');
+    const { resolveContextCap } = require('../lib/context-cap');
+    const { loadConfig, getZoneThresholds } = require('../lib/config');
+    const latest = readLatestUsage(transcript, { sessionId: sid });
+    if (!latest || !(latest.contextTokens > 0)) return null;
+    const cfg = loadConfig();
+    const model = readArg('--model') || (stdin.model && (stdin.model.id || stdin.model)) || latest.model;
+    const { cap } = resolveContextCap({
+      model, env: process.env, configCap: cfg.statusline && cfg.statusline.contextCap,
+    });
+    const z = getZoneThresholds(cfg, { cap });
+    return { tokens: latest.contextTokens, zone: zoneFor(latest.contextTokens, z) };
+  } catch { return null; }
+}
+
 function zoneFor(tokens, zones) {
-  const z = zones || { yellow: 200000, orange: 300000, red: 400000 };
+  const z = zones;
   if (tokens >= z.red) return 'red';
   if (tokens >= z.orange) return 'orange';
   if (tokens >= z.yellow) return 'yellow';
@@ -88,8 +109,7 @@ function readStdinJsonOrEmpty() {
   } catch { return {}; }
 }
 
-function resolveSessionId() {
-  const stdin = readStdinJsonOrEmpty();
+function resolveSessionId(stdin) {
   const candidates = [
     readArg('--session'),
     stdin.session_id,
@@ -320,14 +340,14 @@ function line(label, value) {
 }
 
 function main() {
-  const { id: sid, source: sidSource } = resolveSessionId();
+  const stdin = readStdinJsonOrEmpty();
+  const { id: sid, source: sidSource } = resolveSessionId(stdin);
   const install = collectInstallation();
   const hooks = collectHooks();
   const statusline = collectStatusline();
   const session = collectSession(sid);
   const config = readJson(UNIFIED_CONFIG) || {};
-  const zones = config.statusline?.zones;
-  const zone = session.tokenBudget ? zoneFor(session.tokenBudget, zones) : null;
+  const context = collectContext(stdin, sid);
   const compactLog = collectCompactLog(sid);
 
   const out = [];
@@ -373,10 +393,8 @@ function main() {
   out.push(`This session  [id=${sid.slice(0, 12)}${sid.length > 12 ? '…' : ''}, resolved via ${sidSource}]`);
   out.push(line('tool count',
     session.toolCount !== null ? String(session.toolCount) : '—'));
-  out.push(line('token budget',
-    session.tokenBudget !== null
-      ? `~${fmtTokens(session.tokenBudget)}${zone ? `  (${zone} zone)` : ''}`
-      : '—'));
+  out.push(line('context tokens',
+    context ? `${fmtTokens(context.tokens)}  (${context.zone} zone)` : '—'));
   out.push(line('compact state',
     session.compactState ? session.compactState : '—'));
   out.push(line('task-change oneshot',

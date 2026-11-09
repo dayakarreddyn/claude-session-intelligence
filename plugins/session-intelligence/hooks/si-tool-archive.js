@@ -9,9 +9,8 @@
  * body to disk keyed by `tool_use_id`, so `si expand <id>` (or the CLI at
  * `tools/expand.js`) replays the exact payload after compaction.
  *
- * Observational only. We do not truncate or rewrite the result the model
- * just received — the model sees the full body on the call itself, and the
- * archive is purely a retrieval path for after compact.
+ * Archive first, prune second: `si-prune-output.js` only replaces results
+ * whose full body is already on disk here.
  */
 
 const fs = require('fs');

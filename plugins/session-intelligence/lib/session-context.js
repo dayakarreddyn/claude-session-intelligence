@@ -154,6 +154,7 @@ function readSessionContext(projectDir, opts) {
 module.exports = {
   readSessionContext,
   parseSessionContext,
+  sectionByTitle,
   stripPlaceholderLines,
   isPlaceholderLine,
   AUTOFILL_SENTINEL_RE,

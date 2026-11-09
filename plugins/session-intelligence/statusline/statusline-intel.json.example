@@ -5,6 +5,7 @@
     "emoji2", "tools", "session", "cost", "deploy", "task"
   ],
   "tokenSource": "auto",
+  "zoneMode": "absolute",
   "zones": { "yellow": 200000, "orange": 300000, "red": 400000 },
   "maxTaskLength": 70,
   "separator": " · ",

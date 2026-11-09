@@ -25,6 +25,8 @@ const {
 } = require('../hooks/si-pre-compact');
 
 const toolArchive = require('../lib/tool-archive');
+const { spawnSync } = require('node:child_process');
+const { openDatabase } = require('../lib/sqlite-driver');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_NOW = Date.UTC(2026, 3, 22); // 2026-04-22, anchor for deterministic age math
@@ -202,5 +204,164 @@ test('buildArchiveRecallBlock lists recallable ids largest-first with /si expand
     assert.ok(out.indexOf('toolu_big') < out.indexOf('toolu_small'), 'largest archive listed first');
   } finally {
     try { fs.rmSync(toolArchive.archiveDir(sid), { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
+test('si-pre-compact stamps contextTokens/cap/fill on the history entry and compacts row', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  try {
+    const sid = 'sid-pc-units';
+    const cwd = path.join(home, 'proj');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+    const transcript = path.join(home, 'transcript.jsonl');
+    fs.writeFileSync(transcript, JSON.stringify({
+      type: 'assistant', timestamp: '2026-10-19T00:00:00Z',
+      message: { id: 'msg_1', model: 'claude-opus-5-5', role: 'assistant', content: [],
+        usage: { input_tokens: 400000, cache_creation_input_tokens: 0, cache_read_input_tokens: 80000, output_tokens: 10 } },
+    }) + '\n');
+    const seed = spawnSync(process.execPath, ['-e',
+      `require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'events'))}).recordSessionStart({sid:${JSON.stringify(sid)},project:'p',cwd:${JSON.stringify(cwd)},startedAt:1})`],
+    { env: { ...process.env, HOME: home, TMPDIR: home }, encoding: 'utf8' });
+    assert.equal(seed.status, 0, seed.stderr);
+    const env = { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid };
+    for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'auto', hook_event_name: 'PreCompact' }),
+      env, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = fs.readFileSync(path.join(home, '.claude', 'logs', 'compact-history.jsonl'), 'utf8').trim().split('\n');
+    const entry = JSON.parse(lines[lines.length - 1]);
+    assert.equal(entry.tokens, 480000); assert.equal(entry.contextTokens, 480000);
+    assert.equal(entry.contextCap, 1000000); assert.equal(entry.fillPct, 48);
+    assert.equal(entry.model, 'claude-opus-5-5'); assert.equal(entry.trigger, 'auto');
+    const { db } = openDatabase(path.join(home, '.claude', 'state', 'si-events.db'));
+    try {
+      const row = db.prepare('SELECT tokens, fill_pct, context_cap FROM compacts WHERE sid = ?').get(sid);
+      assert.equal(row.tokens, 480000); assert.equal(row.fill_pct, 48); assert.equal(row.context_cap, 1000000);
+    } finally { db.close(); }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// --- Task 14: registry-first, capped PreCompact output ----------------------
+
+function runPreCompact({ sessionContext, sid, extraShapeLines = 0 }) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const cwd = path.join(home, 'proj');
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+  const transcript = path.join(home, 'transcript.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: 'assistant', timestamp: '2026-10-19T00:00:00Z',
+    message: { id: 'msg_1', model: 'claude-opus-5-5', role: 'assistant', content: [],
+      usage: { input_tokens: 400000, cache_creation_input_tokens: 0, cache_read_input_tokens: 80000, output_tokens: 10 } },
+  }) + '\n');
+  const projectDir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/\//g, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'session-context.md'), sessionContext);
+  const env = { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid };
+  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'DISABLE_COMPACT']) delete env[k];
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+    input: JSON.stringify({ session_id: sid, cwd, transcript_path: transcript, trigger: 'manual', hook_event_name: 'PreCompact' }),
+    env, encoding: 'utf8', timeout: 15000,
+  });
+  const statePath = path.join(home, '.claude', 'state', `claude-constraints-${sid}.json`);
+  return { r, home, statePath, readState: () => JSON.parse(fs.readFileSync(statePath, 'utf8')) };
+}
+
+test('PreCompact prints the registry before every other section, exits 0, never blocks', () => {
+  const ctx = '# Session Context\n\n## Current Task\ntype: feat — thing\ndescription: do the thing\n\n'
+    + '## Key Decisions\n- Never rewrite earlier turns\n\n## On Compact\nPRESERVE: the auth contract\n';
+  const { r, home, readState } = runPreCompact({ sessionContext: ctx, sid: 'sid-pc-reg' });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /"decision"/);
+    const reg = r.stdout.indexOf('## CONSTRAINT REGISTRY');
+    assert.ok(reg >= 0, r.stdout);
+    assert.ok(reg < r.stdout.indexOf('## COMPACTION GUIDANCE'));
+    assert.ok(r.stdout.length < 10000);
+    const state = readState();
+    assert.ok(state.items.some((i) => i.text === 'Never rewrite earlier turns'));
+    assert.equal(state.fillPct, 48); assert.equal(state.contextTokens, 480000);
+    assert.equal(state.contextCap, 1000000); assert.equal(state.trigger, 'manual');
+    assert.equal(state.model, 'claude-opus-5-5');
+    for (const item of state.items) assert.ok(r.stdout.includes(item.text), `state item "${item.text}" must be in stdout`);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('PreCompact over the cap keeps the registry intact, drops optional blocks from the end, and logs it', () => {
+  const ctx = '# Session Context\n\n## Key Decisions\n- Never rewrite earlier turns\n\n'
+    + '## On Compact\nPRESERVE: ' + 'x'.repeat(9000) + '\n\n## Current Task\ntype: feat — thing\ndescription: ' + 'y'.repeat(6000) + '\n';
+  const { r, home, readState } = runPreCompact({ sessionContext: ctx, sid: 'sid-pc-cap' });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.length < 10000, `stdout was ${r.stdout.length}`);
+    assert.doesNotMatch(r.stdout, /"decision"/);
+    const state = readState();
+    assert.ok(state.items.length >= 1);
+    for (const item of state.items) assert.ok(r.stdout.includes(item.text));
+    assert.match(r.stdout, /Never rewrite earlier turns/);
+    const logDir = path.join(home, '.claude', 'logs');
+    const log = fs.readdirSync(logDir).filter((f) => f.startsWith('session-intel-'))
+      .map((f) => fs.readFileSync(path.join(logDir, f), 'utf8')).join('\n');
+    assert.match(log, /block assembled/);
+    const line = log.split('\n').find((l) => l.includes('block assembled'));
+    const dropped = JSON.parse(line.slice(line.indexOf('{'))).dropped;
+    assert.equal(dropped[0], 'next');
+    assert.ok(!dropped.includes('registry'));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('PreCompact still injects the registry when the state dir is unwritable', { skip: process.getuid && process.getuid() === 0 }, () => {
+  const ctx = '# Session Context\n\n## Key Decisions\n- Never rewrite earlier turns\n';
+  const sid = 'sid-pc-ro';
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const stateDir = path.join(home, '.claude', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const projectDir = path.join(home, '.claude', 'projects', path.join(home, 'proj').replace(/\//g, '-'));
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(path.join(home, 'proj'), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'session-context.md'), ctx);
+  fs.chmodSync(stateDir, 0o500);
+  try {
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd: path.join(home, 'proj'), trigger: 'manual', hook_event_name: 'PreCompact' }),
+      env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /## CONSTRAINT REGISTRY/);
+    assert.match(r.stdout, /Never rewrite earlier turns/);
+  } finally {
+    fs.chmodSync(stateDir, 0o700);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('PreCompact with an unreadable transcript still writes the regret snapshot, exits 0, and never records cap 0', () => {
+  const sid = 'sid-pc-nousage';
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
+  const snapFile = path.join(home, `claude-compact-snapshot-${sid}.json`);
+  try {
+    const cwd = path.join(home, 'proj');
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+    const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-pre-compact.js')], {
+      input: JSON.stringify({ session_id: sid, cwd, transcript_path: path.join(home, 'missing.jsonl'), trigger: 'auto', hook_event_name: 'PreCompact' }),
+      env: { ...process.env, HOME: home, TMPDIR: home, CLAUDE_SESSION_ID: sid }, encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(fs.existsSync(snapFile), 'regret snapshot must be written without usage evidence');
+    const dbFile = path.join(home, '.claude', 'state', 'si-events.db');
+    if (fs.existsSync(dbFile)) {
+      const { db } = openDatabase(dbFile);
+      try {
+        const row = db.prepare('SELECT context_cap FROM compacts WHERE sid = ?').get(sid);
+        assert.ok(!row || row.context_cap !== 0);
+      } finally { db.close(); }
+    }
+  } finally {
+    fs.rmSync(snapFile, { force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });

@@ -72,6 +72,7 @@ function gitRecentCommits(cwd, sinceMs) {
 // tests (and the `_internal` export at the bottom of this file) stay
 // backwards-compatible.
 const sessionCtx = require('./session-context');
+const { CONSTRAINT_TYPES } = require('./constraint-registry');
 const parseSessionContextSections = sessionCtx.parseSessionContext;
 
 function readSessionContext(projectDir) {
@@ -186,6 +187,7 @@ function readNextPriorities(projectDir) {
  *   sessionStartMs?: number,
  *   hotDirs?: string[],
  *   droppedDirs?: string[],
+ *   constraints?: Array<{ type: string, text: string, source?: string }>,
  * }} opts
  * @returns {boolean} whether a file was actually written
  */
@@ -210,7 +212,17 @@ function writeHandoff(opts) {
   // commits are WEAK on their own (they describe state, not direction). If
   // only WEAK signals exist, the session wrapped cleanly or the user
   // `/compact`ed for a topic pivot — don't replay stale context either way.
-  const hasStrongSignal = currentTaskFresh || nextPriorities.length > 0;
+  const constraints = Array.isArray(opts.constraints)
+    ? opts.constraints
+      .filter((c) => c && typeof c.text === 'string' && c.text)
+      .map((c) => ({
+        type: CONSTRAINT_TYPES.includes(c.type) ? c.type : 'Information',
+        text: c.text.replace(/\s*\n+\s*/g, ' ').trim(),
+        source: c.source,
+      }))
+      .filter((c) => c.text)
+    : [];
+  const hasStrongSignal = currentTaskFresh || nextPriorities.length > 0 || constraints.length > 0;
   if (!hasStrongSignal) return false;
 
   const handoff = {
@@ -220,6 +232,7 @@ function writeHandoff(opts) {
     currentTask: currentTaskFresh ? ctx.currentTask : '',
     currentTaskAgeHours: currentTaskFresh ? Number(ctxAgeHours.toFixed(1)) : null,
     keyFiles: ctx.keyFiles || '',
+    constraints,
     nextPriorities,
     inFlightFiles: inFlight,
     recentCommits,
@@ -400,6 +413,13 @@ function renderHandoffBlock(handoff) {
   const lines = [];
   lines.push('Resuming after /compact. Session state captured just before the pause:');
   lines.push('');
+
+  // First, so any later trimming of the hook output keeps the constraints.
+  if (Array.isArray(handoff.constraints) && handoff.constraints.length) {
+    lines.push('Standing constraints (re-injected after compact \u2014 these survive regardless of the summary):');
+    for (const c of handoff.constraints) lines.push(`  - [${c.type}] ${c.text}`);
+    lines.push('');
+  }
 
   if (handoff.currentTask) {
     lines.push(`Current task (from session-context.md, ${handoff.currentTaskAgeHours ?? '?'}h fresh):`);

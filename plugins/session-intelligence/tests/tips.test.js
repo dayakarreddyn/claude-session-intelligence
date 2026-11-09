@@ -38,3 +38,11 @@ test('pickTip tolerates empty salt', () => {
   const tip = pickTip('red', '', { day: '2026-04-25' });
   assert.ok(TIP_POOLS.red.includes(tip));
 });
+
+test('red tip pool mentions the /clear handoff', () => {
+  assert.ok(TIP_POOLS.red.some((t) => /\/clear/.test(t) && /handoff/.test(t)));
+});
+
+test('orange tip 1 names autoCompactWindow: 400000', () => {
+  assert.match(TIP_POOLS.orange[0], /autoCompactWindow: 400000/);
+});

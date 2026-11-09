@@ -132,8 +132,9 @@ test('triggerRefresh returns false when an active lock exists', () => {
 
 test('readAndRefreshIfStale returns whatever cache currently holds', () => {
   withTempCache(({ api }) => {
-    // First call: no cache → returns null, triggers refresh (spawn may
-    // fail silently if the worker path doesn't resolve, which is fine).
+    // First call: no cache → returns null and would trigger a refresh. An
+    // active lock stops triggerRefresh before it spawns a real network worker.
+    fs.writeFileSync(api.lockFilePath(), '{}');
     assert.equal(api.readAndRefreshIfStale(), null);
 
     const payload = { sessionUsage: 5, weeklyUsage: 10, fetchedAt: Date.now() };

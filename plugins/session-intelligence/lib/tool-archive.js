@@ -17,9 +17,8 @@
  *   - LRU eviction when count > maxPerSession (drop oldest by index order)
  *   - Lazy TTL sweep on write — archives older than ttlDays are removed
  *
- * Observational only. We don't modify the tool pipeline or truncate what
- * the model sees on the initial call; the post-compact retrieval path is
- * the value prop.
+ * Archive first, prune second: `si-prune-output.js` only replaces results
+ * whose full body is already on disk here.
  */
 
 const fs = require('fs');
@@ -96,7 +95,11 @@ function extractFromPayload(payload) {
             : payload.output        !== undefined ? payload.output
             : payload.result        !== undefined ? payload.result
             : '';
-  const body = typeof raw === 'string' ? raw : safeStringify(raw);
+  // Known shapes (Bash stdout, Read file content) archive the text itself so
+  // `/si expand` replays it verbatim and the pruner's excerpt matches the archive.
+  let text = null;
+  try { text = require('./prune').extractPrunableText({ toolName, toolResponse: raw }); } catch { /* optional */ }
+  const body = text ? text.text : (typeof raw === 'string' ? raw : safeStringify(raw));
 
   return { id, body, toolName, toolInput };
 }

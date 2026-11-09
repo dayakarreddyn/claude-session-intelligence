@@ -301,7 +301,25 @@ function findUsageForTask({ cwd, sid, parentToolUseId, now = Date.now(), windowM
   return readSubagentTranscript(recent[0].path);
 }
 
+/**
+ * True at most once per `intervalMs`, keyed on a marker file that stores the
+ * clock of the last run (not its mtime, so callers can inject `now`). The
+ * marker is written when this returns true. Never throws.
+ */
+function throttleDue(markerFile, intervalMs, now = Date.now()) {
+  try {
+    const last = Number(fs.readFileSync(markerFile, 'utf8'));
+    if (Number.isFinite(last) && now - last < intervalMs) return false;
+  } catch { /* no marker yet */ }
+  try {
+    fs.mkdirSync(path.dirname(markerFile), { recursive: true });
+    fs.writeFileSync(markerFile, String(now));
+  } catch { /* best effort */ }
+  return true;
+}
+
 module.exports = {
+  throttleDue,
   encodeProjectPath,
   subagentsDirFor,
   listCandidates,

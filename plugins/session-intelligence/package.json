@@ -4,7 +4,9 @@
   "private": true,
   "description": "Session Intelligence plugin — context-shape tracking, strategic compaction, cost telemetry.",
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test tests/*.test.js",
+    "test:node22": "mise x node@22 -- node --test tests/*.test.js",
+    "test:matrix": "npm test && npm run test:node22",
     "sync": "bash ../../install.sh --refresh-only",
     "test:sync": "npm test && npm run sync"
   },
