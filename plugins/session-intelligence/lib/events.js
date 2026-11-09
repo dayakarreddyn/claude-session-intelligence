@@ -114,6 +114,27 @@ function recordSessionEnd({ sid, endedAt, totalCostUsd, peakTokens, toolCalls })
   } catch { return false; }
 }
 
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Upsert the session's cumulative cost as of local day `day`. The Stop hook
+ * writes this every turn; the stats reader turns consecutive rows into
+ * per-day deltas so spend lands on the day it happened, not the day the
+ * session started.
+ */
+function recordSessionDayCost({ sid, day, cost, t }) {
+  const db = openDb();
+  if (!db || !sid || !DAY_KEY_RE.test(String(day || '')) || !Number.isFinite(cost)) return false;
+  try {
+    db.prepare(`
+      INSERT INTO session_cost_days (sid, day, cost, t)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(sid, day) DO UPDATE SET cost = excluded.cost, t = excluded.t
+    `).run(sid, day, cost, Number.isFinite(t) ? t : Date.now());
+    return true;
+  } catch { return false; }
+}
+
 /** Canonical project for a row: the sessions row wins, else the caller's key, else the cwd's repo key. */
 function canonicalProject(db, sid, project, cwd) {
   let fallback = project || null;
@@ -630,6 +651,7 @@ module.exports = {
   getEventsDbPath,
   recordSessionStart,
   recordSessionEnd,
+  recordSessionDayCost,
   recordCompact,
   reconcileCompactHistory,
   recordZoneTransition,

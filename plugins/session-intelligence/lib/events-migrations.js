@@ -160,6 +160,14 @@ function createTables(db) {
       PRIMARY KEY (sid, model)
     );
     CREATE INDEX IF NOT EXISTS session_model_costs_t_idx ON session_model_costs(t);
+
+    CREATE TABLE IF NOT EXISTS session_cost_days (
+      sid   TEXT NOT NULL,
+      day   TEXT NOT NULL,
+      cost  REAL,
+      t     INTEGER NOT NULL,
+      PRIMARY KEY (sid, day)
+    );
   `);
 }
 

@@ -256,7 +256,7 @@ function renderHeadline(stats, sinceDays, project) {
 
 function renderDailyTrend(daily, sinceDays) {
   if (!daily || !daily.length) return '';
-  const lines = [header('DAILY TREND', `${sinceDays} days`), ''];
+  const lines = [header('DAILY TREND', `${sinceDays} days · cost on the day it was spent`), ''];
   // Sparkline by cost; show last N days at the end.
   const window = daily.slice(-Math.min(daily.length, sinceDays));
   const costSpark = sparkline(window.map((d) => d.cost));
@@ -405,7 +405,9 @@ function renderOutcomes(stats) {
   const pct1 = (v) => `${Math.round(v * 10) / 10}%`;
   const rows = [
     ['Count',              String(o.n)],
-    ['Retention (mean)',   num(o.avg_retention, (v) => `${Math.round(v * 100)}%`)],
+    ['Retention (mean)',   o.with_constraints
+      ? `${num(o.avg_retention, (v) => `${Math.round(v * 100)}%`)}  (${o.with_constraints} of ${o.n} compacts registered constraints)`
+      : c('dim', `— (none of ${o.n} compacts registered constraints; fill ## On Compact / ## Key Decisions in session-context.md)`)],
     ['Summary chars (mean)', num(o.avg_summary_chars, (v) => String(Math.round(v)))],
     ['Fill before (auto / manual)',
       `${num(o.avg_fill_before_auto, pct1)} / ${num(o.avg_fill_before_manual, pct1)}`],

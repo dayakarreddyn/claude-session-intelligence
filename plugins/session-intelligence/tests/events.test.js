@@ -687,8 +687,9 @@ test('aggregateStats outcomes averages retention and splits fill_before by trigg
   const sb = mkSandboxDb();
   try {
     const now = Date.now();
-    events.recordCompactOutcome({ sid: 'a', t: now, compactT: 1, trigger: 'auto', summaryChars: 100, retention: 1, fillBefore: 40 });
-    events.recordCompactOutcome({ sid: 'b', t: now, compactT: 2, trigger: 'auto', summaryChars: 300, retention: 0.5, fillBefore: 60 });
+    // Real rows always carry constraints_total alongside retention (si-post-compact writes both).
+    events.recordCompactOutcome({ sid: 'a', t: now, compactT: 1, trigger: 'auto', summaryChars: 100, constraintsTotal: 2, constraintsRetained: 2, retention: 1, fillBefore: 40 });
+    events.recordCompactOutcome({ sid: 'b', t: now, compactT: 2, trigger: 'auto', summaryChars: 300, constraintsTotal: 2, constraintsRetained: 1, retention: 0.5, fillBefore: 60 });
     events.recordCompactOutcome({ sid: 'c', t: now, compactT: 3, trigger: 'manual', summaryChars: 200, fillBefore: 20 });
     const o = events.aggregateStats({ sinceDays: 30 }).outcomes;
     assert.equal(o.n, 3);
@@ -793,4 +794,90 @@ test('events.js alone never logs the sqlite driver (bootstrap logs it once per s
   };
   assert.doesNotMatch(run({}), /sqlite driver/);
   if (Number(process.versions.node.split('.')[0]) >= 22) assert.doesNotMatch(run({ SI_SQLITE_DRIVER: 'node:sqlite' }), /sqlite driver/);
+});
+
+// ─── Daily cost ledger (session_cost_days) ───────────────────────────────────
+
+const { localDayKey } = require('../lib/utils');
+function localNoonDaysAgo(offset) {
+  const d = new Date();
+  d.setDate(d.getDate() - offset);
+  d.setHours(12, 0, 0, 0);
+  return d.getTime();
+}
+
+test('recordSessionDayCost upserts one row per session-day', () => {
+  const sb = mkSandboxDb();
+  try {
+    assert.ok(events.recordSessionDayCost({ sid: 'sid-1', day: '2026-11-09', cost: 1, t: 1 }));
+    assert.ok(events.recordSessionDayCost({ sid: 'sid-1', day: '2026-11-09', cost: 5, t: 2 }));
+    assert.ok(events.recordSessionDayCost({ sid: 'sid-1', day: '2026-11-10', cost: 6, t: 3 }));
+    const db = openDatabase(sb.dbPath).db;
+    const rows = db.prepare('SELECT sid, day, cost FROM session_cost_days ORDER BY day').all();
+    db.close();
+    assert.deepEqual(rows, [
+      { sid: 'sid-1', day: '2026-11-09', cost: 5 },
+      { sid: 'sid-1', day: '2026-11-10', cost: 6 },
+    ]);
+    assert.equal(events.recordSessionDayCost({ sid: '', day: '2026-11-09', cost: 1 }), false);
+  } finally { cleanup(sb); }
+});
+
+test('daily series attributes ledger deltas to the day they were spent, not the session start day', () => {
+  const sb = mkSandboxDb();
+  try {
+    const d2 = localNoonDaysAgo(2), d1 = localNoonDaysAgo(1), d0 = localNoonDaysAgo(0);
+    events.recordSessionStart({ sid: 'long', project: 'P', cwd: '/x/P', startedAt: d2 });
+    events.recordSessionEnd({ sid: 'long', totalCostUsd: 30 });
+    events.recordSessionDayCost({ sid: 'long', day: localDayKey(d2), cost: 10, t: d2 });
+    events.recordSessionDayCost({ sid: 'long', day: localDayKey(d1), cost: 25, t: d1 });
+    events.recordSessionDayCost({ sid: 'long', day: localDayKey(d0), cost: 30, t: d0 });
+    // A session recorded before the ledger existed keeps start-day attribution.
+    events.recordSessionStart({ sid: 'legacy', project: 'P', cwd: '/x/P', startedAt: d1 });
+    events.recordSessionEnd({ sid: 'legacy', totalCostUsd: 7 });
+
+    const s = events.aggregateStats({ sinceDays: 7 });
+    const byDay = Object.fromEntries(s.dailySeries.map((e) => [e.day, e]));
+    assert.equal(byDay[localDayKey(d2)].cost, 10);
+    assert.equal(byDay[localDayKey(d1)].cost, 22);
+    assert.equal(byDay[localDayKey(d0)].cost, 5);
+    assert.equal(byDay[localDayKey(d2)].sessions, 1);
+    assert.equal(byDay[localDayKey(d1)].sessions, 1);
+    assert.equal(byDay[localDayKey(d0)].sessions, 0);
+    assert.equal(Math.round(s.weeklySeries.reduce((a, w) => a + w.cost, 0)), 37);
+    assert.equal(Math.round(s.dailySeries.reduce((a, d) => a + d.pct, 0) * 100), 100);
+  } finally { cleanup(sb); }
+});
+
+test('a session that started before its first ledger row attributes that row to its start day', () => {
+  const sb = mkSandboxDb();
+  try {
+    const d2 = localNoonDaysAgo(2), d1 = localNoonDaysAgo(1), d0 = localNoonDaysAgo(0);
+    events.recordSessionStart({ sid: 'mid', project: 'P', cwd: '/x/P', startedAt: d2 });
+    events.recordSessionEnd({ sid: 'mid', totalCostUsd: 12 });
+    events.recordSessionDayCost({ sid: 'mid', day: localDayKey(d1), cost: 8, t: d1 });
+    events.recordSessionDayCost({ sid: 'mid', day: localDayKey(d0), cost: 12, t: d0 });
+    const s = events.aggregateStats({ sinceDays: 7 });
+    const byDay = Object.fromEntries(s.dailySeries.map((e) => [e.day, e]));
+    assert.equal(byDay[localDayKey(d2)].cost, 8);
+    assert.equal(byDay[localDayKey(d1)].cost, 0);
+    assert.equal(byDay[localDayKey(d0)].cost, 4);
+  } finally { cleanup(sb); }
+});
+
+test('outcomes aggregate counts compacts that registered constraints and averages retention only over them', () => {
+  const sb = mkSandboxDb();
+  try {
+    const now = Date.now();
+    events.recordSessionStart({ sid: 's', project: 'P', cwd: '/x/P', startedAt: now });
+    events.recordCompactOutcome({ sid: 's', project: 'P', t: now, trigger: 'auto', summaryChars: 100, constraintsTotal: 0, constraintsRetained: 0, retention: null });
+    events.recordCompactOutcome({ sid: 's', project: 'P', t: now, trigger: 'auto', summaryChars: 100, constraintsTotal: 0, constraintsRetained: 0, retention: null });
+    events.recordCompactOutcome({ sid: 's', project: 'P', t: now, trigger: 'auto', summaryChars: 100, constraintsTotal: 2, constraintsRetained: 1, retention: 0.5 });
+    // Rows written before the null-ratio fix stored an empty registry as 0.0; they must not drag the mean either.
+    events.recordCompactOutcome({ sid: 's', project: 'P', t: now, trigger: 'auto', summaryChars: 100, constraintsTotal: 0, constraintsRetained: 0, retention: 0 });
+    const o = events.aggregateStats({ sinceDays: 7 }).outcomes;
+    assert.equal(o.n, 4);
+    assert.equal(o.with_constraints, 1);
+    assert.equal(o.avg_retention, 0.5);
+  } finally { cleanup(sb); }
 });

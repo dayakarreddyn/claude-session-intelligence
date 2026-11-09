@@ -22,6 +22,12 @@
  *      records, default 5) AND session-context.md wasn't touched since the
  *      session began, emit a stderr nudge pointing at the right file.
  *
+ * It also feeds /si stats on every turn: the session's cumulative cost goes
+ * to the per-day ledger (so the daily trend attributes spend to the day it
+ * happened), and subagent rows the live tracker recorded blind are backfilled
+ * from their now-complete transcripts — SessionStart did this alone before,
+ * which never ran for sessions that stay open for days.
+ *
  * Pure stderr — never blocks Stop. Disable via `stopHook.enabled=false` in
  * `~/.claude/session-intelligence.json` or `CLAUDE_SI_STOP_HOOK=0`.
  */
@@ -33,6 +39,10 @@ const os = require('os');
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude');
 const SI_LIB = path.join(__dirname, '..', 'lib');
+// Rescanning subagent transcripts every turn would be wasteful; once per
+// interval per session is plenty for rows that only need filling once.
+const RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
+const RECONCILE_MAX_AGE_DAYS = 3;
 
 function readStdinJsonOrEmpty() {
   try {
@@ -134,7 +144,7 @@ function main() {
   // COALESCE so missing fields don't overwrite real data.
   try {
     const events = require(path.join(SI_LIB, 'events'));
-    const { getStateDir } = require(path.join(SI_LIB, 'utils'));
+    const { getStateDir, localDayKey } = require(path.join(SI_LIB, 'utils'));
     const safeSid = String(sid || '').replace(/[^a-zA-Z0-9_-]/g, '');
     let peakTokens = null;
     let totalCostUsd = null;
@@ -155,6 +165,17 @@ function main() {
       peakTokens,
       toolCalls,
     });
+    if (safeSid && Number.isFinite(totalCostUsd)) {
+      const now = Date.now();
+      events.recordSessionDayCost({ sid: safeSid, day: localDayKey(now), cost: totalCostUsd, t: now });
+    }
+    if (safeSid) {
+      const marker = path.join(getStateDir(), `claude-agent-reconcile-${safeSid}`);
+      if (require(path.join(SI_LIB, 'agent-usage')).throttleDue(marker, RECONCILE_INTERVAL_MS)) {
+        const filled = events.reconcileSubagentUsage({ cwd, maxAgeDays: RECONCILE_MAX_AGE_DAYS });
+        if (filled > 0) intelLog('stop', 'info', 'subagent usage backfilled', { updated: filled });
+      }
+    }
   } catch { /* events lib optional */ }
   if (toolCalls < minToolCalls) {
     intelLog('stop', 'debug', 'below minToolCalls — skipping', { toolCalls, minToolCalls });

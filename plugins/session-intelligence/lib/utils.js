@@ -34,6 +34,14 @@ function getTempDir() {
  * Caches that are safe to lose (statusline cost cache, health probes) stay in
  * os.tmpdir() — there's nothing to gain from durability there.
  */
+/** Local-calendar day key "YYYY-MM-DD" for a millisecond timestamp. */
+function localDayKey(ms) {
+  const d = new Date(ms);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
 function getStateDir() {
   const dir = path.join(getClaudeDir(), 'state');
   ensureDir(dir);
@@ -197,6 +205,7 @@ module.exports = {
   getSessionsDir,
   getTempDir,
   getStateDir,
+  localDayKey,
   pruneStateDir,
   ensureDir,
   readFile,

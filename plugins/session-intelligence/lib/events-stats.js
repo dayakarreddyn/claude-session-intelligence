@@ -28,7 +28,8 @@ function fillByTrigger(db, cutoff, projectClause, projectArgs) {
 function outcomesAggregate(db, cutoff, projectClause, projectArgs) {
   const r = db.prepare(`
     SELECT COUNT(*) AS n,
-           AVG(retention) AS avg_retention,
+           SUM(CASE WHEN constraints_total > 0 THEN 1 ELSE 0 END) AS with_constraints,
+           AVG(CASE WHEN constraints_total > 0 THEN retention END) AS avg_retention,
            AVG(summary_chars) AS avg_summary_chars,
            AVG(CASE WHEN trigger = 'auto' THEN fill_before END) AS avg_fill_before_auto,
            AVG(CASE WHEN trigger = 'manual' THEN fill_before END) AS avg_fill_before_manual,
@@ -37,6 +38,7 @@ function outcomesAggregate(db, cutoff, projectClause, projectArgs) {
   `).get(cutoff, ...projectArgs);
   return {
     n: r.n || 0,
+    with_constraints: r.with_constraints || 0,
     avg_retention: r.avg_retention,
     avg_summary_chars: r.avg_summary_chars,
     avg_fill_before_auto: r.avg_fill_before_auto,
@@ -175,44 +177,71 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
       if (!byWeek.has(k)) byWeek.set(k, { week: k, cost: 0, sessions: 0, compacts: 0 });
       return byWeek.get(k);
     };
+    // Sessions are counted on the day they started. Cost is attributed to the
+    // day it was spent: a session with rows in the session_cost_days ledger
+    // (the Stop hook upserts its cumulative cost every turn) contributes the
+    // day-over-day delta of that running total; a session recorded before the
+    // ledger existed falls back to its whole total on the start day.
+    const now = new Date();
+    const firstDay = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (sinceDays - 1)).getTime());
+    const dayMs = (day) => new Date(`${day}T12:00:00`).getTime();
+    const addCost = (day, cost) => {
+      if (!(cost > 0) || day < firstDay) return;
+      ensureDay(day).cost += cost;
+      ensureWeek(weekKey(dayMs(day))).cost += cost;
+    };
+    const ledgerRows = db.prepare(`
+      SELECT l.sid AS sid, l.day AS day, l.cost AS cost, s.started_at AS started_at
+      FROM session_cost_days l JOIN sessions s ON s.sid = l.sid
+      ${project ? 'WHERE s.project = ?' : ''}
+      ORDER BY l.sid, l.day
+    `).all(...projectArgs);
+    const ledgerSids = new Set();
+    let prevSid = null;
+    let prevCost = 0;
+    for (const r of ledgerRows) {
+      const first = r.sid !== prevSid;
+      if (first) { prevSid = r.sid; prevCost = 0; ledgerSids.add(r.sid); }
+      const cost = Number.isFinite(r.cost) ? r.cost : prevCost;
+      const delta = cost - prevCost;
+      prevCost = Math.max(prevCost, cost);
+      // A session's first ledger row may carry spend from before the ledger
+      // saw it; that part stays on the start day, exactly as before.
+      const startDay = Number.isFinite(r.started_at) ? dayKey(r.started_at) : r.day;
+      addCost(first && startDay < r.day ? startDay : r.day, delta);
+    }
     const sessionRows = db.prepare(`
-      SELECT started_at AS t, total_cost_usd AS cost
+      SELECT sid, started_at AS t, total_cost_usd AS cost
       FROM sessions WHERE started_at >= ? ${projectClause}
     `).all(cutoff, ...projectArgs);
     for (const r of sessionRows) {
-      const d = ensureDay(dayKey(r.t));
-      d.sessions += 1;
-      if (Number.isFinite(r.cost)) d.cost += r.cost;
-      const w = ensureWeek(weekKey(r.t));
-      w.sessions += 1;
-      if (Number.isFinite(r.cost)) w.cost += r.cost;
+      ensureDay(dayKey(r.t)).sessions += 1;
+      ensureWeek(weekKey(r.t)).sessions += 1;
+      if (!ledgerSids.has(r.sid)) addCost(dayKey(r.t), r.cost);
     }
     const compactRows = db.prepare(`
       SELECT t, cost FROM compacts WHERE t >= ? ${projectClause}
     `).all(cutoff, ...projectArgs);
     for (const r of compactRows) {
-      const d = ensureDay(dayKey(r.t));
-      d.compacts += 1;
-      const w = ensureWeek(weekKey(r.t));
-      w.compacts += 1;
+      ensureDay(dayKey(r.t)).compacts += 1;
+      ensureWeek(weekKey(r.t)).compacts += 1;
       // compact cost is already counted in session totals — don't double-add
     }
-    // Fill day calendar gaps so the sparkline is honest about idle days.
-    // Each entry also carries its share of the window's total spend.
-    const totalCostInWindow = sessionRows.reduce(
-      (s, r) => s + (Number.isFinite(r.cost) ? r.cost : 0), 0);
-    const dailySeries = [];
-    const now = new Date();
+    // Fill day calendar gaps so the sparkline is honest about idle days. Each
+    // entry carries its share of the series' total, so %TOT sums to 100.
+    const emptyDay = (k) => ({ day: k, cost: 0, sessions: 0, compacts: 0 });
+    const dayEntries = [];
     for (let i = sinceDays - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
       const k = dayKey(d.getTime());
-      const entry = byDay.get(k) || { day: k, cost: 0, sessions: 0, compacts: 0 };
-      entry.pct = totalCostInWindow > 0 ? entry.cost / totalCostInWindow : 0;
-      dailySeries.push(entry);
+      dayEntries.push(byDay.get(k) || emptyDay(k));
     }
+    const totalCostInWindow = dayEntries.reduce((s, d) => s + d.cost, 0);
+    const share = (cost) => (totalCostInWindow > 0 ? cost / totalCostInWindow : 0);
+    const dailySeries = dayEntries.map((e) => ({ ...e, pct: share(e.cost) }));
     // Fill week gaps for the same window. Iterate forward from the Monday on
     // or before the cutoff so the bucket alignment is stable across runs.
-    const weeklySeries = [];
+    const weekEntries = [];
     const cutoffMonday = (() => {
       const d = new Date(cutoff);
       d.setHours(0, 0, 0, 0);
@@ -222,19 +251,14 @@ function aggregateStats(db, { sinceDays = 30, project = null } = {}) {
     })();
     for (let cursor = new Date(cutoffMonday); cursor.getTime() <= now.getTime(); cursor.setDate(cursor.getDate() + 7)) {
       const k = weekKey(cursor.getTime());
-      const entry = byWeek.get(k) || { week: k, cost: 0, sessions: 0, compacts: 0 };
-      entry.pct = totalCostInWindow > 0 ? entry.cost / totalCostInWindow : 0;
-      weeklySeries.push(entry);
+      weekEntries.push(byWeek.get(k) || { week: k, cost: 0, sessions: 0, compacts: 0 });
     }
     // Week-over-week delta on cost (current vs prior). Prior of the very
     // first bucket is undefined → null, rendered as "—".
-    for (let i = 0; i < weeklySeries.length; i++) {
-      const prev = i > 0 ? weeklySeries[i - 1].cost : null;
-      const cur = weeklySeries[i].cost;
-      weeklySeries[i].wow = (prev === null || prev <= 0)
-        ? null
-        : (cur - prev) / prev;
-    }
+    const weeklySeries = weekEntries.map((w, i) => {
+      const prev = i > 0 ? weekEntries[i - 1].cost : null;
+      return { ...w, pct: share(w.cost), wow: (prev === null || prev <= 0) ? null : (w.cost - prev) / prev };
+    });
 
     // Per-project enrichment: sessions, cost, compacts, red-zone count, archive stats.
     // Joins through sid (not project name) because compacts/zone_transitions
