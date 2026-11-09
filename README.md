@@ -181,12 +181,13 @@ DROP: login debugging traces, CSS exploration, E2E raw output
 
 ### 3. What Happens on Compact
 
-When `/compact` fires (manually or auto), the pre-compact hook injects up to four blocks into the summary context:
+When `/compact` fires (manually or auto), the pre-compact hook injects up to five blocks into the summary context:
 
 1. **COMPACTION GUIDANCE** — parsed from `session-context.md` (user-curated signal)
 2. **OBSERVED CONTEXT SHAPE** — generated from the shape tracker's tool-call log (grounded signal)
 3. **MEMORY OFFLOAD CHECKPOINT** — a directive telling Claude to preserve rich detail in auto-memory before the summary collapses it
 4. **TIP** — a one-line post-compact lifeline (e.g. `/si expand <tool_use_id>` to replay an archived tool response, `/si archive-list` to see what's on disk). Rotated deterministically from a small pool; disappears gracefully on mixed-version installs.
+5. **CONSTRAINT REGISTRY** — up to 25 typed must-survive lines, in priority order: bullets under a `## Compact Instructions` heading in the project's CLAUDE.md, then `## On Compact` and `## Key Decisions` from `session-context.md`, then the autofilled `## Current Task` block (type, description, issue). A bare `PRESERVE:` or `DROP:` label is not a constraint, lines under a `DROP:` label are skipped, and `issue: none` is ignored. Because Current Task is refreshed every session, the registry is never empty just because the user-owned sections are still the seeded template. The PostCompact hook scores how many registry lines survive in the summary (`compact_outcomes.retention`).
 
 ```
 COMPACTION GUIDANCE (from session-context.md):
@@ -481,7 +482,7 @@ Useful for project-specific tuning that shouldn't leak globally — e.g. flat-la
 
 The most common silent SI failure is a project's `.claude/settings.json` declaring an `enabledPlugins` whitelist that omits `session-intelligence@session-intelligence`. Claude Code treats that whitelist as authoritative — every plugin not listed is suppressed for that project, including SI's hooks. The statusline still renders (it's wired separately as a `statusCommand`), so the bar lights up but every SI-fed field stays blank forever, and there's no obvious way to tell that from "nothing's happened yet."
 
-`/si doctor` answers the question authoritatively. It walks cwd ancestry for `.claude/settings*.json`, inspects the `enabledPlugins` whitelist, checks plugin-cache presence, and verifies the session's shape log is being written. Output:
+`/si doctor` answers the question authoritatively. It walks cwd ancestry for `.claude/settings*.json`, inspects the `enabledPlugins` whitelist, checks plugin-cache presence, and verifies the session's shape log is being written under `~/.claude/state/` (a log left in the temp dir by a pre-move session is still recognised). Output:
 
 ```
 Session Intelligence — doctor for /Users/me/DWS/CSM
@@ -499,7 +500,7 @@ Project gating
 
 Runtime evidence (this session)
   ✓ session id resolved  — 89dc4649-331…
-  ✗ shape log written  — no file at /tmp/claude-ctx-shape-89dc4649-….jsonl — si-token-budget hasn't run
+  ✗ shape log written  — no file at /Users/me/.claude/state/claude-ctx-shape-89dc4649-….jsonl — si-token-budget hasn't run
 
 VERDICT: SI is dark for this project. See "Fix:" above.
 ```
@@ -589,7 +590,7 @@ The store opens through `lib/sqlite-driver.js`: `better-sqlite3` when its prebui
 Sections, in order:
 
 - **Headline** — total spend, sessions, avg/session, avg/day, tool calls, peak tokens. If `usageBudget.daily` or `usageBudget.weekly` is set, two extra rows show `today / cap` and `this week / cap` with color-coded `%` of budget.
-- **Daily trend** — sparkline + 7-day table with `cost`, `%TOT` (share of period spend), `sessions`, `compacts`, optional `%BUDG`.
+- **Daily trend** — sparkline + 7-day table with `cost`, `%TOT` (share of period spend), `sessions`, `compacts`, optional `%BUDG`. Cost lands on the day it was spent: the Stop hook upserts each session's running total into the `session_cost_days` ledger every turn, and the report takes day-over-day deltas, so a session that stays open for a week no longer shows all of its spend on the day it started (and a day with nothing but long-running sessions no longer shows `$0.00`). Sessions recorded before the ledger existed keep start-day attribution; `sessions` always counts by start day.
 - **Weekly rollup** — Monday-anchored buckets, leading-empty weeks trimmed, `WoW` (week-over-week % change in cost) with colored ▲/▼ deltas, optional `%BUDG`.
 - **Compacts** — count, total/avg cost, p50/p90/min/max tokens at compact, % with domain shift.
 - **Zone callouts** — yellow/orange/red bar chart with a one-line verdict ("9 red-zone events (20% of crossings) — sessions are routinely pushing past the recommended compact line").
@@ -599,7 +600,7 @@ Sections, in order:
 
 ### Telemetry tables: `compact_outcomes` and `cache_hits`
 
-`~/.claude/state/si-events.db` also holds `compact_outcomes` (one row per compact from the PostCompact hook: trigger, summary size, `constraints_total` / `constraints_retained` / `retention`, the missing items, and context fill before/after) and `cache_hits` (one row per assistant message: `cache_read`, `cache_creation`, `context_tokens` and the hit `ratio`; repeats of the same message are ignored). `/si stats` reads both for retention and per-turn cache-hit series.
+`~/.claude/state/si-events.db` also holds `compact_outcomes` (one row per compact from the PostCompact hook: trigger, summary size, `constraints_total` / `constraints_retained` / `retention`, the missing items, and context fill before/after) and `cache_hits` (one row per assistant message: `cache_read`, `cache_creation`, `context_tokens` and the hit `ratio`; repeats of the same message are ignored). `/si stats` reads both for retention and per-turn cache-hit series. `retention` is NULL, not 0, when a compact registered no constraints, and the report's `Retention (mean)` row says how many compacts in the window registered any — so a project whose `## On Compact` / `## Key Decisions` sections are still the seeded template reads as "unmeasured" rather than as a 0% failure.
 
 #### Usage budgets (`usageBudget`)
 
@@ -1017,13 +1018,14 @@ Env overrides: `CLAUDE_SI_PRUNE=0|1`, `CLAUDE_SI_PRUNE_FLOOR=<chars>`, `CLAUDE_S
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `si-bootstrap.js` | SessionStart | Seeds session-context.md from git, wires statusline chain, injects CLAUDE.md rules, reconciles the archive + workflow-agent telemetry tables |
-| `si-agent-tracker.js` | PostToolUse | Records each `Task`/`Agent` subagent run (type, tokens, cost, duration) from its transcript. The `Workflow` tool fires no hook, so workflow-spawned agents are backfilled from transcripts at SessionStart instead |
+| `si-agent-tracker.js` | PostToolUse | Records each `Task`/`Agent` subagent run (type, tokens, cost, duration) from its transcript. The `Workflow` tool fires no hook, so workflow-spawned agents are backfilled from transcripts at SessionStart instead. Background-run agents are recorded before their transcript has flushed usage; those rows are filled in at SessionStart and, throttled to once per 10 minutes, by the Stop hook — so sessions that stay open for days get their numbers too |
 | `si-pre-compact.js` | PreCompact | Injects session-context.md hints **+ auto-generated PRESERVE/DROP from observed shape**, logs compact history entry + post-compact snapshot |
 | `si-token-budget.js` | PostToolUse | Estimates tokens from tool I/O, appends context-shape entries, monitors post-compact regret |
 | `si-tool-archive.js` | PostToolUse | Archives tool responses above `toolArchive.thresholdChars` so `/si expand <tool_use_id>` can replay them after `/compact` |
 | `si-suggest-compact.js` | PostToolUse | Grounded zone warnings at 200k/300k/400k (adaptive from history). Non-blocking — runs as feedback, not interruption |
 | `si-prune-output.js` | PreToolUse, PostToolUse | Replaces oversized tool results with an archived head/tail excerpt; optional Bash command rewrite (`prune.rewriteInput`, default off) |
-| `si-post-compact.js` | PostCompact | Telemetry only: scores how many registered constraints survive in the compact summary and records a `compact_outcomes` row (retention, fill before/after) |
+| `si-post-compact.js` | PostCompact | Telemetry only: scores how many registered constraints survive in the compact summary and records a `compact_outcomes` row (retention — NULL when nothing was registered — and fill before/after) |
+| `si-stop.js` | Stop | Nudges when a non-trivial session ends without touching `session-context.md`; every turn it also rolls session totals into the events DB, upserts the per-day cost ledger (`session_cost_days`) that the daily trend reads, and backfills blind subagent rows from their completed transcripts (throttled) |
 | `si-task-change.js` | UserPromptSubmit | Scores same-domain on each new prompt; writes a one-line stderr hint (never blocks) when the task looks like it just shifted |
 
 All emit structured entries to the debug log (see above).
