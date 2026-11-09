@@ -58,3 +58,21 @@ test('doctor skips the window section when no model is known', () => {
   const r = run(sb, { session_id: 'doc5', cwd: sb.cwd });
   assert.doesNotMatch(r.stdout, /resolved cap/);
 });
+
+test('doctor finds the shape log in ~/.claude/state, where si-token-budget writes it', () => {
+  const sb = sandbox();
+  const stateDir = path.join(sb.home, '.claude', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, 'claude-ctx-shape-doc6.jsonl'), '{"a":1}\n{"a":2}\n');
+  const r = run(sb, { session_id: 'doc6', cwd: sb.cwd });
+  assert.match(r.stdout, /✓ shape log written {2}— 2 entries/);
+  assert.doesNotMatch(r.stdout, /si-token-budget hasn't run/);
+});
+
+test('doctor still accepts a legacy shape log under the temp dir', () => {
+  const sb = sandbox();
+  // run() points TMPDIR at the sandbox home, so this is os.tmpdir() for the child.
+  fs.writeFileSync(path.join(sb.home, 'claude-ctx-shape-doc7.jsonl'), '{"a":1}\n');
+  const r = run(sb, { session_id: 'doc7', cwd: sb.cwd });
+  assert.match(r.stdout, /✓ shape log written {2}— 1 entries/);
+});

@@ -25,6 +25,9 @@ const os = require('os');
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const PLUGIN_KEY = 'session-intelligence@session-intelligence';
 const TMP = os.tmpdir();
+// si-token-budget writes the shape log under ~/.claude/state (lib/context-shape.js
+// _stateRoot); sessions that predate that move left theirs in the temp dir.
+const STATE_DIR = path.join(HOME, '.claude', 'state');
 
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
@@ -87,7 +90,9 @@ function resolveSessionId(stdinPayload) {
 
 function shapeLogStat(sid) {
   if (!sid) return null;
-  const file = path.join(TMP, `claude-ctx-shape-${sid}.jsonl`);
+  const name = `claude-ctx-shape-${sid}.jsonl`;
+  const candidates = [path.join(STATE_DIR, name), path.join(TMP, name)];
+  const file = candidates.find(exists) || candidates[0];
   if (!exists(file)) return { file, present: false };
   try {
     const stat = fs.statSync(file);
