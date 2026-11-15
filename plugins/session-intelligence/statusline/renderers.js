@@ -4,7 +4,7 @@
 
 const path = require('path');
 const os = require('os');
-const { resolveLibDir, loadContextShapeLib, loadTokenSpeedLib, loadEventsLib, agentModelCostsSafe, loadUsage: defaultLoadUsage } = require('./lib-loader');
+const { resolveLibDir, loadContextShapeLib, loadTokenSpeedLib, loadRunningAgentsLib, loadEventsLib, agentModelCostsSafe, loadUsage: defaultLoadUsage } = require('./lib-loader');
 const { renderUsageCell: _renderUsageCellImpl, fmtTokens, fmtTokensTight, fmtUsd, fmtUsdShort, fmtDurationTight, resetAtMs, truncate, truncateMiddle, projectLabel, isQuotaAwareBuild } = require('./format');
 const { gitBranch, gitDirtyCount, gitDiffStat, extractIssueNumber, readDeployBreadcrumb, detectOutputStyle, detectSiPluginGate, probeHealthIfStale } = require('./git-info');
 const { contextCap, minutesSinceLastCompact, costAtLastCompact, costsSinceCompact, DEFAULT_PRICES } = require('./economics');
@@ -120,8 +120,20 @@ function savedCell(saved) {
 // ─── Field renderers ─────────────────────────────────────────────────────────
 // Each renderer returns a string (possibly with ANSI) or '' to skip.
 
+const MAX_EFFORT_LABEL_LENGTH = 12;
+
+/** Session effort from stdin (`effort.level`, or a bare string); '' when absent or malformed. */
+function effortLevel(input) {
+  const effort = input && input.effort;
+  const level = effort && typeof effort === 'object' ? effort.level : effort;
+  if (typeof level !== 'string') return '';
+  const label = level.trim().toLowerCase();
+  return /^[a-z]+$/.test(label) && label.length <= MAX_EFFORT_LABEL_LENGTH ? label : '';
+}
+
 function buildRenderers(C, deps = {}) {
   const loadUsage = typeof deps.loadUsage === 'function' ? deps.loadUsage : defaultLoadUsage;
+  const now = typeof deps.now === 'function' ? deps.now : Date.now;
   return {
     /** Intelligent leading emoji — picks based on zone, dirty tree, task intent, deploy. */
     emoji: (input, ctx) => pickEmoji(ctx, input),
@@ -140,7 +152,25 @@ function buildRenderers(C, deps = {}) {
       // identity-only ("Opus 4.7"). output_style now renders as its own
       // cell (`outputStyle` below), so this keeps `model` single-purpose.
       const m = raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || raw;
-      return `${C.dim}${m}${C.reset}`;
+      // Effort rides in the same cell ("Fable 5.2 · high"): it qualifies the
+      // model, and the cell vanishes with it when stdin carries no level.
+      const effort = effortLevel(input);
+      return `${C.dim}${m}${effort ? ` · ${effort}` : ''}${C.reset}`;
+    },
+
+    /**
+     * Subagents still working, grouped by the model and effort they run at:
+     * "agents: opus-5-5·high ×2 · fable-5-2·xhigh". Empty when none are.
+     */
+    agents: (input) => {
+      const lib = loadRunningAgentsLib();
+      if (!lib) return '';
+      const running = lib.listRunningAgents({
+        transcriptPath: input.transcript_path || input.transcriptPath,
+        now: now(),
+      });
+      const label = lib.formatRunningAgents(running);
+      return label ? `${C.dim}agents: ${label}${C.reset}` : '';
     },
 
     project: (input) => `${C.dim}${projectLabel(input.cwd)}${C.reset}`,

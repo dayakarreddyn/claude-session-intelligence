@@ -175,3 +175,19 @@ test('colour: usage cell and tokens cell carry red only in the red zone', (t) =>
   const out = R.tokens({ model: { id: 'claude-fable-5-1' }, context_window: { context_window_size: 1000000 } }, { tokens: 400, cfg, usedTranscript: true });
   assert.ok(out.includes(C.red));
 });
+
+test('model cell appends the session effort level when stdin carries one', () => {
+  const R = buildRenderers(makeColors(false), {});
+  const model = { display_name: 'Fable 5.2 (1M context)' };
+  assert.equal(R.model({ model, effort: { level: 'xhigh' } }, {}), 'Fable 5.2 · xhigh');
+  assert.equal(R.model({ model, effort: 'low' }, {}), 'Fable 5.2 · low');
+});
+
+test('model cell stays identity-only when effort is absent or malformed', () => {
+  const R = buildRenderers(makeColors(false), {});
+  const model = { display_name: 'Fable 5.2' };
+  assert.equal(R.model({ model }, {}), 'Fable 5.2');
+  assert.equal(R.model({ model, effort: { level: '' } }, {}), 'Fable 5.2');
+  assert.equal(R.model({ model, effort: { level: 7 } }, {}), 'Fable 5.2');
+  assert.equal(R.model({ model, effort: { level: 'x'.repeat(40) } }, {}), 'Fable 5.2');
+});

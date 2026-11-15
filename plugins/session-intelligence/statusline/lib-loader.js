@@ -111,6 +111,16 @@ function loadTokenSpeedLib() {
   return null;
 }
 
+function loadRunningAgentsLib() {
+  const dir = resolveLibDir();
+  if (!dir) return null;
+  const p = path.join(dir, 'running-agents.js');
+  try {
+    if (fs.existsSync(p)) return require(p);
+  } catch { /* optional */ }
+  return null;
+}
+
 // Per-session subagent spend by model, from the events DB. Lazy + cached
 // per process; returns [] when the lib or DB is unavailable so the
 // statusline never blocks on sqlite. Subagents bill in their own
@@ -219,6 +229,7 @@ module.exports = {
   loadContextShapeLib,
   loadUsageApiLib,
   loadTokenSpeedLib,
+  loadRunningAgentsLib,
   loadEventsLib,
   agentModelCostsSafe,
   knownPriceForModelSafe,

@@ -45,6 +45,8 @@ const STATUSLINE_PRESETS = {
   //   Line 5: usage & models row — weekUsage · spendLimit · modelQuota ·
   //           modelSplit: weekly quota, gateway spend budget, per-model quota
   //           (dormant until plans have per-model limits), per-model spend.
+  //   Line 6: agents — running subagents by model and effort; the row stays
+  //           reserved (blank) while none are running, like every other row.
   verbose:  [
     'tokens', 'compactAge', 'compactCost', 'cacheHit', 'siHealth',
     'newline',
@@ -55,6 +57,8 @@ const STATUSLINE_PRESETS = {
     'model', 'outputStyle', 'thinking', 'task',
     'newline',
     'weekUsage', 'spendLimit', 'modelQuota', 'modelSplit',
+    'newline',
+    'agents',
   ],
   // Token-economics focus — same skeleton, adds cacheTokens.
   'verbose-cache':  [
