@@ -270,7 +270,7 @@ Configurable, multi-line status bar rendered at the bottom of Claude Code on eve
 ▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48% · cache:98%
 b:77% · 2h40m · sid:golden · c$119/~s$2244 · t1.4M ↓6k ↑384 c1.4M
 ~/work
-Fable 5.1
+Fable 5.1 · high
 w:20% r:<dur> · fable-5-1:$0.73·100%
 ```
 
@@ -303,7 +303,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 
 | Field | Example | Description |
 |---|---|---|
-| `model` | `Fable 5.1` | Model display name only (a trailing parenthetical such as `(1M context)` is trimmed, and there is no style suffix; the output style has its own `outputStyle` cell) (dim) |
+| `model` | `Fable 5.1 · high` | Model display name (a trailing parenthetical such as `(1M context)` is trimmed; the output style has its own `outputStyle` cell), followed by the session effort level from stdin `effort.level` (`low`…`max`) when the model supports one (dim) |
 | `project` | `CSM` | Basename of the working directory (dim) |
 | `branch` | `dev` | Current git branch (dim) |
 | `dirty` | `±3` | Simple count of dirty files (dim) |
@@ -334,6 +334,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 | `activeRoot` | `→plugins/session-intelligence` | "Where Claude is touching files now" — latest non-blank `root` from the per-session shape log, complements `cwd`. Hidden when the latest root collapses to `.` (Claude is parked at cwd root) or matches `basename(cwd)` — those add no signal beyond `cwd`. To force a `→.` "still alive" indicator on flat-layout repos where everything is at the root, set `statusline.perProject["<abs cwd>"].activeRootShowAtRoot: true` (dim) |
 | `siHealth` | `⚠ si-off (run /si doctor)` | **Self-diagnosis tag.** Empty when SI is healthy on this project (silence = success), red warning when the project's `enabledPlugins` whitelist is suppressing SI. Without this the dark state is invisible — the bar still renders (statusline is wired separately) but every SI-fed field stays blank forever and there's no way to distinguish "nothing happened yet" from "hooks are off." The tag points users at `/si doctor` for the verbose remediation block |
 | `deploy` | `deploy:gateway 5m ago` | Target + age, read from `~/.claude/logs/deploy-breadcrumb` (dim) |
+| `agents` | `agents: opus-5-5·high ×2 · fable-5-2·xhigh` | Subagents still working, grouped by the model and effort each is running at (largest group first, groups past the third fold into `+N`). Read from the `subagents/agent-*.meta.json` and transcripts Claude Code writes beside the session transcript: an agent counts while its metadata is not `finished` and its transcript was written in the last 15 minutes. Hidden when none are running (dim) |
 | `outputStyle` | `style:explanatory` | Current Claude Code output style (dim) |
 | `health` | `[●●○]` | Coloured dot per service URL configured in `serviceHealth` — curl probe cached 30s |
 | `task` | `feat — statusline v2` | What you're working on, in order of freshness: (1) `type:` line from `session-context.md` if real and fresh, (2) same suffixed ` (stale)` if older than `taskStaleHours`, (3) last commit subject. Always dim |
@@ -349,7 +350,7 @@ Set `fields` in `~/.claude/statusline-intel.json` to the list + order you want. 
 |---|---|
 | `minimal` | `tokens` |
 | `standard` | `model`, `project`, `tokens`, `newline`, `task` |
-| `verbose` (default) | 5 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `blockUsage`, `session`, `sessionId`, `costSaved`, `tools`, `tokenFlow`, `tokenSpeed` — live activity and token economics · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `outputStyle`, `thinking`, `task` — dim reference context · L5: `weekUsage`, `spendLimit`, `modelQuota`, `modelSplit` — weekly quota, gateway spend budget, per-model quota (dormant until plans have per-model limits), per-model spend |
+| `verbose` (default) | 6 lines. L1: `tokens`, `compactAge`, `compactCost`, `cacheHit`, `siHealth` — colour-escalating warning row (`siHealth` is silent when SI is wired up correctly; flags `⚠ si-off` only when the project's `enabledPlugins` whitelist is suppressing the plugin) · L2: `blockUsage`, `session`, `sessionId`, `costSaved`, `tools`, `tokenFlow`, `tokenSpeed` — live activity and token economics · L3: `branch`, `diffstat`, `cwd`, `activeRoot` — git + working dir delta · L4: `model`, `outputStyle`, `thinking`, `task` — dim reference context · L5: `weekUsage`, `spendLimit`, `modelQuota`, `modelSplit` — weekly quota, gateway spend budget, per-model quota (dormant until plans have per-model limits), per-model spend · L6: `agents` — running subagents by model and effort; blank while none are running (rows are reserved so the bar height never jumps) |
 | `verbose-cache` | 5 lines, token-economics-focused. L1: `tokens`, `compactAge`, `compactCost` · L2: `blockUsage`, `session`, `sessionId`, `tools`, `costSaved`, `tokenFlow`, `cacheHit`, `cacheTokens`, `tokenSpeed` · L3: `cwd` · L4: `model`, `project`, `task` · L5: `weekUsage`, `spendLimit`, `modelQuota`, `modelSplit` |
 
 Switch via `/si set statusline.preset minimal` or override one session with `CLAUDE_STATUSLINE_PRESET=minimal`.
@@ -415,12 +416,12 @@ Most users already have a statusLine — ccstatusline, starship, a custom script
 ▰▰▰▰▰▰▰▱▱▱▱▱▱▱ 480k/1M 48% · cache:98%
 b:77% · 2h40m · sid:golden · c$119/~s$2244 · t1.4M ↓6k ↑384 c1.4M
 ~/work
-Fable 5.1
+Fable 5.1 · high
 w:20% r:<dur> · fable-5-1:$0.73·100%
 🌴 main · ⎇ dev · /Users/you/project
 ```
 
-The first five lines are the intel groups; the last is your previous statusLine.
+The first five lines are the intel groups; the last is your previous statusLine. A sixth intel row, `agents`, sits between them: blank here because no subagent is running.
 
 **Intel-first by default.** The zone bar and quota row need to live closest to the prompt, so intel renders on top and your previous command falls below. Set `CLAUDE_STATUSLINE_PREV_FIRST=1` to flip the order if you prefer your old bar on top.
 
@@ -802,10 +803,10 @@ Size-bounded at 200 entries / 256 KB with automatic rotation. Cross-session — 
 With ≥5 compacts in history, `si-suggest-compact.js` swaps the static 200k/300k/400k thresholds for ones learned from your pattern:
 
 - `orange` = `floor(P50 * 0.9)` — slightly below where you typically pull the trigger, so warnings land before you've already decided to compact
-- `yellow` = `orange - 80k`
+- `yellow` = `orange - 80k`, but never earlier than the static yellow (20% of the window) — learning can push the caution later, not sooner
 - `red` = `max(orange + 60k, P90 * 1.05)` — the scramble zone above your heaviest compacts
 
-All bounded **±30% from defaults** so a degenerate history can't silence warnings entirely. The escalation message includes a disclosure footnote when adaptive zones are active:
+All bounded **±30% from defaults** so a degenerate history can't silence warnings entirely. Thresholds are learned per working directory, so a session whose hooks run from two directories can read the same token count as two different zones; a lower zone only re-arms the callout once the context has actually shrunk by 15% since the last one, which keeps it to one callout per crossing. The escalation message includes a disclosure footnote when adaptive zones are active:
 
 ```
 (Zones adapted to your history: orange=251k, red=317k, 7 past compacts.)
