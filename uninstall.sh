@@ -48,7 +48,7 @@ if [ -d "${HOOKS_DIR}/session-intelligence" ]; then
 fi
 
 # Remove status line scripts
-for f in statusline-intel.js statusline-chain.sh; do
+for f in statusline-intel.js lib-loader.js format.js git-info.js economics.js zones.js renderers.js statusline-chain.sh; do
   if [ -f "${SCRIPTS_DIR}/${f}" ]; then
     rm "${SCRIPTS_DIR}/${f}"
     ok "Removed ${f}"

@@ -23,16 +23,17 @@ const HOOKS = path.join(__dirname, '..', 'hooks');
 
 // Spawn a hook with an isolated HOME so getStateDir()/getEventsDbPath() resolve
 // under a sandbox. Returns the sandbox HOME for inspection.
-function runHook(hookFile, payload) {
+function runHook(hookFile, payload, seed) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-home-'));
   fs.mkdirSync(path.join(home, '.claude', 'state'), { recursive: true });
+  if (seed) seed(path.join(home, '.claude', 'state'));
   const r = spawnSync(process.execPath, [path.join(HOOKS, hookFile)], {
     input: JSON.stringify(payload),
     env: { ...process.env, HOME: home, CLAUDE_SESSION_ID: payload.session_id || '' },
     encoding: 'utf8',
     timeout: 10_000,
   });
-  return { home, status: r.status };
+  return { home, status: r.status, stderr: r.stderr };
 }
 
 function cleanup(home) {
@@ -44,8 +45,7 @@ function agentRows(home, sid) {
   // treat that as zero recorded rows rather than a failure.
   const dbPath = path.join(home, '.claude', 'state', 'si-events.db');
   if (!fs.existsSync(dbPath)) return [];
-  const Sqlite = require('better-sqlite3');
-  const db = new Sqlite(dbPath, { readonly: true });
+  const { db } = require('../lib/sqlite-driver').openDatabase(dbPath);
   try {
     return db.prepare('SELECT subagent_type, prompt_chars, response_chars, is_error FROM agent_invocations WHERE sid = ?').all(sid);
   } finally { db.close(); }
@@ -100,4 +100,66 @@ test('si-token-budget writes counters to ~/.claude/state, not tmp', () => {
       'tool-count file must land in ~/.claude/state',
     );
   } finally { cleanup(home); }
+});
+
+test('si-token-budget estimates tool I/O at 3 chars/token (3,000 chars => ceil(3000/3)+100)', () => {
+  const sid = 'sid-budget-3';
+  const { home, status } = runHook('si-token-budget.js', {
+    session_id: sid,
+    tool_name: 'Bash',
+    tool_output: 'x'.repeat(3000),
+    transcript_path: '',
+  });
+  try {
+    assert.equal(status, 0, 'hook exits 0');
+    const file = path.join(home, '.claude', 'state', `claude-token-budget-${sid}`);
+    assert.equal(parseInt(fs.readFileSync(file, 'utf8'), 10), 1100);
+  } finally { cleanup(home); }
+});
+
+test('si-token-budget emits no [TokenBudget] zone line even when the estimate crosses the old 200k yellow line', () => {
+  const sid = 'sid-budget-zone';
+  const { home, status, stderr } = runHook('si-token-budget.js', {
+    session_id: sid,
+    tool_name: 'Bash',
+    tool_output: 'x'.repeat(3000),
+    transcript_path: '',
+  }, (stateDir) => fs.writeFileSync(path.join(stateDir, `claude-token-budget-${sid}`), '199500'));
+  try {
+    assert.equal(status, 0);
+    assert.ok(!stderr.includes('[TokenBudget]'), `unexpected zone message: ${stderr}`);
+    const file = path.join(home, '.claude', 'state', `claude-token-budget-${sid}`);
+    assert.ok(parseInt(fs.readFileSync(file, 'utf8'), 10) > 200000, 'diagnostic file still written');
+  } finally { cleanup(home); }
+});
+
+function runBudget(home, sid, tool_name, tool_response) {
+  const payload = JSON.stringify({ session_id: sid, cwd: home, tool_name, tool_response });
+  const env = { ...process.env, HOME: home, CLAUDE_PLUGIN_ROOT: path.join(__dirname, '..') };
+  const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'hooks', 'si-token-budget.js')], { input: payload, env });
+  assert.equal(r.status, 0);
+  const state = path.join(home, '.claude', 'state');
+  const lines = fs.readFileSync(path.join(state, `claude-ctx-shape-${sid}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+  const budget = parseInt(fs.readFileSync(path.join(state, `claude-token-budget-${sid}`), 'utf8').trim(), 10);
+  return { last: lines[lines.length - 1], budget };
+}
+
+test('token-budget counts a Read tool_response by file.content, not the JSON wrapper', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-body-read-'));
+  try {
+    const { last, budget } = runBudget(home, 'sr', 'Read', {
+      type: 'text', file: { filePath: 'x', content: 'y'.repeat(30000), numLines: 1, startLine: 1, totalLines: 1 },
+    });
+    assert.equal(last.chars, 30000);
+    assert.equal(budget, 100 + Math.ceil(30000 / 3));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('token-budget counts a Bash tool_response by stdout only', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'si-body-bash-'));
+  try {
+    const { last, budget } = runBudget(home, 'sb', 'Bash', { stdout: 'z'.repeat(5000), stderr: 'e'.repeat(2000) });
+    assert.equal(last.chars, 5000);
+    assert.equal(budget, 100 + Math.ceil(5000 / 3));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

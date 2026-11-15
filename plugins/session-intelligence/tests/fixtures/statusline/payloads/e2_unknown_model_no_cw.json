@@ -1,0 +1,64 @@
+{
+ "cwd": "/Users/0xd/DWS/claude-session-intelligence",
+ "session_id": "333ad4d3-053f-4052-83dd-87c5d2e245f3",
+ "transcript_path": "/private/tmp/claude-501/-Users-0xd-DWS-claude-session-intelligence/333ad4d3-053f-4052-83dd-87c5d2e245f3/scratchpad/statusline-audit/home/.claude/projects/-Users-0xd-DWS-claude-session-intelligence/333ad4d3-053f-4052-83dd-87c5d2e245f3.jsonl",
+ "model": {
+  "id": "claude-zeta-7-20270101",
+  "display_name": "Zeta 7"
+ },
+ "workspace": {
+  "current_dir": "/Users/0xd/DWS/claude-session-intelligence",
+  "project_dir": "/Users/0xd/DWS/claude-session-intelligence",
+  "added_dirs": [],
+  "repo": {
+   "host": "github.com",
+   "owner": "dayakarreddyn",
+   "name": "claude-session-intelligence"
+  }
+ },
+ "version": "2.1.303",
+ "output_style": {
+  "name": "default"
+ },
+ "cost": {
+  "total_cost_usd": 119.45386819,
+  "total_duration_ms": 9600000,
+  "total_api_duration_ms": 3600000,
+  "total_lines_added": 3,
+  "total_lines_removed": 3
+ },
+ "exceeds_200k_tokens": true,
+ "prompt_cache": {
+  "warm": true,
+  "caching_observed": true,
+  "ttl": "1h",
+  "expires_at": 1792434723,
+  "requests": 68,
+  "misses": 2,
+  "expected_rebuilds": 0,
+  "hit_ratio": 0.98,
+  "cache_write_tokens": 428427,
+  "miss_recache_tokens": 0,
+  "last_miss_at": null,
+  "last_miss_cause": null,
+  "miss_causes": {},
+  "recache_tokens_if_cold": 461000
+ },
+ "fast_mode": false,
+ "effort": {
+  "level": "high"
+ },
+ "thinking": {
+  "enabled": true
+ },
+ "rate_limits": {
+  "five_hour": {
+   "used_percentage": 77,
+   "resets_at": 1792436223
+  },
+  "seven_day": {
+   "used_percentage": 20,
+   "resets_at": 1792953723
+  }
+ }
+}

@@ -545,7 +545,11 @@ if echo "$PREV_CMD" | grep -q "statusline-chain.sh"; then
   PREV_CMD="$(grep '^PREV_STATUSLINE=' "${SCRIPTS_DIR}/statusline-chain.sh" 2>/dev/null | head -1 | sed "s/^PREV_STATUSLINE=['\"]\(.*\)['\"]$/\1/")"
 fi
 
-cp "${PLUGIN_SRC}/statusline/statusline-intel.js" "${SCRIPTS_DIR}/statusline-intel.js"
+# The entry requires its sibling modules (lib-loader, format, ...) from the same
+# directory, so every statusline/*.js module must land next to it.
+for mod in "${PLUGIN_SRC}"/statusline/*.js; do
+  cp "$mod" "${SCRIPTS_DIR}/$(basename "$mod")"
+done
 chmod +x "${SCRIPTS_DIR}/statusline-intel.js"
 
 # Substitute __PREV_STATUSLINE__ with the detected command (or leave blank).

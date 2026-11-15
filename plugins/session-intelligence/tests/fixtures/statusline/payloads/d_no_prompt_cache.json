@@ -1,0 +1,61 @@
+{
+ "cwd": "/Users/0xd/DWS/claude-session-intelligence",
+ "session_id": "333ad4d3-053f-4052-83dd-87c5d2e245f3",
+ "transcript_path": "/private/tmp/claude-501/-Users-0xd-DWS-claude-session-intelligence/333ad4d3-053f-4052-83dd-87c5d2e245f3/scratchpad/statusline-audit/home/.claude/projects/-Users-0xd-DWS-claude-session-intelligence/333ad4d3-053f-4052-83dd-87c5d2e245f3.jsonl",
+ "model": {
+  "id": "claude-fable-5-1",
+  "display_name": "Fable 5.1"
+ },
+ "workspace": {
+  "current_dir": "/Users/0xd/DWS/claude-session-intelligence",
+  "project_dir": "/Users/0xd/DWS/claude-session-intelligence",
+  "added_dirs": [],
+  "repo": {
+   "host": "github.com",
+   "owner": "dayakarreddyn",
+   "name": "claude-session-intelligence"
+  }
+ },
+ "version": "2.1.303",
+ "output_style": {
+  "name": "default"
+ },
+ "cost": {
+  "total_cost_usd": 119.45386819,
+  "total_duration_ms": 9600000,
+  "total_api_duration_ms": 3600000,
+  "total_lines_added": 3,
+  "total_lines_removed": 3
+ },
+ "context_window": {
+  "total_input_tokens": 480000,
+  "total_output_tokens": 128,
+  "context_window_size": 1000000,
+  "used_percentage": 48,
+  "remaining_percentage": 52,
+  "current_usage": {
+   "input_tokens": 2000,
+   "output_tokens": 128,
+   "cache_creation_input_tokens": 8000,
+   "cache_read_input_tokens": 470000
+  }
+ },
+ "exceeds_200k_tokens": true,
+ "fast_mode": false,
+ "effort": {
+  "level": "high"
+ },
+ "thinking": {
+  "enabled": true
+ },
+ "rate_limits": {
+  "five_hour": {
+   "used_percentage": 77,
+   "resets_at": 1792436223
+  },
+  "seven_day": {
+   "used_percentage": 20,
+   "resets_at": 1792953723
+  }
+ }
+}
