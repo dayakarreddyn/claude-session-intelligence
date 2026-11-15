@@ -489,7 +489,14 @@ async function main() {
     // measured from "now," not from the high-water mark before /compact.
     // Also log the descent so operators can correlate compact events with
     // budget recovery in intel logs.
-    if (rank[zone] < rank[lastZone]) {
+    //
+    // A lower zone alone is not a descent: thresholds are learned per cwd, so
+    // hooks of one session running from two directories can disagree about the
+    // same token count. Re-arming on that disagreement re-emitted the callout
+    // on every tool call. Require the tokens themselves to have fallen.
+    const hasDropped = lastEmitTok <= 0
+      || tokenBudget <= lastEmitTok * (1 - REARM_DROP_FRACTION);
+    if (rank[zone] < rank[lastZone] && hasDropped) {
       try { writeFile(stateFile, JSON.stringify({ zone, tok: tokenBudget })); }
       catch { /* best effort */ }
       intelLog('suggest-compact', 'info', 'zone descended', {
@@ -500,6 +507,10 @@ async function main() {
 
   process.exit(0);
 }
+
+// Share of the last-emit token level the context must shed before a lower
+// zone counts as a real descent (a /compact), not a threshold disagreement.
+const REARM_DROP_FRACTION = 0.15;
 
 function getZone(tokens, zones) {
   const z = zones || { yellow: 200000, orange: 300000, red: 400000 };

@@ -282,3 +282,49 @@ test('callout keeps the plain count line below 3 large results', () => {
   assert.match(r.stderr, /2 tool results ≥20K tokens in the last 40 calls\./);
   assert.doesNotMatch(r.stderr, /Delegate the next wide read/);
 });
+
+// Zone thresholds are learned per cwd, so one session whose hooks run from two
+// directories can sit above yellow in one and below it in the other. The
+// descent branch must not re-arm on that disagreement, or every tool call
+// alternates "descended" / "crossing" and re-emits the callout.
+// Appends, like a real transcript: the usage reader resumes from a byte offset.
+function runAt(home, sid, contextTokens) {
+  const t = path.join(home, 'transcript.jsonl');
+  const line = usageLine('claude-opus-5-5', {
+    input_tokens: 10000, cache_creation_input_tokens: 0, cache_read_input_tokens: contextTokens - 10000, output_tokens: 50,
+  });
+  fs.appendFileSync(t, JSON.stringify(userLine) + '\n' + JSON.stringify(line) + '\n');
+  return runHook('si-suggest-compact.js',
+    { session_id: sid, transcript_path: t, cwd: home, tool_name: 'Read' }, { home });
+}
+
+test('a looser threshold at unchanged tokens does not re-arm the zone, so the callout fires once', () => {
+  const { home, state } = sandbox();
+  try {
+    const sid = 'sid-flap';
+    const cfgFile = path.join(home, '.claude', 'session-intelligence.json');
+    const stateFile = path.join(state, `claude-compact-state-${sid}`);
+
+    assert.equal(runAt(home, sid, 210000).status, 2); // yellow at the 200k default
+
+    fs.writeFileSync(cfgFile, JSON.stringify({ statusline: { zoneFractions: { yellow: 0.25 } } }));
+    assert.equal(runAt(home, sid, 210000).status, 0); // same tokens read as green here
+    assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).zone, 'yellow');
+
+    fs.rmSync(cfgFile);
+    const again = runAt(home, sid, 210000);
+    assert.equal(again.status, 0);
+    assert.equal(again.stderr.includes('[StrategicCompact]'), false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a real token drop re-arms the zone so the next crossing fires again', () => {
+  const { home, state } = sandbox();
+  try {
+    const sid = 'sid-rearm';
+    assert.equal(runAt(home, sid, 210000).status, 2);
+    assert.equal(runAt(home, sid, 60000).status, 0); // after /compact
+    assert.equal(JSON.parse(fs.readFileSync(path.join(state, `claude-compact-state-${sid}`), 'utf8')).zone, 'green');
+    assert.equal(runAt(home, sid, 210000).status, 2);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

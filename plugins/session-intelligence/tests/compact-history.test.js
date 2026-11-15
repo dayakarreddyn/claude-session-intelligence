@@ -64,7 +64,7 @@ test('adaptiveZones learns from fillPct x cap and ignores legacy cumulative entr
   assert.equal(z.p50Fill, 30);
   assert.equal(z.p90Fill, 40);
   assert.equal(z.orange, 270000);
-  assert.equal(z.yellow, 190000);
+  assert.equal(z.yellow, 200000); // orange - gap is 190k; the static yellow is the floor
   assert.equal(z.red, 440000);
   assert.equal('costTightened' in z, false);
 });
@@ -104,7 +104,7 @@ test('adaptiveZones scales the same fill history to a 200K cap', () => {
   const z = compactHistory.adaptiveZones(compactHistory.readHistory(),
     { yellow: 40000, orange: 60000, red: 80000 }, { cap: 200000 });
   assert.equal(z.orange, 54000);
-  assert.equal(z.yellow, 38000);
+  assert.equal(z.yellow, 40000);
   assert.equal(z.red, 88000);
 });
 

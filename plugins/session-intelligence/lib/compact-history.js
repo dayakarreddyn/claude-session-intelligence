@@ -256,8 +256,15 @@ function adaptiveZones(history, defaults, opts) {
     ),
   );
 
+  // Learning may move yellow later, never earlier than the static default: a
+  // caution well under 20% of the window reads as noise. Applied after the fit
+  // because the fit re-imposes the orange gap; yellow still stays below orange.
+  const fitted = fitZonesToCap({ yellow, orange, red }, cap);
+  const yellowFloor = Math.min(base.yellow, fitted.orange - 1);
+
   return {
-    ...fitZonesToCap({ yellow, orange, red }, cap),
+    ...fitted,
+    yellow: Math.max(fitted.yellow, yellowFloor),
     adaptive: true,
     bucket,
     sampleCount: p.count,
